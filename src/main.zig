@@ -19,7 +19,7 @@ pub fn main() !void {
             if (pid == 0) {
                 // Child process - daemonize
                 _ = posix.setsid() catch |e| {
-                    std.debug.print("setsid failed: {}\n", .{e});
+                    std.log.err("setsid failed: {}", .{e});
                     std.posix.exit(1);
                 };
 
@@ -41,7 +41,7 @@ pub fn main() !void {
                 return;
             } else {
                 // Parent process - wait for socket to appear
-                std.debug.print("Forked server with PID {}\n", .{pid});
+                std.log.info("Forked server with PID {}", .{pid});
                 var retries: u8 = 0;
                 while (retries < 10) : (retries += 1) {
                     std.Thread.sleep(50 * std.time.ns_per_ms);
@@ -54,7 +54,7 @@ pub fn main() !void {
         }
     };
 
-    std.debug.print("Connecting to server at {s}\n", .{socket_path});
+    std.log.info("Connecting to server at {s}", .{socket_path});
 
     var loop = try io.Loop.init(allocator);
     defer loop.deinit();
@@ -71,13 +71,13 @@ pub fn main() !void {
                 .socket => |fd| {
                     app.fd = fd;
                     app.connected = true;
-                    std.debug.print("Connected! fd={}\n", .{app.fd});
+                    std.log.info("Connected! fd={}", .{app.fd});
                 },
                 .err => |err| {
                     if (err == error.ConnectionRefused) {
                         app.connection_refused = true;
                     } else {
-                        std.debug.print("Connection failed: {}\n", .{err});
+                        std.log.err("Connection failed: {}", .{err});
                     }
                 },
                 else => unreachable,
@@ -97,14 +97,14 @@ pub fn main() !void {
 
     if (app.connection_refused) {
         // Stale socket - remove it and fork server
-        std.debug.print("Stale socket detected, removing and starting server\n", .{});
+        std.log.info("Stale socket detected, removing and starting server", .{});
         posix.unlink(socket_path) catch {};
 
         const pid = try posix.fork();
         if (pid == 0) {
             // Child process - daemonize
             _ = posix.setsid() catch |e| {
-                std.debug.print("setsid failed: {}\n", .{e});
+                std.log.err("setsid failed: {}", .{e});
                 std.posix.exit(1);
             };
 
@@ -126,7 +126,7 @@ pub fn main() !void {
             return;
         } else {
             // Parent process - wait for socket to appear then retry
-            std.debug.print("Forked server with PID {}\n", .{pid});
+            std.log.info("Forked server with PID {}", .{pid});
             var retries: u8 = 0;
             while (retries < 10) : (retries += 1) {
                 std.Thread.sleep(50 * std.time.ns_per_ms);
@@ -148,7 +148,7 @@ pub fn main() !void {
 
     if (app.connected) {
         defer posix.close(app.fd);
-        std.debug.print("Connection successful!\n", .{});
+        std.log.info("Connection successful!", .{});
     }
 }
 

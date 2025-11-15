@@ -82,7 +82,7 @@ const Server = struct {
                 }
             },
             .err => |err| {
-                std.debug.print("Accept error: {}\n", .{err});
+                std.log.err("Accept error: {}", .{err});
             },
             else => unreachable,
         }
