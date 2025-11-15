@@ -382,4 +382,5 @@ test "UnixSocketClient - connection refused" {
 test {
     _ = @import("io/mock.zig");
     _ = @import("server.zig");
+    _ = @import("msgpack.zig");
 }
