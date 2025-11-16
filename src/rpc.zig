@@ -69,99 +69,66 @@ pub const DecodeError = error{
 
 pub fn decodeMessage(allocator: Allocator, data: []const u8) DecodeError!Message {
     var decoder = msgpack.Decoder.init(allocator, data);
-    const value = try decoder.decode();
-    errdefer value.deinit(allocator);
 
-    if (value != .array) return error.NotAnArray;
-    const arr = value.array;
-    if (arr.len < 3) return error.InvalidArrayLength;
+    const len = try decoder.readArrayLen();
+    if (len < 3) return error.InvalidArrayLength;
 
-    // First element is message type
-    if (arr[0] != .unsigned and arr[0] != .integer) return error.NotAnInteger;
-    const msg_type_int: u8 = switch (arr[0]) {
-        .unsigned => |u| @intCast(u),
-        .integer => |i| @intCast(i),
-        else => unreachable,
-    };
+    const msg_type = try decoder.readInt();
 
-    const result = switch (msg_type_int) {
-        0 => blk: { // Request: [0, msgid, method, params]
-            if (arr.len != 4) return error.InvalidArrayLength;
+    switch (msg_type) {
+        0 => { // Request: [0, msgid, method, params]
+            if (len != 4) return error.InvalidArrayLength;
+            const msgid = @as(u32, @intCast(try decoder.readInt()));
+            const method = try decoder.readString();
+            errdefer allocator.free(method);
+            const params = try decoder.decode();
 
-            if (arr[1] != .unsigned and arr[1] != .integer) return error.NotAnInteger;
-            const msgid: u32 = switch (arr[1]) {
-                .unsigned => |u| @intCast(u),
-                .integer => |i| @intCast(i),
-                else => unreachable,
-            };
-
-            if (arr[2] != .string) return error.NotAString;
-            const method = try allocator.dupe(u8, arr[2].string);
-
-            break :blk Message{
+            return Message{
                 .request = .{
                     .msgid = msgid,
                     .method = method,
-                    .params = arr[3],
+                    .params = params,
                 },
             };
         },
-        1 => blk: { // Response: [1, msgid, error, result]
-            if (arr.len != 4) return error.InvalidArrayLength;
+        1 => { // Response: [1, msgid, error, result]
+            if (len != 4) return error.InvalidArrayLength;
+            const msgid = @as(u32, @intCast(try decoder.readInt()));
 
-            if (arr[1] != .unsigned and arr[1] != .integer) return error.NotAnInteger;
-            const msgid: u32 = switch (arr[1]) {
-                .unsigned => |u| @intCast(u),
-                .integer => |i| @intCast(i),
-                else => unreachable,
-            };
+            var err_val: ?msgpack.Value = null;
+            const byte = try decoder.peekByte();
+            if (byte == 0xc0) {
+                _ = try decoder.readByte(); // consume nil
+            } else {
+                err_val = try decoder.decode();
+            }
+            errdefer if (err_val) |e| e.deinit(allocator);
 
-            const err = if (arr[2] == .nil) null else arr[2];
+            const result = try decoder.decode();
 
-            break :blk Message{
+            return Message{
                 .response = .{
                     .msgid = msgid,
-                    .err = err,
-                    .result = arr[3],
+                    .err = err_val,
+                    .result = result,
                 },
             };
         },
-        2 => blk: { // Notification: [2, method, params]
-            if (arr.len != 3) return error.InvalidArrayLength;
+        2 => { // Notification: [2, method, params]
+            if (len != 3) return error.InvalidArrayLength;
+            const method = try decoder.readString();
+            errdefer allocator.free(method);
+            const params = try decoder.decode();
 
-            if (arr[1] != .string) return error.NotAString;
-            const method = try allocator.dupe(u8, arr[1].string);
-
-            break :blk Message{
+            return Message{
                 .notification = .{
                     .method = method,
-                    .params = arr[2],
+                    .params = params,
                 },
             };
         },
         else => return error.InvalidMessageType,
-    };
-
-    // Free the array container and non-extracted elements
-    for (arr, 0..) |item, i| {
-        switch (result) {
-            .request => {
-                // We duplicated arr[2] (method), keep arr[3] (params)
-                if (i != 3) item.deinit(allocator);
-            },
-            .response => {
-                // Keep arr[2] (error) and arr[3] (result)
-                if (i != 2 and i != 3) item.deinit(allocator);
-            },
-            .notification => {
-                // We duplicated arr[1] (method), keep arr[2] (params)
-                if (i != 2) item.deinit(allocator);
-            },
-        }
     }
-    allocator.free(arr);
-
-    return result;
 }
 
 const testing = std.testing;

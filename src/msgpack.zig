@@ -499,7 +499,388 @@ pub const Decoder = struct {
         };
     }
 
-    fn readByte(self: *Decoder) !u8 {
+    pub fn decodeTyped(self: *Decoder, comptime T: type) DecodeError!T {
+        if (T == Value) {
+            return self.decode();
+        }
+
+        const info = @typeInfo(T);
+        switch (info) {
+            .bool => {
+                const byte = try self.peekByte();
+                if (byte == 0xc2) {
+                    _ = try self.readByte();
+                    return false;
+                }
+                if (byte == 0xc3) {
+                    _ = try self.readByte();
+                    return true;
+                }
+                return error.InvalidFormat;
+            },
+            .int => {
+                const val = try self.readInt();
+                return std.math.cast(T, val) orelse error.IntegerOverflow;
+            },
+            .float => {
+                const val = try self.readFloat();
+                return @floatCast(val);
+            },
+            .optional => |opt| {
+                const byte = try self.peekByte();
+                if (byte == 0xc0) {
+                    _ = try self.readByte();
+                    return null;
+                }
+                return try self.decodeTyped(opt.child);
+            },
+            .@"enum" => {
+                // We assume enums are encoded as integers (their tag value)
+                // unless they are string-backed?
+                // For now let's support integer serialization for enums
+                const int_val = try self.readInt();
+                // We need to cast this back to the enum
+                // This checks if the integer is a valid tag
+                return std.meta.intToEnum(T, int_val) catch return error.InvalidFormat;
+            },
+            .pointer => |ptr| {
+                if (ptr.size == .slice) {
+                    if (ptr.child == u8) {
+                        // String
+                        return self.readString();
+                    } else {
+                        // Array
+                        const len = try self.readArrayLen();
+                        const slice = try self.allocator.alloc(ptr.child, len);
+                        errdefer self.allocator.free(slice);
+                        for (slice) |*item| {
+                            item.* = try self.decodeTyped(ptr.child);
+                        }
+                        return slice;
+                    }
+                }
+            },
+            .array => |arr| {
+                // Fixed size array
+                if (arr.child == u8) {
+                    // Fixed string? No, usually strings are slices.
+                    // But if it is [N]u8, it might be a string or byte array.
+                    // Let's treat as string for now if we can read enough bytes.
+                    const str = try self.readString();
+                    defer self.allocator.free(str);
+                    if (str.len != arr.len) return error.InvalidFormat;
+                    var result: T = undefined;
+                    @memcpy(&result, str);
+                    return result;
+                } else {
+                    const len = try self.readArrayLen();
+                    if (len != arr.len) return error.InvalidFormat;
+                    var result: T = undefined;
+                    for (&result) |*item| {
+                        item.* = try self.decodeTyped(arr.child);
+                    }
+                    return result;
+                }
+            },
+            .@"struct" => |s| {
+                // Check if it's a Map or Array on the wire
+                const byte = try self.peekByte();
+                if (isMap(byte)) {
+                    // Decode map into struct fields
+                    const len = try self.readMapLen();
+                    var result: T = undefined;
+
+                    // Initialize optional fields to null
+                    inline for (s.fields) |field| {
+                        if (@typeInfo(field.type) == .optional) {
+                            @field(result, field.name) = null;
+                        }
+                    }
+
+                    // We have to loop through the map entries
+                    var i: usize = 0;
+                    while (i < len) : (i += 1) {
+                        const key = try self.readString();
+                        defer self.allocator.free(key);
+
+                        var matched = false;
+                        inline for (s.fields) |field| {
+                            if (std.mem.eql(u8, key, field.name)) {
+                                @field(result, field.name) = try self.decodeTyped(field.type);
+                                matched = true;
+                                break; // Break inline loop? No, this is compile time unroll.
+                                // We need runtime logic.
+                            }
+                        }
+                        // To make this work at runtime with optimized search:
+                        // switch on string?
+                        if (!matched) {
+                            // Skip value
+                            const val = try self.decode(); // decode generic value
+                            val.deinit(self.allocator);
+                        }
+                    }
+                    return result;
+                } else if (isArray(byte)) {
+                    // Decode array into struct fields (positional)
+                    const len = try self.readArrayLen();
+                    // If tuple, we expect exact match or prefix?
+                    // Neovim often sends [type, msgid, method, params] which maps to a struct.
+                    // Let's assume if struct is a tuple, or just normal struct, we map fields in order.
+
+                    var result: T = undefined;
+                    var field_idx: usize = 0;
+                    inline for (s.fields) |field| {
+                        if (field_idx >= len) {
+                            // Missing fields. If optional, null. Else error.
+                            if (@typeInfo(field.type) == .optional) {
+                                @field(result, field.name) = null;
+                            } else {
+                                return error.InvalidFormat;
+                            }
+                        } else {
+                            @field(result, field.name) = try self.decodeTyped(field.type);
+                        }
+                        field_idx += 1;
+                    }
+                    // Consume remaining items if any?
+                    while (field_idx < len) : (field_idx += 1) {
+                        const val = try self.decode();
+                        val.deinit(self.allocator);
+                    }
+                    return result;
+                } else {
+                    return error.InvalidFormat;
+                }
+            },
+            else => @compileError("Unsupported type for msgpack decoding: " ++ @typeName(T)),
+        }
+    }
+
+    pub fn skipValue(self: *Decoder) DecodeError!void {
+        if (self.pos >= self.data.len) return error.UnexpectedEndOfInput;
+
+        const byte = self.data[self.pos];
+        self.pos += 1;
+
+        if (byte <= 0x7f) return;
+        if (byte >= 0xe0) return;
+        if (byte == 0xc0 or byte == 0xc2 or byte == 0xc3) return;
+
+        // Float/Int fixed size
+        if (byte == 0xcc or byte == 0xd0) {
+            self.pos += 1;
+            return;
+        }
+        if (byte == 0xcd or byte == 0xd1 or byte == 0xd4) {
+            self.pos += 2;
+            return;
+        }
+        if (byte == 0xce or byte == 0xd2 or byte == 0xca) {
+            self.pos += 4;
+            return;
+        }
+        if (byte == 0xcf or byte == 0xd3 or byte == 0xcb) {
+            self.pos += 8;
+            return;
+        }
+        if (byte == 0xd4) {
+            self.pos += 1;
+            return;
+        } // fixext1
+        if (byte == 0xd5) {
+            self.pos += 2;
+            return;
+        } // fixext2
+        if (byte == 0xd6) {
+            self.pos += 4;
+            return;
+        } // fixext4
+        if (byte == 0xd7) {
+            self.pos += 8;
+            return;
+        } // fixext8
+        if (byte == 0xd8) {
+            self.pos += 16;
+            return;
+        } // fixext16
+
+        // Str/Bin
+        if (byte >= 0xa0 and byte <= 0xbf) { // fixstr
+            const len = byte & 0x1f;
+            self.pos += len;
+            return;
+        }
+        if (byte == 0xd9 or byte == 0xc4) { // str8/bin8
+            if (self.pos >= self.data.len) return error.UnexpectedEndOfInput;
+            const len = self.data[self.pos];
+            self.pos += 1;
+            self.pos += len;
+            return;
+        }
+        if (byte == 0xda or byte == 0xc5) { // str16/bin16
+            const len = try self.readU16();
+            self.pos += len;
+            return;
+        }
+        if (byte == 0xdb or byte == 0xc6) { // str32/bin32
+            const len = try self.readU32();
+            self.pos += len;
+            return;
+        }
+
+        // Ext (variable)
+        if (byte == 0xc7) { // ext8
+            if (self.pos >= self.data.len) return error.UnexpectedEndOfInput;
+            const len = self.data[self.pos];
+            self.pos += 1;
+            self.pos += 1; // type
+            self.pos += len;
+            return;
+        }
+        if (byte == 0xc8) { // ext16
+            const len = try self.readU16();
+            self.pos += 1; // type
+            self.pos += len;
+            return;
+        }
+        if (byte == 0xc9) { // ext32
+            const len = try self.readU32();
+            self.pos += 1; // type
+            self.pos += len;
+            return;
+        }
+
+        // Array
+        if (byte >= 0x90 and byte <= 0x9f) { // fixarray
+            const len = byte & 0x0f;
+            var i: usize = 0;
+            while (i < len) : (i += 1) try self.skipValue();
+            return;
+        }
+        if (byte == 0xdc) { // array16
+            const len = try self.readU16();
+            var i: usize = 0;
+            while (i < len) : (i += 1) try self.skipValue();
+            return;
+        }
+        if (byte == 0xdd) { // array32
+            const len = try self.readU32();
+            var i: usize = 0;
+            while (i < len) : (i += 1) try self.skipValue();
+            return;
+        }
+
+        // Map
+        if (byte >= 0x80 and byte <= 0x8f) { // fixmap
+            const len = byte & 0x0f;
+            var i: usize = 0;
+            while (i < len * 2) : (i += 1) try self.skipValue();
+            return;
+        }
+        if (byte == 0xde) { // map16
+            const len = try self.readU16();
+            var i: usize = 0;
+            while (i < len * 2) : (i += 1) try self.skipValue();
+            return;
+        }
+        if (byte == 0xdf) { // map32
+            const len = try self.readU32();
+            var i: usize = 0;
+            while (i < len * 2) : (i += 1) try self.skipValue();
+            return;
+        }
+
+        return error.InvalidFormat;
+    }
+
+    pub fn peekByte(self: *Decoder) !u8 {
+        if (self.pos >= self.data.len) return error.UnexpectedEndOfInput;
+        return self.data[self.pos];
+    }
+
+    pub fn isMap(byte: u8) bool {
+        return (byte >= 0x80 and byte <= 0x8f) or byte == 0xde or byte == 0xdf;
+    }
+
+    pub fn isArray(byte: u8) bool {
+        return (byte >= 0x90 and byte <= 0x9f) or byte == 0xdc or byte == 0xdd;
+    }
+
+    pub fn readInt(self: *Decoder) !i64 {
+        const byte = try self.readByte();
+        if (byte <= 0x7f) {
+            return @intCast(byte);
+        } else if (byte >= 0xe0) {
+            return @intCast(@as(i8, @bitCast(byte)));
+        }
+
+        return switch (byte) {
+            0xcc => @intCast(try self.readByte()),
+            0xcd => @intCast(try self.readU16()),
+            0xce => @intCast(try self.readU32()),
+            0xcf => @intCast(try self.readU64()), // Might overflow i64 if huge unsigned
+            0xd0 => @intCast(try self.readI8()),
+            0xd1 => @intCast(try self.readI16()),
+            0xd2 => @intCast(try self.readI32()),
+            0xd3 => try self.readI64(),
+            else => error.InvalidFormat,
+        };
+    }
+
+    pub fn readFloat(self: *Decoder) !f64 {
+        const byte = try self.readByte();
+        return switch (byte) {
+            0xca => @floatCast(try self.readF32()),
+            0xcb => try self.readF64(),
+            else => error.InvalidFormat,
+        };
+    }
+
+    pub fn readString(self: *Decoder) ![]u8 {
+        const byte = try self.readByte();
+        var len: u64 = 0;
+        if (byte >= 0xa0 and byte <= 0xbf) {
+            len = byte & 0x1f;
+        } else if (byte == 0xd9) {
+            len = try self.readByte();
+        } else if (byte == 0xda) {
+            len = try self.readU16();
+        } else if (byte == 0xdb) {
+            len = try self.readU32();
+        } else {
+            return error.InvalidFormat;
+        }
+
+        const bytes = try self.readBytes(@intCast(len));
+        return self.allocator.dupe(u8, bytes);
+    }
+
+    pub fn readArrayLen(self: *Decoder) !usize {
+        const byte = try self.readByte();
+        if (byte >= 0x90 and byte <= 0x9f) {
+            return byte & 0x0f;
+        } else if (byte == 0xdc) {
+            return try self.readU16();
+        } else if (byte == 0xdd) {
+            return try self.readU32();
+        }
+        return error.InvalidFormat;
+    }
+
+    pub fn readMapLen(self: *Decoder) !usize {
+        const byte = try self.readByte();
+        if (byte >= 0x80 and byte <= 0x8f) {
+            return byte & 0x0f;
+        } else if (byte == 0xde) {
+            return try self.readU16();
+        } else if (byte == 0xdf) {
+            return try self.readU32();
+        }
+        return error.InvalidFormat;
+    }
+
+    pub fn readByte(self: *Decoder) !u8 {
         if (self.pos >= self.data.len) return error.UnexpectedEndOfInput;
         const byte = self.data[self.pos];
         self.pos += 1;
@@ -513,47 +894,47 @@ pub const Decoder = struct {
         return bytes;
     }
 
-    fn readU16(self: *Decoder) !u16 {
+    pub fn readU16(self: *Decoder) !u16 {
         const bytes = try self.readBytes(2);
         return std.mem.readInt(u16, bytes[0..2], .big);
     }
 
-    fn readU32(self: *Decoder) !u32 {
+    pub fn readU32(self: *Decoder) !u32 {
         const bytes = try self.readBytes(4);
         return std.mem.readInt(u32, bytes[0..4], .big);
     }
 
-    fn readU64(self: *Decoder) !u64 {
+    pub fn readU64(self: *Decoder) !u64 {
         const bytes = try self.readBytes(8);
         return std.mem.readInt(u64, bytes[0..8], .big);
     }
 
-    fn readI8(self: *Decoder) !i8 {
+    pub fn readI8(self: *Decoder) !i8 {
         return @bitCast(try self.readByte());
     }
 
-    fn readI16(self: *Decoder) !i16 {
+    pub fn readI16(self: *Decoder) !i16 {
         const bytes = try self.readBytes(2);
         return std.mem.readInt(i16, bytes[0..2], .big);
     }
 
-    fn readI32(self: *Decoder) !i32 {
+    pub fn readI32(self: *Decoder) !i32 {
         const bytes = try self.readBytes(4);
         return std.mem.readInt(i32, bytes[0..4], .big);
     }
 
-    fn readI64(self: *Decoder) !i64 {
+    pub fn readI64(self: *Decoder) !i64 {
         const bytes = try self.readBytes(8);
         return std.mem.readInt(i64, bytes[0..8], .big);
     }
 
-    fn readF32(self: *Decoder) !f32 {
+    pub fn readF32(self: *Decoder) !f32 {
         const bytes = try self.readBytes(4);
         const bits = std.mem.readInt(u32, bytes[0..4], .big);
         return @bitCast(bits);
     }
 
-    fn readF64(self: *Decoder) !f64 {
+    pub fn readF64(self: *Decoder) !f64 {
         const bytes = try self.readBytes(8);
         const bits = std.mem.readInt(u64, bytes[0..8], .big);
         return @bitCast(bits);
@@ -619,6 +1000,52 @@ pub const Decoder = struct {
 pub fn decode(allocator: Allocator, data: []const u8) !Value {
     var decoder = Decoder.init(allocator, data);
     return decoder.decode();
+}
+
+pub fn decodeTyped(allocator: Allocator, data: []const u8, comptime T: type) !T {
+    var decoder = Decoder.init(allocator, data);
+    return decoder.decodeTyped(T);
+}
+
+test "decode typed int" {
+    const data = [_]u8{42};
+    const val = try decodeTyped(testing.allocator, &data, u32);
+    try testing.expectEqual(@as(u32, 42), val);
+}
+
+test "decode typed struct from array" {
+    // [10, 20] -> struct { x: u32, y: u32 }
+    const data = [_]u8{ 0x92, 10, 20 };
+    const Point = struct { x: u32, y: u32 };
+    const p = try decodeTyped(testing.allocator, &data, Point);
+    try testing.expectEqual(@as(u32, 10), p.x);
+    try testing.expectEqual(@as(u32, 20), p.y);
+}
+
+test "decode typed struct from map" {
+    var map_items = [_]Value.KeyValue{
+        .{ .key = .{ .string = "x" }, .value = .{ .unsigned = 10 } },
+        .{ .key = .{ .string = "y" }, .value = .{ .unsigned = 20 } },
+    };
+    const val = Value{ .map = &map_items };
+    const data = try encodeFromValue(testing.allocator, val);
+    defer testing.allocator.free(data);
+
+    const Point = struct { x: u32, y: u32 };
+    const p = try decodeTyped(testing.allocator, data, Point);
+    try testing.expectEqual(@as(u32, 10), p.x);
+    try testing.expectEqual(@as(u32, 20), p.y);
+}
+
+test "decode typed mixed" {
+    const Msg = struct { id: u32, val: Value };
+    // [1, "hello"]
+    const data = [_]u8{ 0x92, 1, 0xa5, 'h', 'e', 'l', 'l', 'o' };
+    const msg = try decodeTyped(testing.allocator, &data, Msg);
+    defer msg.val.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(u32, 1), msg.id);
+    try testing.expectEqualStrings("hello", msg.val.string);
 }
 
 test "decode nil" {
