@@ -225,9 +225,8 @@ const ScreenState = struct {
     cursor_shape: redraw.UIEvent.CursorShape.Shape,
     rows_data: []DirtyRow,
     styles: []const redraw.UIEvent.Style,
-    allocator: std.mem.Allocator,
     viewport: ghostty_vt.Pin,
-    text_arena: std.heap.ArenaAllocator,
+    arena: std.heap.ArenaAllocator,
 
     pub const RenderMode = enum { full, incremental };
 
@@ -296,16 +295,16 @@ const ScreenState = struct {
         const rows = screen.pages.rows;
         const cols = screen.pages.cols;
 
-        var text_arena = std.heap.ArenaAllocator.init(allocator);
-        errdefer text_arena.deinit();
-        const arena_allocator = text_arena.allocator();
+        var arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer arena.deinit();
+        const arena_allocator = arena.allocator();
 
         var styles_list = std.ArrayList(redraw.UIEvent.Style).empty;
-        errdefer styles_list.deinit(allocator);
+        // no errdefer needed as arena handles cleanup
 
         // Map from style hash to our style ID for deduplication within this frame
-        var styles_map = std.AutoHashMap(u64, u32).init(allocator);
-        defer styles_map.deinit();
+        var styles_map = std.AutoHashMap(u64, u32).init(arena_allocator);
+        // no defer needed as arena handles cleanup
 
         // Ensure default style is ID 0
         const StyleKey = struct { style: ghostty_vt.Style, selected: bool };
@@ -318,22 +317,20 @@ const ScreenState = struct {
         const default_key = StyleKey{ .style = default_style, .selected = false };
         const default_hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&default_key));
         try styles_map.put(default_hash, 0);
-        try styles_list.append(allocator, .{ .id = 0, .attrs = .{} });
+        try styles_list.append(arena_allocator, .{ .id = 0, .attrs = .{} });
         var next_style_id: u32 = 1;
 
         var rows_data = std.ArrayList(DirtyRow).empty;
-        errdefer {
-            for (rows_data.items) |row| {
-                allocator.free(row.cells);
-            }
-            rows_data.deinit(allocator);
-        }
+        // no errdefer needed as arena handles cleanup
 
         var utf8_buf: [4]u8 = undefined;
         var grapheme_buf: [32]u21 = undefined;
 
         var time_style_ops: i128 = 0;
         var time_text_ops: i128 = 0;
+
+        var last_style_key: ?StyleKey = null;
+        var last_style_id: u32 = 0;
 
         // Iterate over the viewport
         var row_it = screen.pages.rowIterator(.right_down, .{ .viewport = .{} }, null);
@@ -348,8 +345,8 @@ const ScreenState = struct {
             if (effective_mode == .incremental and !row.isDirty()) continue;
             dirty_row_count += 1;
 
-            var cells = try allocator.alloc(CellData, cols);
-            errdefer allocator.free(cells);
+            var cells = try arena_allocator.alloc(CellData, cols);
+            // no errdefer needed as arena handles cleanup
 
             const row_cells = row.cells(.all);
             // If row_cells is smaller than cols, we pad with empty cells?
@@ -396,19 +393,42 @@ const ScreenState = struct {
 
                 // Hash the style + selected flag together
                 const style_key = StyleKey{ .style = vt_style, .selected = selected };
-                const style_hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&style_key));
 
-                // Get or create style ID using style hash as key
-                const style_id = if (styles_map.get(style_hash)) |id|
-                    id
-                else id: {
-                    const id = next_style_id;
-                    next_style_id += 1;
-                    const attrs = getStyleAttributes(vt_style, selected);
-                    try styles_map.put(style_hash, id);
-                    try styles_list.append(allocator, .{ .id = id, .attrs = attrs });
-                    break :id id;
-                };
+                // Optimization: check if it's the same as the last one
+                var style_id: u32 = 0;
+
+                if (last_style_key) |last| {
+                    // Manual equality check for StyleKey since it has padding
+                    const style_eq = std.meta.eql(last.style, style_key.style);
+                    if (style_eq and last.selected == style_key.selected) {
+                        style_id = last_style_id;
+                    }
+                }
+
+                if (style_id == 0 and !(last_style_key != null and last_style_id == 0)) {
+                    // Not cached or cached as 0 (which is default, so we still need to verify if it's truly default or new)
+                    // Actually if it was cached as 0, and matched, we would have broken out above.
+                    // But wait, initial last_style_id is 0.
+                    // Let's just do standard hash lookup if we didn't match last_style_key.
+
+                    const style_hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&style_key));
+
+                    // Get or create style ID using style hash as key
+                    style_id = if (styles_map.get(style_hash)) |id|
+                        id
+                    else id: {
+                        const id = next_style_id;
+                        next_style_id += 1;
+                        const attrs = getStyleAttributes(vt_style, selected);
+                        try styles_map.put(style_hash, id);
+                        try styles_list.append(arena_allocator, .{ .id = id, .attrs = attrs });
+                        break :id id;
+                    };
+
+                    // Update cache
+                    last_style_key = style_key;
+                    last_style_id = style_id;
+                }
 
                 const ts1 = std.time.nanoTimestamp();
                 time_style_ops += ts1 - ts0;
@@ -467,7 +487,7 @@ const ScreenState = struct {
                 };
             }
 
-            try rows_data.append(allocator, .{ .y = y, .cells = cells });
+            try rows_data.append(arena_allocator, .{ .y = y, .cells = cells });
         }
 
         const t3 = std.time.nanoTimestamp();
@@ -493,21 +513,15 @@ const ScreenState = struct {
             .cursor_y = screen.cursor.y,
             .cursor_visible = terminal.modes.get(.cursor_visible),
             .cursor_shape = cursor_shape,
-            .rows_data = try rows_data.toOwnedSlice(allocator),
-            .styles = try styles_list.toOwnedSlice(allocator),
-            .allocator = allocator,
+            .rows_data = try rows_data.toOwnedSlice(arena_allocator),
+            .styles = try styles_list.toOwnedSlice(arena_allocator),
             .viewport = current_viewport,
-            .text_arena = text_arena,
+            .arena = arena,
         };
     }
 
     fn deinit(self: *ScreenState) void {
-        self.allocator.free(self.styles);
-        for (self.rows_data) |row| {
-            self.allocator.free(row.cells);
-        }
-        self.allocator.free(self.rows_data);
-        self.text_arena.deinit();
+        self.arena.deinit();
     }
 };
 
@@ -1367,7 +1381,7 @@ const Server = struct {
                 }
 
                 const now = std.time.milliTimestamp();
-                const FRAME_TIME = 16;
+                const FRAME_TIME = 8;
 
                 if (now - pty_instance.last_render_time >= FRAME_TIME) {
                     server.renderFrame(pty_instance);
@@ -1821,8 +1835,8 @@ test "buildRedrawMessage" {
         .cursor_shape = .block,
         .rows_data = rows_data.items,
         .styles = styles_list.items,
-        .allocator = testing.allocator,
         .viewport = undefined,
+        .arena = undefined,
     };
 
     const msg = try Server.buildRedrawMessage(testing.allocator, 1, &state, .full);

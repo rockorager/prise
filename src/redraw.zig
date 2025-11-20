@@ -358,7 +358,7 @@ pub const RedrawBuilder = struct {
         const notification = try arena.alloc(msgpack.Value, 3);
         notification[0] = msgpack.Value{ .unsigned = 2 }; // type = notification
         notification[1] = msgpack.Value{ .string = try arena.dupe(u8, "redraw") };
-        notification[2] = msgpack.Value{ .array = try self.events.toOwnedSlice(self.allocator) };
+        notification[2] = msgpack.Value{ .array = self.events.items };
 
         const value = msgpack.Value{ .array = notification };
         // Don't call deinit - arena cleanup handles it
