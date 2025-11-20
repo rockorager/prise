@@ -227,6 +227,7 @@ const ScreenState = struct {
     styles: []const redraw.UIEvent.Style,
     allocator: std.mem.Allocator,
     viewport: ghostty_vt.Pin,
+    text_arena: std.heap.ArenaAllocator,
 
     pub const RenderMode = enum { full, incremental };
 
@@ -248,11 +249,15 @@ const ScreenState = struct {
         mode: RenderMode,
         last_viewport: ?ghostty_vt.Pin,
     ) !ScreenState {
+        const t0 = std.time.nanoTimestamp();
+
         mutex.lock();
         errdefer mutex.unlock();
 
         // Snapshot the screen state so we can iterate without holding the lock
         var screen = try terminal.screens.active.clone(allocator, .{ .viewport = .{} }, null);
+
+        const t1 = std.time.nanoTimestamp();
 
         // Get current viewport pin from live terminal
         // We expect this to always return a valid pin
@@ -284,29 +289,41 @@ const ScreenState = struct {
         }
 
         mutex.unlock();
+
+        const t2 = std.time.nanoTimestamp();
         defer screen.deinit();
 
         const rows = screen.pages.rows;
         const cols = screen.pages.cols;
 
+        var text_arena = std.heap.ArenaAllocator.init(allocator);
+        errdefer text_arena.deinit();
+        const arena_allocator = text_arena.allocator();
+
         var styles_list = std.ArrayList(redraw.UIEvent.Style).empty;
         errdefer styles_list.deinit(allocator);
 
-        // Map from attributes to style ID for deduplication within this frame
-        var styles_map = std.AutoHashMap(redraw.UIEvent.Style.Attributes, u32).init(allocator);
+        // Map from style hash to our style ID for deduplication within this frame
+        var styles_map = std.AutoHashMap(u64, u32).init(allocator);
         defer styles_map.deinit();
 
         // Ensure default style is ID 0
-        try styles_map.put(.{}, 0);
+        const StyleKey = struct { style: ghostty_vt.Style, selected: bool };
+        const default_style = ghostty_vt.Style{
+            .fg_color = .none,
+            .bg_color = .none,
+            .underline_color = .none,
+            .flags = .{},
+        };
+        const default_key = StyleKey{ .style = default_style, .selected = false };
+        const default_hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&default_key));
+        try styles_map.put(default_hash, 0);
         try styles_list.append(allocator, .{ .id = 0, .attrs = .{} });
         var next_style_id: u32 = 1;
 
         var rows_data = std.ArrayList(DirtyRow).empty;
         errdefer {
             for (rows_data.items) |row| {
-                for (row.cells) |cell| {
-                    allocator.free(cell.text);
-                }
                 allocator.free(row.cells);
             }
             rows_data.deinit(allocator);
@@ -315,9 +332,13 @@ const ScreenState = struct {
         var utf8_buf: [4]u8 = undefined;
         var grapheme_buf: [32]u21 = undefined;
 
+        var time_style_ops: i128 = 0;
+        var time_text_ops: i128 = 0;
+
         // Iterate over the viewport
         var row_it = screen.pages.rowIterator(.right_down, .{ .viewport = .{} }, null);
         var y: usize = 0;
+        var dirty_row_count: usize = 0;
 
         while (row_it.next()) |row| : (y += 1) {
             // If our viewport is smaller than the pages rows (can happen?), stop.
@@ -325,6 +346,7 @@ const ScreenState = struct {
 
             // If incremental, skip non-dirty rows
             if (effective_mode == .incremental and !row.isDirty()) continue;
+            dirty_row_count += 1;
 
             var cells = try allocator.alloc(CellData, cols);
             errdefer allocator.free(cells);
@@ -341,7 +363,7 @@ const ScreenState = struct {
                 // Skip spacer tails
                 if (cell.wide == .spacer_tail) {
                     cells[x] = .{
-                        .text = try allocator.dupe(u8, ""),
+                        .text = try arena_allocator.dupe(u8, ""),
                         .style_id = 0,
                         .wide = false,
                     };
@@ -354,35 +376,47 @@ const ScreenState = struct {
                 else
                     false;
 
-                var attrs = getStyleAttributes(row.style(cell), selected);
+                const ts0 = std.time.nanoTimestamp();
+
+                // Get ghostty style for this cell
+                var vt_style = row.style(cell);
 
                 // Handle direct color cells (bg_color_rgb / bg_color_palette)
                 var text: []const u8 = "";
                 var is_direct_color = false;
 
-                if (cell.content_tag == .bg_color_rgb or cell.content_tag == .bg_color_palette) {
-                    if (cell.content_tag == .bg_color_rgb) {
-                        const rgb = cell.content.color_rgb;
-                        attrs.bg = (@as(u32, rgb.r) << 16) | (@as(u32, rgb.g) << 8) | @as(u32, rgb.b);
-                    } else {
-                        attrs.bg_idx = cell.content.color_palette;
-                    }
+                if (cell.content_tag == .bg_color_rgb) {
+                    const cell_rgb = cell.content.color_rgb;
+                    vt_style.bg_color = .{ .rgb = .{ .r = cell_rgb.r, .g = cell_rgb.g, .b = cell_rgb.b } };
+                    is_direct_color = true;
+                } else if (cell.content_tag == .bg_color_palette) {
+                    vt_style.bg_color = .{ .palette = cell.content.color_palette };
                     is_direct_color = true;
                 }
 
-                // Get or create style ID
-                const style_id = if (styles_map.get(attrs)) |id|
+                // Hash the style + selected flag together
+                const style_key = StyleKey{ .style = vt_style, .selected = selected };
+                const style_hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&style_key));
+
+                // Get or create style ID using style hash as key
+                const style_id = if (styles_map.get(style_hash)) |id|
                     id
                 else id: {
                     const id = next_style_id;
                     next_style_id += 1;
-                    try styles_map.put(attrs, id);
+                    const attrs = getStyleAttributes(vt_style, selected);
+                    try styles_map.put(style_hash, id);
                     try styles_list.append(allocator, .{ .id = id, .attrs = attrs });
                     break :id id;
                 };
 
+                const ts1 = std.time.nanoTimestamp();
+                time_style_ops += ts1 - ts0;
+
+                const tt0 = std.time.nanoTimestamp();
+
                 if (is_direct_color) {
-                    text = try allocator.dupe(u8, " ");
+                    text = try arena_allocator.dupe(u8, " ");
                 } else {
                     var cluster: []const u21 = &[_]u21{};
 
@@ -412,16 +446,19 @@ const ScreenState = struct {
 
                     if (cluster.len > 0) {
                         var utf8_list = std.ArrayList(u8).empty;
-                        defer utf8_list.deinit(allocator);
+                        defer utf8_list.deinit(arena_allocator);
                         for (cluster) |cp| {
                             const len = std.unicode.utf8Encode(cp, &utf8_buf) catch continue;
-                            try utf8_list.appendSlice(allocator, utf8_buf[0..len]);
+                            try utf8_list.appendSlice(arena_allocator, utf8_buf[0..len]);
                         }
-                        text = try utf8_list.toOwnedSlice(allocator);
+                        text = try utf8_list.toOwnedSlice(arena_allocator);
                     } else {
-                        text = try allocator.dupe(u8, " ");
+                        text = try arena_allocator.dupe(u8, " ");
                     }
                 }
+
+                const tt1 = std.time.nanoTimestamp();
+                time_text_ops += tt1 - tt0;
 
                 cells[x] = .{
                     .text = text,
@@ -433,11 +470,21 @@ const ScreenState = struct {
             try rows_data.append(allocator, .{ .y = y, .cells = cells });
         }
 
+        const t3 = std.time.nanoTimestamp();
+
         const cursor_shape: redraw.UIEvent.CursorShape.Shape = switch (screen.cursor.cursor_style) {
             .block, .block_hollow => .block,
             .bar => .beam,
             .underline => .underline,
         };
+
+        const clone_us = @divTrunc(t1 - t0, std.time.ns_per_us);
+        const clear_us = @divTrunc(t2 - t1, std.time.ns_per_us);
+        const iterate_us = @divTrunc(t3 - t2, std.time.ns_per_us);
+        const style_us = @divTrunc(time_style_ops, std.time.ns_per_us);
+        const text_us = @divTrunc(time_text_ops, std.time.ns_per_us);
+
+        std.log.info("ScreenState.init: mode={s} dirty_rows={}/{} clone={}us clear={}us iterate={}us (style={}us text={}us)", .{ if (effective_mode == .full) "full" else "incremental", dirty_row_count, rows, clone_us, clear_us, iterate_us, style_us, text_us });
 
         return .{
             .rows = rows,
@@ -450,18 +497,17 @@ const ScreenState = struct {
             .styles = try styles_list.toOwnedSlice(allocator),
             .allocator = allocator,
             .viewport = current_viewport,
+            .text_arena = text_arena,
         };
     }
 
     fn deinit(self: *ScreenState) void {
         self.allocator.free(self.styles);
         for (self.rows_data) |row| {
-            for (row.cells) |cell| {
-                self.allocator.free(cell.text);
-            }
             self.allocator.free(row.cells);
         }
         self.allocator.free(self.rows_data);
+        self.text_arena.deinit();
     }
 };
 
@@ -1256,6 +1302,8 @@ const Server = struct {
     }
 
     fn renderFrame(self: *Server, pty_instance: *Pty) void {
+        const start_time = std.time.nanoTimestamp();
+
         // Copy screen state under mutex
         var state = ScreenState.init(
             self.allocator,
@@ -1269,6 +1317,11 @@ const Server = struct {
         };
         defer state.deinit();
 
+        const capture_time = std.time.nanoTimestamp();
+
+        // Determine mode from state (ScreenState.init can change mode from incremental to full)
+        const mode_str = if (state.rows_data.len == state.rows) "full" else "incremental";
+
         // Update total rows
         pty_instance.last_viewport = state.viewport;
 
@@ -1276,6 +1329,13 @@ const Server = struct {
         self.sendRedraw(self.loop, pty_instance, &state, null, .incremental) catch |err| {
             std.log.err("Failed to send redraw for session {}: {}", .{ pty_instance.id, err });
         };
+
+        const end_time = std.time.nanoTimestamp();
+        const capture_us = @divTrunc(capture_time - start_time, std.time.ns_per_us);
+        const serialize_us = @divTrunc(end_time - capture_time, std.time.ns_per_us);
+        const total_us = @divTrunc(end_time - start_time, std.time.ns_per_us);
+
+        std.log.info("renderFrame: mode={s} capture={}us serialize={}us total={}us", .{ mode_str, capture_us, serialize_us, total_us });
 
         // Update timestamp
         pty_instance.last_render_time = std.time.milliTimestamp();
@@ -1307,7 +1367,7 @@ const Server = struct {
                 }
 
                 const now = std.time.milliTimestamp();
-                const FRAME_TIME = 8;
+                const FRAME_TIME = 16;
 
                 if (now - pty_instance.last_render_time >= FRAME_TIME) {
                     server.renderFrame(pty_instance);

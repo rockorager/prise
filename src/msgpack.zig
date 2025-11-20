@@ -970,7 +970,6 @@ pub const Decoder = struct {
 
     fn decodeMapWithLen(self: *Decoder, len: u64) !Value {
         const map = try self.allocator.alloc(Value.KeyValue, @intCast(len));
-        errdefer self.allocator.free(map);
 
         for (map, 0..) |*kv, i| {
             kv.key = self.decode() catch |err| {

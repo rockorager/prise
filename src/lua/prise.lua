@@ -1,9 +1,9 @@
 local M = {}
 
-function M.Surface(pty_id)
+function M.Surface(opts)
     return {
         type = "surface",
-        pty = pty_id,
+        pty = opts.pty,
     }
 end
 

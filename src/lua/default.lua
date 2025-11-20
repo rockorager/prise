@@ -14,10 +14,10 @@ end
 
 function M.view()
     if state.pty then
-        return prise.Surface(state.pty)
+        return prise.Surface({ pty = state.pty })
     end
 
-    return prise.Surface(1)
+    return prise.Surface({ pty = 1 })
 end
 
 return M

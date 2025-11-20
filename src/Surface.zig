@@ -60,6 +60,8 @@ pub fn resize(self: *Surface, rows: u16, cols: u16) !void {
 }
 
 pub fn applyRedraw(self: *Surface, params: msgpack.Value) !void {
+    const start_time = std.time.nanoTimestamp();
+
     if (params != .array) return error.InvalidRedrawParams;
 
     std.log.debug("applyRedraw: received params with {} events", .{params.array.len});
@@ -335,7 +337,10 @@ pub fn applyRedraw(self: *Surface, params: msgpack.Value) !void {
         }
     }
 
-    std.log.debug("applyRedraw: updated {} rows", .{rows_updated.items.len});
+    const end_time = std.time.nanoTimestamp();
+    const deserialize_us = @divTrunc(end_time - start_time, std.time.ns_per_us);
+
+    std.log.info("applyRedraw: updated {} rows deserialize={}us", .{ rows_updated.items.len, deserialize_us });
 }
 
 pub fn render(self: *Surface, win: vaxis.Window) void {
