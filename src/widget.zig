@@ -124,8 +124,33 @@ pub const Widget = struct {
                 // Final pass: Position children
                 var current_y: u16 = 0;
                 for (col.children) |*child| {
-                    child.x = 0;
                     child.y = current_y;
+
+                    switch (col.cross_axis_align) {
+                        .start => {
+                            child.x = 0;
+                            // Keep intrinsic width
+                        },
+                        .center => {
+                            if (width > child.width) {
+                                child.x = (width - child.width) / 2;
+                            } else {
+                                child.x = 0;
+                            }
+                        },
+                        .end => {
+                            if (width > child.width) {
+                                child.x = width - child.width;
+                            } else {
+                                child.x = 0;
+                            }
+                        },
+                        .stretch => {
+                            child.x = 0;
+                            child.width = width;
+                        },
+                    }
+
                     current_y += child.height;
                 }
 
@@ -194,8 +219,16 @@ pub const WidgetKind = union(enum) {
     column: Column,
 };
 
+pub const CrossAxisAlignment = enum {
+    start,
+    center,
+    end,
+    stretch,
+};
+
 pub const Column = struct {
     children: []Widget,
+    cross_axis_align: CrossAxisAlignment = .center,
 };
 
 pub const Surface = struct {
@@ -458,7 +491,21 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
         }
         lua.pop(1); // children
 
-        return .{ .flex = flex, .kind = .{ .column = .{ .children = try children.toOwnedSlice(allocator) } } };
+        var cross_align: CrossAxisAlignment = .center;
+        _ = lua.getField(index, "cross_axis_align");
+        if (lua.typeOf(-1) == .string) {
+            const s = try lua.toString(-1);
+            if (std.mem.eql(u8, s, "start")) cross_align = .start;
+            if (std.mem.eql(u8, s, "center")) cross_align = .center;
+            if (std.mem.eql(u8, s, "end")) cross_align = .end;
+            if (std.mem.eql(u8, s, "stretch")) cross_align = .stretch;
+        }
+        lua.pop(1);
+
+        return .{ .flex = flex, .kind = .{ .column = .{
+            .children = try children.toOwnedSlice(allocator),
+            .cross_axis_align = cross_align,
+        } } };
     } else if (std.mem.eql(u8, widget_type, "text")) {
         _ = lua.getField(index, "content");
         if (lua.typeOf(-1) != .table) {
@@ -706,6 +753,49 @@ test "Column Layout - Flex" {
     allocator.free(children[0].kind.text.spans);
 }
 
+test "Column Layout - Stretch Width" {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    // Child 1: Text "Small"
+    var child1 = Widget{
+        .kind = .{ .text = .{ .spans = try allocator.dupe(Text.Span, &.{.{ .text = "Small", .style = .{} }}) } },
+        .flex = 0,
+    };
+    child1.kind.text.spans[0].text = try allocator.dupe(u8, "Small");
+
+    // Child 2: Surface (Full Width)
+    const child2 = Widget{
+        .kind = .{ .surface = .{ .pty_id = 1 } },
+        .flex = 1,
+    };
+
+    var children = [_]Widget{ child1, child2 };
+    var col = Widget{
+        .kind = .{ .column = .{ .children = &children, .cross_axis_align = .stretch } },
+    };
+
+    const constraints = BoxConstraints{
+        .min_width = 0,
+        .max_width = 100,
+        .min_height = 0,
+        .max_height = 20,
+    };
+
+    const size = col.layout(constraints);
+
+    try testing.expectEqual(@as(u16, 100), size.width);
+
+    // Child 2 should be 100 wide
+    try testing.expectEqual(@as(u16, 100), children[1].width);
+
+    // Child 1 should ALSO be 100 wide (stretched)
+    try testing.expectEqual(@as(u16, 100), children[0].width);
+
+    allocator.free(children[0].kind.text.spans[0].text);
+    allocator.free(children[0].kind.text.spans);
+}
+
 test "parseWidget - text" {
     const testing = std.testing;
     const allocator = testing.allocator;
@@ -795,6 +885,23 @@ test "parseWidget - column" {
     try testing.expectEqual(std.meta.Tag(WidgetKind).column, std.meta.activeTag(w.kind));
     try testing.expectEqual(@as(usize, 2), w.kind.column.children.len);
     try testing.expectEqualStrings("Child 1", w.kind.column.children[0].kind.text.spans[0].text);
+
+    // Default alignment
+    try testing.expectEqual(CrossAxisAlignment.center, w.kind.column.cross_axis_align);
+
+    // Test explicit alignment
+    lua.createTable(0, 2);
+    _ = lua.pushString("column");
+    lua.setField(-2, "type");
+    lua.createTable(0, 0);
+    lua.setField(-2, "children");
+    _ = lua.pushString("stretch");
+    lua.setField(-2, "cross_axis_align");
+
+    var w2 = try parseWidget(lua, allocator, -1);
+    defer w2.deinit(allocator);
+
+    try testing.expectEqual(CrossAxisAlignment.stretch, w2.kind.column.cross_axis_align);
 }
 
 test "Text Iterator" {

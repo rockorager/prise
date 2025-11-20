@@ -21,11 +21,14 @@ function M.view()
     end
 
     return prise.Column({
-        main_view,
-        prise.Text({
-            text = " Prise Terminal ",
-            style = { bg = "white", fg = "black" },
-        }),
+        cross_axis_align = "stretch",
+        children = {
+            main_view,
+            prise.Text({
+                text = " Prise Terminal ",
+                style = { bg = "white", fg = "black" },
+            }),
+        },
     })
 end
 

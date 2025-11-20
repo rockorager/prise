@@ -38,10 +38,19 @@ function M.Text(opts)
 end
 
 function M.Column(opts)
+    -- If opts is an array (has numeric keys), it's just the children
+    if opts[1] then
+        return {
+            type = "column",
+            children = opts,
+        }
+    end
+
     return {
         type = "column",
         children = opts.children or opts,
         flex = opts.flex,
+        cross_axis_align = opts.cross_axis_align,
     }
 end
 

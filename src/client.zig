@@ -812,6 +812,20 @@ pub const App = struct {
                         _ = win.printSegment(seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
                         col += vaxis.gwidth.gwidth(seg.text, .unicode);
                     }
+
+                    // Fill remaining space with background from last segment
+                    if (line.segments.len > 0 and col < w.width) {
+                        const last_style = line.segments[line.segments.len - 1].style;
+                        const spacer = vaxis.Segment{
+                            .text = " ",
+                            .style = last_style,
+                        };
+                        while (col < w.width) {
+                            _ = win.printSegment(spacer, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
+                            col += 1;
+                        }
+                    }
+
                     row += 1;
                 }
             },
