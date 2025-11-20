@@ -1,13 +1,21 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const io = @import("io.zig");
 const server = @import("server.zig");
 const client = @import("client.zig");
 const posix = std.posix;
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    var debug_allocator: std.heap.DebugAllocator(.{}) = .init;
+    const allocator, const is_debug = gpa: {
+        break :gpa switch (builtin.mode) {
+            .Debug, .ReleaseSafe => .{ debug_allocator.allocator(), true },
+            .ReleaseFast, .ReleaseSmall => .{ std.heap.smp_allocator, false },
+        };
+    };
+    defer if (is_debug) {
+        _ = debug_allocator.deinit();
+    };
 
     const uid = posix.getuid();
     var socket_buffer: [256]u8 = undefined;
@@ -154,7 +162,6 @@ pub fn main() !void {
 }
 
 test {
-    const builtin = @import("builtin");
     _ = @import("io/mock.zig");
     _ = @import("server.zig");
     _ = @import("msgpack.zig");
