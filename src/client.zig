@@ -393,6 +393,7 @@ pub const App = struct {
     allocator: std.mem.Allocator,
     recv_buffer: [4096]u8 = undefined,
     msg_buffer: std.ArrayList(u8),
+    msg_arena: std.heap.ArenaAllocator,
     send_buffer: ?[]u8 = null,
     send_task: ?io.Task = null,
     recv_task: ?io.Task = null,
@@ -422,6 +423,7 @@ pub const App = struct {
             .tty_buffer = undefined,
             .loop = undefined,
             .msg_buffer = .empty,
+            .msg_arena = std.heap.ArenaAllocator.init(allocator),
             .pipe_reader = PipeReader.init(allocator),
         };
         app.tty = try vaxis.Tty.init(&app.tty_buffer);
@@ -477,6 +479,7 @@ pub const App = struct {
         }
         self.pipe_reader.deinit();
         self.msg_buffer.deinit(self.allocator);
+        self.msg_arena.deinit();
         self.vx.deinit(self.allocator, self.tty.writer());
         self.tty.deinit();
     }
@@ -887,6 +890,8 @@ pub const App = struct {
 
     fn onRecv(l: *io.Loop, completion: io.Completion) anyerror!void {
         const app = completion.userdataCast(@This());
+        defer _ = app.msg_arena.reset(.retain_capacity);
+        const arena = app.msg_arena.allocator();
 
         switch (completion.result) {
             .recv => |bytes_read| {
@@ -900,7 +905,7 @@ pub const App = struct {
 
                 // Try to decode as many complete messages as possible
                 while (app.msg_buffer.items.len > 0) {
-                    const result = rpc.decodeMessageWithSize(app.allocator, app.msg_buffer.items) catch |err| {
+                    const result = rpc.decodeMessageWithSize(arena, app.msg_buffer.items) catch |err| {
                         if (err == error.UnexpectedEndOfInput) {
                             // Partial message, wait for more data
                             std.log.debug("Partial message, waiting for more data ({} bytes buffered)", .{app.msg_buffer.items.len});
@@ -908,7 +913,7 @@ pub const App = struct {
                         }
                         return err;
                     };
-                    defer result.message.deinit(app.allocator);
+                    defer result.message.deinit(arena);
 
                     const msg = result.message;
                     const bytes_consumed = result.bytes_consumed;
@@ -930,11 +935,6 @@ pub const App = struct {
                             app.handleRedraw(params) catch |err| {
                                 std.log.err("Failed to handle redraw: {}", .{err});
                             };
-                            std.log.debug("Redraw handled, rendering", .{});
-                            app.render() catch |err| {
-                                std.log.err("Failed to render: {}", .{err});
-                            };
-                            std.log.debug("Render complete", .{});
                         },
                         .attached => {
                             std.log.info("Attached to session, checking for resize", .{});
