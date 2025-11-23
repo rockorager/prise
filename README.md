@@ -16,7 +16,9 @@ using a third-party client.
 
 ## Vibe Coding
 
-![Vibe Coding](assets/vibe_coding.jpg)
+<p align="center">
+  <img src="assets/vibe_coding.jpg" alt="Vibe Coding" />
+</p>
 
 **Core Thesis**: High-performance software is the result of quality engineering.
 
