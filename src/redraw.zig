@@ -12,6 +12,7 @@ pub const UIEvent = union(enum) {
     mouse_shape: MouseShape,
     style: Style,
     title: Title,
+    selection: Selection,
     flush: void,
 
     /// ["resize", pty, rows, cols]
@@ -25,6 +26,16 @@ pub const UIEvent = union(enum) {
     pub const Title = struct {
         pty: u32,
         title: []const u8,
+    };
+
+    /// ["selection", pty, start_row, start_col, end_row, end_col]
+    /// Coordinates are in viewport space. null/empty means no selection.
+    pub const Selection = struct {
+        pty: u32,
+        start_row: ?u16,
+        start_col: ?u16,
+        end_row: ?u16,
+        end_col: ?u16,
     };
 
     /// ["write", pty, row, col, cells]
@@ -42,11 +53,13 @@ pub const UIEvent = union(enum) {
         };
     };
 
-    /// ["cursor_pos", pty, row, col]
+    /// ["cursor_pos", pty, row, col, visible]
+    /// visible: true if cursor should be rendered (in viewport and mode allows)
     pub const CursorPos = struct {
         pty: u32,
         row: u16,
         col: u16,
+        visible: bool,
     };
 
     /// ["cursor_shape", pty, shape]
@@ -112,7 +125,6 @@ pub const UIEvent = union(enum) {
             strikethrough: bool = false,
             ul_style: UnderlineStyle = .none,
             ul_color: ?u32 = null, // RGB
-            selected: bool = false,
         };
 
         pub const UnderlineStyle = enum(u8) {
@@ -220,14 +232,15 @@ pub const RedrawBuilder = struct {
     }
 
     /// Add a cursor_pos event
-    pub fn cursorPos(self: *RedrawBuilder, pty: u32, row: u16, col: u16) !void {
+    pub fn cursorPos(self: *RedrawBuilder, pty: u32, row: u16, col: u16, visible: bool) !void {
         const arena = self.arena.allocator();
         const event_name = msgpack.Value{ .string = try arena.dupe(u8, "cursor_pos") };
 
-        const args = try arena.alloc(msgpack.Value, 3);
+        const args = try arena.alloc(msgpack.Value, 4);
         args[0] = msgpack.Value{ .unsigned = pty };
         args[1] = msgpack.Value{ .unsigned = row };
         args[2] = msgpack.Value{ .unsigned = col };
+        args[3] = msgpack.Value{ .boolean = visible };
 
         const args_array = msgpack.Value{ .array = args };
 
@@ -280,6 +293,34 @@ pub const RedrawBuilder = struct {
         const event_name = msgpack.Value{ .string = try arena.dupe(u8, "flush") };
 
         const args = try arena.alloc(msgpack.Value, 0);
+        const args_array = msgpack.Value{ .array = args };
+
+        const event_arr = try arena.alloc(msgpack.Value, 2);
+        event_arr[0] = event_name;
+        event_arr[1] = args_array;
+
+        try self.events.append(self.allocator, msgpack.Value{ .array = event_arr });
+    }
+
+    /// Add a selection event (null values mean no selection)
+    pub fn selection(
+        self: *RedrawBuilder,
+        pty: u32,
+        start_row: ?u16,
+        start_col: ?u16,
+        end_row: ?u16,
+        end_col: ?u16,
+    ) !void {
+        const arena = self.arena.allocator();
+        const event_name = msgpack.Value{ .string = try arena.dupe(u8, "selection") };
+
+        const args = try arena.alloc(msgpack.Value, 5);
+        args[0] = msgpack.Value{ .unsigned = pty };
+        args[1] = if (start_row) |r| msgpack.Value{ .unsigned = r } else msgpack.Value.nil;
+        args[2] = if (start_col) |c| msgpack.Value{ .unsigned = c } else msgpack.Value.nil;
+        args[3] = if (end_row) |r| msgpack.Value{ .unsigned = r } else msgpack.Value.nil;
+        args[4] = if (end_col) |c| msgpack.Value{ .unsigned = c } else msgpack.Value.nil;
+
         const args_array = msgpack.Value{ .array = args };
 
         const event_arr = try arena.alloc(msgpack.Value, 2);
@@ -384,13 +425,6 @@ pub const RedrawBuilder = struct {
         if (attrs.blink) {
             try items.append(arena, .{
                 .key = msgpack.Value{ .string = try arena.dupe(u8, "blink") },
-                .value = msgpack.Value{ .boolean = true },
-            });
-        }
-
-        if (attrs.selected) {
-            try items.append(arena, .{
-                .key = msgpack.Value{ .string = try arena.dupe(u8, "selected") },
                 .value = msgpack.Value{ .boolean = true },
             });
         }
@@ -505,7 +539,7 @@ test "build complete redraw notification" {
     try builder.write(1, 0, 0, &cells);
 
     // Move cursor
-    try builder.cursorPos(1, 0, 7);
+    try builder.cursorPos(1, 0, 7, true);
     try builder.cursorShape(1, .beam);
 
     try builder.flush();

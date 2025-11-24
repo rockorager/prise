@@ -16,6 +16,13 @@ dirty: bool = false,
 hl_attrs: std.AutoHashMap(u32, vaxis.Style),
 title: std.ArrayList(u8),
 pty_id: u32,
+// Selection bounds (viewport coordinates)
+selection: ?struct {
+    start_row: u16,
+    start_col: u16,
+    end_row: u16,
+    end_col: u16,
+} = null,
 
 const redraw = @import("redraw.zig");
 
@@ -50,6 +57,38 @@ pub fn deinit(self: *Surface) void {
     self.allocator.destroy(self.back);
     self.hl_attrs.deinit();
     self.title.deinit(self.allocator);
+}
+
+/// Check if a cell at (row, col) is within the current selection
+pub fn isCellSelected(self: *const Surface, row: u16, col: u16) bool {
+    const sel = self.selection orelse return false;
+
+    // Normalize selection (start might be after end if dragged backwards)
+    const top_row = @min(sel.start_row, sel.end_row);
+    const bottom_row = @max(sel.start_row, sel.end_row);
+
+    if (row < top_row or row > bottom_row) return false;
+
+    // For single-row selection
+    if (sel.start_row == sel.end_row) {
+        const left = @min(sel.start_col, sel.end_col);
+        const right = @max(sel.start_col, sel.end_col);
+        return col >= left and col <= right;
+    }
+
+    // Multi-row selection
+    if (row == top_row) {
+        // First row: from start_col to end of line
+        const start = if (sel.start_row < sel.end_row) sel.start_col else sel.end_col;
+        return col >= start;
+    } else if (row == bottom_row) {
+        // Last row: from start of line to end_col
+        const end = if (sel.start_row < sel.end_row) sel.end_col else sel.start_col;
+        return col <= end;
+    } else {
+        // Middle rows: entire row is selected
+        return true;
+    }
 }
 
 pub fn resize(self: *Surface, rows: u16, cols: u16) !void {
@@ -118,9 +157,9 @@ pub fn applyRedraw(self: *Surface, params: msgpack.Value) !void {
                 // BUT, if we get a resize event, it's likely followed by write events filling the new size.
             }
         } else if (std.mem.eql(u8, event_name.string, "cursor_pos")) {
-            if (event_params.array.len < 3) continue;
+            if (event_params.array.len < 4) continue;
 
-            // args: [pty, row, col]
+            // args: [pty, row, col, visible]
             const row = switch (event_params.array[1]) {
                 .unsigned => |u| @as(u16, @intCast(u)),
                 .integer => |i| @as(u16, @intCast(i)),
@@ -131,10 +170,14 @@ pub fn applyRedraw(self: *Surface, params: msgpack.Value) !void {
                 .integer => |i| @as(u16, @intCast(i)),
                 else => continue,
             };
+            const visible = switch (event_params.array[3]) {
+                .boolean => |b| b,
+                else => true,
+            };
 
             self.back.cursor_row = row;
             self.back.cursor_col = col;
-            self.back.cursor_vis = true;
+            self.back.cursor_vis = visible;
             self.dirty = true;
         } else if (std.mem.eql(u8, event_name.string, "cursor_shape")) {
             if (event_params.array.len < 2) continue;
@@ -346,6 +389,42 @@ pub fn applyRedraw(self: *Surface, params: msgpack.Value) !void {
             }
 
             try self.hl_attrs.put(id, style);
+        } else if (std.mem.eql(u8, event_name.string, "selection")) {
+            if (event_params.array.len < 5) continue;
+
+            // args: [pty, start_row, start_col, end_row, end_col] (nulls mean no selection)
+            const start_row = switch (event_params.array[1]) {
+                .unsigned => |u| @as(u16, @intCast(u)),
+                .integer => |i| @as(u16, @intCast(i)),
+                else => null,
+            };
+            const start_col = switch (event_params.array[2]) {
+                .unsigned => |u| @as(u16, @intCast(u)),
+                .integer => |i| @as(u16, @intCast(i)),
+                else => null,
+            };
+            const end_row = switch (event_params.array[3]) {
+                .unsigned => |u| @as(u16, @intCast(u)),
+                .integer => |i| @as(u16, @intCast(i)),
+                else => null,
+            };
+            const end_col = switch (event_params.array[4]) {
+                .unsigned => |u| @as(u16, @intCast(u)),
+                .integer => |i| @as(u16, @intCast(i)),
+                else => null,
+            };
+
+            if (start_row != null and start_col != null and end_row != null and end_col != null) {
+                self.selection = .{
+                    .start_row = start_row.?,
+                    .start_col = start_col.?,
+                    .end_row = end_row.?,
+                    .end_col = end_col.?,
+                };
+            } else {
+                self.selection = null;
+            }
+            self.dirty = true;
         } else if (std.mem.eql(u8, event_name.string, "flush")) {
             // Flush marks the end of a frame - copy back to front now
 
@@ -387,12 +466,17 @@ const fallback_palette: [16]vaxis.Cell.Color = .{
     .{ .rgb = .{ 0xff, 0xff, 0xff } }, // Bright White
 };
 
-pub fn render(self: *Surface, win: vaxis.Window, focused: bool, terminal_colors: *const client.App.TerminalColors, dim_factor: f32) void {
+pub fn render(self: *const Surface, win: vaxis.Window, focused: bool, terminal_colors: *const client.App.TerminalColors, dim_factor: f32) void {
     // Copy front buffer to vaxis window
     for (0..self.rows) |row| {
         for (0..self.cols) |col| {
             if (col < win.width and row < win.height) {
                 var cell = self.front.readCell(@intCast(col), @intCast(row)) orelse continue;
+
+                // Apply selection highlight (dark blue background)
+                if (self.isCellSelected(@intCast(row), @intCast(col))) {
+                    cell.style.bg = .{ .rgb = .{ 0x26, 0x4f, 0x78 } }; // Dark blue
+                }
 
                 // Apply dimming if needed
                 if (dim_factor > 0.0) {

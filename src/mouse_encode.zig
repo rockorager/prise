@@ -2,13 +2,33 @@ const std = @import("std");
 const ghostty = @import("ghostty-vt");
 const key_parse = @import("key_parse.zig");
 
+pub const TerminalState = struct {
+    flags: @FieldType(ghostty.Terminal, "flags"),
+    modes: ghostty.modes.ModeState,
+    cols: u16,
+    rows: u16,
+    width_px: u32,
+    height_px: u32,
+
+    pub fn init(terminal: *const ghostty.Terminal) TerminalState {
+        return .{
+            .flags = terminal.flags,
+            .modes = terminal.modes,
+            .cols = terminal.cols,
+            .rows = terminal.rows,
+            .width_px = terminal.width_px,
+            .height_px = terminal.height_px,
+        };
+    }
+};
+
 pub fn encode(
     writer: anytype,
     event: key_parse.MouseEvent,
-    terminal: *const ghostty.Terminal,
+    state: TerminalState,
 ) !void {
-    const flags = terminal.flags;
-    const modes = terminal.modes;
+    const flags = state.flags;
+    const modes = state.modes;
 
     std.log.debug("mouse_encode: event={s} format={s} x10={} normal={} button={} any={} utf8={} sgr={} urxvt={} sgr_pixels={}", .{
         @tagName(flags.mouse_event),
@@ -49,12 +69,12 @@ pub fn encode(
 
     // SGR pixels (1016) - compute pixel coordinates from float
     if (flags.mouse_format == .sgr_pixels) {
-        const cell_width: f64 = if (terminal.cols > 0 and terminal.width_px > 0)
-            @as(f64, @floatFromInt(terminal.width_px)) / @as(f64, @floatFromInt(terminal.cols))
+        const cell_width: f64 = if (state.cols > 0 and state.width_px > 0)
+            @as(f64, @floatFromInt(state.width_px)) / @as(f64, @floatFromInt(state.cols))
         else
             1.0;
-        const cell_height: f64 = if (terminal.rows > 0 and terminal.height_px > 0)
-            @as(f64, @floatFromInt(terminal.height_px)) / @as(f64, @floatFromInt(terminal.rows))
+        const cell_height: f64 = if (state.rows > 0 and state.height_px > 0)
+            @as(f64, @floatFromInt(state.height_px)) / @as(f64, @floatFromInt(state.rows))
         else
             1.0;
 

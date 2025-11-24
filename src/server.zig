@@ -55,6 +55,12 @@ const Pty = struct {
     render_timer: ?io.Task = null,
     render_state: ghostty_vt.RenderState,
 
+    // Selection state: stores click position for drag selection
+    selection_start: ?struct { col: u16, row: u16 } = null,
+    // Click counting for double/triple click
+    left_click_count: u8 = 0,
+    left_click_time: i64 = 0, // milliseconds timestamp
+
     // Pointer to server for callbacks (opaque to avoid circular type dependency)
     server_ptr: *anyopaque = undefined,
 
@@ -279,10 +285,8 @@ fn mapMouseShape(shape: ghostty_vt.MouseShape) redraw.UIEvent.MouseShape.Shape {
 }
 
 /// Convert ghostty style to Prise Style Attributes
-fn getStyleAttributes(style: ghostty_vt.Style, selected: bool) redraw.UIEvent.Style.Attributes {
-    var attrs: redraw.UIEvent.Style.Attributes = .{
-        .selected = selected,
-    };
+fn getStyleAttributes(style: ghostty_vt.Style) redraw.UIEvent.Style.Attributes {
+    var attrs: redraw.UIEvent.Style.Attributes = .{};
 
     // Convert foreground color
     switch (style.fg_color) {
@@ -385,15 +389,13 @@ fn buildRedrawMessageFromPty(
     var styles_map = std.AutoHashMap(u64, u32).init(temp_alloc);
     var next_style_id: u32 = 1;
 
-    const StyleKey = struct { style: ghostty_vt.Style, selected: bool };
     const default_style: ghostty_vt.Style = .{
         .fg_color = .none,
         .bg_color = .none,
         .underline_color = .none,
         .flags = .{},
     };
-    const default_key: StyleKey = .{ .style = default_style, .selected = false };
-    const default_hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&default_key));
+    const default_hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&default_style));
     try styles_map.put(default_hash, 0);
     try builder.style(0, .{}); // Ensure default style is known
 
@@ -401,9 +403,8 @@ fn buildRedrawMessageFromPty(
     const row_data_slice = rs.row_data.slice();
     const row_cells = row_data_slice.items(.cells);
     const row_dirties = row_data_slice.items(.dirty);
-    const row_selections = row_data_slice.items(.selection);
 
-    var last_style_key: ?StyleKey = null;
+    var last_style: ?ghostty_vt.Style = null;
     var last_style_id: u32 = 0;
 
     // Reused buffers for text encoding
@@ -421,7 +422,6 @@ fn buildRedrawMessageFromPty(
         const rs_cells_raw = rs_cells_slice.items(.raw);
         const rs_cells_style = rs_cells_slice.items(.style);
         const rs_cells_grapheme = rs_cells_slice.items(.grapheme);
-        const selection_range = row_selections[y];
 
         var last_hl_id: u32 = 0;
 
@@ -433,12 +433,6 @@ fn buildRedrawMessageFromPty(
                 x += 1;
                 continue;
             }
-
-            // Determine selection
-            const selected = if (selection_range) |range|
-                x >= range[0] and x <= range[1]
-            else
-                false;
 
             // Resolve style
             var vt_style = if (raw_cell.style_id > 0) rs_cells_style[x] else default_style;
@@ -453,30 +447,28 @@ fn buildRedrawMessageFromPty(
                 is_direct_color = true;
             }
 
-            const style_key: StyleKey = .{ .style = vt_style, .selected = selected };
             var style_id: u32 = 0;
             var found_match = false;
 
-            if (last_style_key) |last| {
-                const style_eq = std.meta.eql(last.style, style_key.style);
-                if (style_eq and last.selected == style_key.selected) {
+            if (last_style) |last| {
+                if (std.meta.eql(last, vt_style)) {
                     style_id = last_style_id;
                     found_match = true;
                 }
             }
 
             if (!found_match) {
-                const style_hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&style_key));
+                const style_hash = std.hash.Wyhash.hash(0, std.mem.asBytes(&vt_style));
                 if (styles_map.get(style_hash)) |id| {
                     style_id = id;
                 } else {
                     style_id = next_style_id;
                     next_style_id += 1;
                     try styles_map.put(style_hash, style_id);
-                    const attrs = getStyleAttributes(vt_style, selected);
+                    const attrs = getStyleAttributes(vt_style);
                     try builder.style(style_id, attrs);
                 }
-                last_style_key = style_key;
+                last_style = vt_style;
                 last_style_id = style_id;
             }
 
@@ -534,27 +526,21 @@ fn buildRedrawMessageFromPty(
                 // For direct color, ensure tag matches and color matches
                 if (is_direct_color) {
                     if (next_raw.content_tag == raw_cell.content_tag and next_raw.style_id == raw_cell.style_id) {
-                        const next_selected = if (selection_range) |range| next_x >= range[0] and next_x <= range[1] else false;
-                        if (next_selected == selected) {
-                            if (raw_cell.content_tag == .bg_color_rgb) {
-                                if (std.meta.eql(raw_cell.content.color_rgb, next_raw.content.color_rgb)) next_text_match = true;
-                            } else if (raw_cell.content_tag == .bg_color_palette) {
-                                if (raw_cell.content.color_palette == next_raw.content.color_palette) next_text_match = true;
-                            }
+                        if (raw_cell.content_tag == .bg_color_rgb) {
+                            if (std.meta.eql(raw_cell.content.color_rgb, next_raw.content.color_rgb)) next_text_match = true;
+                        } else if (raw_cell.content_tag == .bg_color_palette) {
+                            if (raw_cell.content.color_palette == next_raw.content.color_palette) next_text_match = true;
                         }
                     }
                 } else {
                     // Normal text
                     if (next_raw.content_tag == raw_cell.content_tag and next_raw.style_id == raw_cell.style_id) {
-                        const next_selected = if (selection_range) |range| next_x >= range[0] and next_x <= range[1] else false;
-                        if (next_selected == selected) {
-                            if (raw_cell.content_tag == .codepoint) {
-                                if (next_raw.content.codepoint == raw_cell.content.codepoint) next_text_match = true;
-                            } else if (raw_cell.content_tag == .codepoint_grapheme) {
-                                if (std.mem.eql(u21, rs_cells_grapheme[x], rs_cells_grapheme[next_x])) next_text_match = true;
-                            } else {
-                                next_text_match = true;
-                            }
+                        if (raw_cell.content_tag == .codepoint) {
+                            if (next_raw.content.codepoint == raw_cell.content.codepoint) next_text_match = true;
+                        } else if (raw_cell.content_tag == .codepoint_grapheme) {
+                            if (std.mem.eql(u21, rs_cells_grapheme[x], rs_cells_grapheme[next_x])) next_text_match = true;
+                        } else {
+                            next_text_match = true;
                         }
                     }
                 }
@@ -583,8 +569,11 @@ fn buildRedrawMessageFromPty(
         }
     }
 
-    if (rs.cursor.visible) {
-        try builder.cursorPos(@intCast(pty_instance.id), @intCast(rs.cursor.active.y), @intCast(rs.cursor.active.x));
+    const cursor_visible = rs.cursor.visible and rs.cursor.viewport != null;
+    if (rs.cursor.viewport) |vp| {
+        try builder.cursorPos(@intCast(pty_instance.id), @intCast(vp.y), @intCast(vp.x), cursor_visible);
+    } else {
+        try builder.cursorPos(@intCast(pty_instance.id), @intCast(rs.cursor.active.y), @intCast(rs.cursor.active.x), cursor_visible);
     }
     const shape: redraw.UIEvent.CursorShape.Shape = switch (rs.cursor.visual_style) {
         .block, .block_hollow => .block,
@@ -595,6 +584,26 @@ fn buildRedrawMessageFromPty(
 
     // Send mouse shape
     try builder.mouseShape(@intCast(pty_instance.id), mouse_shape);
+
+    // Send selection bounds from row_data
+    const row_selections = row_data_slice.items(.selection);
+    var sel_start_row: ?u16 = null;
+    var sel_start_col: ?u16 = null;
+    var sel_end_row: ?u16 = null;
+    var sel_end_col: ?u16 = null;
+
+    for (row_selections, 0..) |sel_range, y| {
+        if (sel_range) |range| {
+            if (sel_start_row == null) {
+                sel_start_row = @intCast(y);
+                sel_start_col = @intCast(range[0]);
+            }
+            sel_end_row = @intCast(y);
+            sel_end_col = @intCast(range[1]);
+        }
+    }
+
+    try builder.selection(@intCast(pty_instance.id), sel_start_row, sel_start_col, sel_end_row, sel_end_col);
 
     try builder.flush();
     return builder.build();
@@ -778,22 +787,172 @@ const Client = struct {
                                 return;
                             };
 
-                            var encode_buf: [32]u8 = undefined;
-                            var writer = std.Io.Writer.fixed(&encode_buf);
-
-                            pty_instance.terminal_mutex.lock();
-                            mouse_encode.encode(&writer, mouse, &pty_instance.terminal) catch |err| {
-                                std.log.err("Failed to encode mouse: {}", .{err});
-                                pty_instance.terminal_mutex.unlock();
-                                return;
+                            const is_wheel = switch (mouse.button) {
+                                .wheel_up, .wheel_down, .wheel_left, .wheel_right => true,
+                                else => false,
                             };
-                            pty_instance.terminal_mutex.unlock();
 
-                            const encoded = writer.buffered();
-                            if (encoded.len > 0) {
-                                _ = posix.write(pty_instance.process.master, encoded) catch |err| {
-                                    std.log.err("Write to PTY failed: {}", .{err});
+                            const State = struct {
+                                terminal: mouse_encode.TerminalState,
+                                active_screen: ghostty_vt.ScreenSet.Key,
+                            };
+                            const state: State = state: {
+                                pty_instance.terminal_mutex.lock();
+                                defer pty_instance.terminal_mutex.unlock();
+                                break :state .{
+                                    .terminal = mouse_encode.TerminalState.init(&pty_instance.terminal),
+                                    .active_screen = pty_instance.terminal.screens.active_key,
                                 };
+                            };
+
+                            if (is_wheel and state.terminal.flags.mouse_event == .none) {
+                                if (state.active_screen == .alternate and
+                                    state.terminal.modes.get(.mouse_alternate_scroll))
+                                {
+                                    const seq: []const u8 = if (state.terminal.modes.get(.cursor_keys))
+                                        (if (mouse.button == .wheel_up) "\x1bOA" else "\x1bOB")
+                                    else
+                                        (if (mouse.button == .wheel_up) "\x1b[A" else "\x1b[B");
+                                    _ = posix.write(pty_instance.process.master, seq) catch |err| {
+                                        std.log.err("Write to PTY failed: {}", .{err});
+                                    };
+                                } else {
+                                    const delta: isize = switch (mouse.button) {
+                                        .wheel_up => -1,
+                                        .wheel_down => 1,
+                                        else => 0,
+                                    };
+                                    if (delta != 0) {
+                                        pty_instance.terminal_mutex.lock();
+                                        pty_instance.terminal.scrollViewport(.{ .delta = delta }) catch |err| {
+                                            std.log.err("Failed to scroll viewport: {}", .{err});
+                                        };
+                                        pty_instance.terminal_mutex.unlock();
+                                        _ = posix.write(pty_instance.pipe_fds[1], "x") catch {};
+                                    }
+                                }
+                            } else if (mouse.button == .left and state.terminal.flags.mouse_event == .none) {
+                                const col: u16 = @intFromFloat(@max(0, @floor(mouse.x)));
+                                const row: u16 = @intFromFloat(@max(0, @floor(mouse.y)));
+                                const CLICK_INTERVAL_MS: i64 = 500;
+
+                                switch (mouse.type) {
+                                    .press => {
+                                        // Update click count based on timing
+                                        const now = std.time.milliTimestamp();
+                                        if (pty_instance.left_click_count > 0 and
+                                            (now - pty_instance.left_click_time) < CLICK_INTERVAL_MS)
+                                        {
+                                            pty_instance.left_click_count += 1;
+                                            if (pty_instance.left_click_count > 3) {
+                                                pty_instance.left_click_count = 1;
+                                            }
+                                        } else {
+                                            pty_instance.left_click_count = 1;
+                                        }
+                                        pty_instance.left_click_time = now;
+                                        pty_instance.selection_start = .{ .col = col, .row = row };
+
+                                        pty_instance.terminal_mutex.lock();
+                                        defer pty_instance.terminal_mutex.unlock();
+
+                                        const screen = pty_instance.terminal.screens.active;
+                                        const pin = screen.pages.pin(.{ .viewport = .{
+                                            .x = col,
+                                            .y = row,
+                                        } }) orelse return;
+
+                                        switch (pty_instance.left_click_count) {
+                                            1 => {
+                                                // Single click: clear selection
+                                                screen.select(null) catch {};
+                                            },
+                                            2 => {
+                                                // Double click: select word
+                                                if (screen.selectWord(pin)) |sel| {
+                                                    screen.select(sel) catch {};
+                                                }
+                                            },
+                                            3 => {
+                                                // Triple click: select line
+                                                if (screen.selectLine(.{ .pin = pin })) |sel| {
+                                                    screen.select(sel) catch {};
+                                                }
+                                            },
+                                            else => {},
+                                        }
+                                        _ = posix.write(pty_instance.pipe_fds[1], "x") catch {};
+                                    },
+                                    .drag => {
+                                        if (pty_instance.selection_start) |start| {
+                                            pty_instance.terminal_mutex.lock();
+                                            defer pty_instance.terminal_mutex.unlock();
+
+                                            const screen = pty_instance.terminal.screens.active;
+                                            const start_pin = screen.pages.pin(.{ .viewport = .{
+                                                .x = start.col,
+                                                .y = start.row,
+                                            } }) orelse return;
+                                            const end_pin = screen.pages.pin(.{ .viewport = .{
+                                                .x = col,
+                                                .y = row,
+                                            } }) orelse return;
+
+                                            switch (pty_instance.left_click_count) {
+                                                1 => {
+                                                    // Single-click drag: character selection
+                                                    const sel = ghostty_vt.Selection.init(start_pin, end_pin, false);
+                                                    screen.select(sel) catch {};
+                                                },
+                                                2 => {
+                                                    // Double-click drag: word-by-word selection
+                                                    const word_start = screen.selectWord(start_pin);
+                                                    const word_end = screen.selectWord(end_pin);
+                                                    if (word_start != null and word_end != null) {
+                                                        const sel = if (end_pin.before(start_pin))
+                                                            ghostty_vt.Selection.init(word_end.?.start(), word_start.?.end(), false)
+                                                        else
+                                                            ghostty_vt.Selection.init(word_start.?.start(), word_end.?.end(), false);
+                                                        screen.select(sel) catch {};
+                                                    }
+                                                },
+                                                3 => {
+                                                    // Triple-click drag: line-by-line selection
+                                                    const line_start = screen.selectLine(.{ .pin = start_pin });
+                                                    const line_end = screen.selectLine(.{ .pin = end_pin });
+                                                    if (line_start != null and line_end != null) {
+                                                        const sel = if (end_pin.before(start_pin))
+                                                            ghostty_vt.Selection.init(line_end.?.start(), line_start.?.end(), false)
+                                                        else
+                                                            ghostty_vt.Selection.init(line_start.?.start(), line_end.?.end(), false);
+                                                        screen.select(sel) catch {};
+                                                    }
+                                                },
+                                                else => {},
+                                            }
+                                            _ = posix.write(pty_instance.pipe_fds[1], "x") catch {};
+                                        }
+                                    },
+                                    .release => {
+                                        pty_instance.selection_start = null;
+                                    },
+                                    .motion => {},
+                                }
+                            } else {
+                                var encode_buf: [32]u8 = undefined;
+                                var writer = std.Io.Writer.fixed(&encode_buf);
+
+                                mouse_encode.encode(&writer, mouse, state.terminal) catch |err| {
+                                    std.log.err("Failed to encode mouse: {}", .{err});
+                                    return;
+                                };
+
+                                const encoded = writer.buffered();
+                                if (encoded.len > 0) {
+                                    _ = posix.write(pty_instance.process.master, encoded) catch |err| {
+                                        std.log.err("Write to PTY failed: {}", .{err});
+                                    };
+                                }
                             }
                         } else {
                             std.log.warn("mouse_input notification: session {} not found", .{session_id});
@@ -996,6 +1155,10 @@ const Server = struct {
     }
 
     fn parseAttachPtyParams(params: msgpack.Value) !usize {
+        return parseSessionId(params);
+    }
+
+    fn parseSessionId(params: msgpack.Value) !usize {
         if (params != .array or params.array.len < 1) {
             return error.InvalidParams;
         }
@@ -1226,6 +1389,49 @@ const Server = struct {
                     break;
                 }
             }
+
+            return msgpack.Value.nil;
+        } else if (std.mem.eql(u8, method, "get_selection")) {
+            const session_id = parseSessionId(params) catch {
+                return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
+            };
+
+            const pty_instance = self.ptys.get(session_id) orelse {
+                return msgpack.Value{ .string = try self.allocator.dupe(u8, "session not found") };
+            };
+
+            pty_instance.terminal_mutex.lock();
+            defer pty_instance.terminal_mutex.unlock();
+
+            const screen = pty_instance.terminal.screens.active;
+            const sel = screen.selection orelse {
+                return msgpack.Value.nil;
+            };
+
+            const result = screen.selectionString(self.allocator, .{
+                .sel = sel,
+                .trim = true,
+            }) catch |err| {
+                std.log.err("Failed to get selection string: {}", .{err});
+                return msgpack.Value.nil;
+            };
+
+            return msgpack.Value{ .string = result };
+        } else if (std.mem.eql(u8, method, "clear_selection")) {
+            const session_id = parseSessionId(params) catch {
+                return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
+            };
+
+            const pty_instance = self.ptys.get(session_id) orelse {
+                return msgpack.Value{ .string = try self.allocator.dupe(u8, "session not found") };
+            };
+
+            pty_instance.terminal_mutex.lock();
+            const screen = pty_instance.terminal.screens.active;
+            screen.select(null) catch {};
+            pty_instance.terminal_mutex.unlock();
+
+            _ = posix.write(pty_instance.pipe_fds[1], "x") catch {};
 
             return msgpack.Value.nil;
         } else {
