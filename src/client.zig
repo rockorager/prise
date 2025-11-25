@@ -913,7 +913,6 @@ pub const App = struct {
                     self.vx.caps.scaled_text = true;
                     return;
                 }
-
             },
             .winsize => |ws| {
                 // Calculate and store cell metrics

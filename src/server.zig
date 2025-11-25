@@ -1848,9 +1848,10 @@ const Server = struct {
     fn onRenderTimer(loop: *io.Loop, completion: io.Completion) anyerror!void {
         _ = loop;
         const pty_instance = completion.userdataCast(Pty);
+        pty_instance.render_timer = null;
+        if (!pty_instance.running.load(.seq_cst)) return;
         const server: *Server = @ptrCast(@alignCast(pty_instance.server_ptr));
         server.renderFrame(pty_instance);
-        pty_instance.render_timer = null;
     }
 
     fn onPtyDirty(loop: *io.Loop, completion: io.Completion) anyerror!void {
