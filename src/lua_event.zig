@@ -15,6 +15,7 @@ pub const Event = union(enum) {
         app: *anyopaque,
         send_key_fn: *const fn (app: *anyopaque, id: u32, key: KeyData) anyerror!void,
         send_mouse_fn: *const fn (app: *anyopaque, id: u32, mouse: MouseData) anyerror!void,
+        close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     },
     pty_exited: struct {
         id: u32,
@@ -91,6 +92,7 @@ pub fn pushEvent(lua: *ziglua.Lua, event: Event) !void {
                 .app = info.app,
                 .send_key_fn = info.send_key_fn,
                 .send_mouse_fn = info.send_mouse_fn,
+                .close_fn = info.close_fn,
             };
 
             _ = lua.getMetatableRegistry("PrisePty");
@@ -303,6 +305,7 @@ const PtyHandle = struct {
     app: *anyopaque,
     send_key_fn: *const fn (app: *anyopaque, id: u32, key: KeyData) anyerror!void,
     send_mouse_fn: *const fn (app: *anyopaque, id: u32, mouse: MouseData) anyerror!void,
+    close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
 };
 
 fn ptyIndex(lua: *ziglua.Lua) i32 {
@@ -321,6 +324,10 @@ fn ptyIndex(lua: *ziglua.Lua) i32 {
     }
     if (std.mem.eql(u8, key, "send_mouse")) {
         lua.pushFunction(ziglua.wrap(ptySendMouse));
+        return 1;
+    }
+    if (std.mem.eql(u8, key, "close")) {
+        lua.pushFunction(ziglua.wrap(ptyClose));
         return 1;
     }
     if (std.mem.eql(u8, key, "size")) {
@@ -453,6 +460,14 @@ fn ptySendMouse(lua: *ziglua.Lua) i32 {
     return 0;
 }
 
+fn ptyClose(lua: *ziglua.Lua) i32 {
+    const pty = lua.checkUserdata(PtyHandle, 1, "PrisePty");
+    pty.close_fn(pty.app, pty.id) catch |err| {
+        lua.raiseErrorStr("Failed to close pty: %s", .{@errorName(err).ptr});
+    };
+    return 0;
+}
+
 pub fn luaToMsgpack(lua: *ziglua.Lua, index: i32, allocator: std.mem.Allocator) !msgpack.Value {
     const type_ = lua.typeOf(index);
     switch (type_) {
@@ -551,6 +566,7 @@ pub fn pushPtyUserdata(
     app: *anyopaque,
     send_key_fn: *const fn (app: *anyopaque, id: u32, key: KeyData) anyerror!void,
     send_mouse_fn: *const fn (app: *anyopaque, id: u32, mouse: MouseData) anyerror!void,
+    close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
 ) !void {
     const pty = lua.newUserdata(PtyHandle, @sizeOf(PtyHandle));
     pty.* = .{
@@ -559,6 +575,7 @@ pub fn pushPtyUserdata(
         .app = app,
         .send_key_fn = send_key_fn,
         .send_mouse_fn = send_mouse_fn,
+        .close_fn = close_fn,
     };
 
     _ = lua.getMetatableRegistry("PrisePty");

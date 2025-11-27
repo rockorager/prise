@@ -563,6 +563,8 @@ pub const App = struct {
         self.msg_buffer.deinit(self.allocator);
         self.msg_arena.deinit();
         self.state.deinit();
+        if (self.hit_regions.len > 0) self.allocator.free(self.hit_regions);
+        if (self.split_handles.len > 0) self.allocator.free(self.split_handles);
         self.vx.deinit(self.allocator, self.tty.writer());
         self.tty.deinit();
 
@@ -1176,6 +1178,8 @@ pub const App = struct {
                 const start = list.scroll_offset;
                 const end = @min(start + visible_rows, list.items.len);
 
+                std.log.debug("render list: items={} height={} start={} end={}", .{ list.items.len, w.height, start, end });
+
                 for (start..end) |i| {
                     const row: u16 = @intCast(i - start);
                     const item = list.items[i];
@@ -1187,9 +1191,12 @@ pub const App = struct {
                         item.style orelse list.style;
 
                     for (0..win.width) |col| {
-                        const char: u8 = if (col < item.text.len) item.text[col] else ' ';
+                        var grapheme: []const u8 = " ";
+                        if (col < item.text.len) {
+                            grapheme = item.text[col .. col + 1];
+                        }
                         win.writeCell(@intCast(col), row, .{
-                            .char = .{ .grapheme = &[_]u8{char}, .width = 1 },
+                            .char = .{ .grapheme = grapheme, .width = 1 },
                             .style = item_style,
                         });
                     }
@@ -1199,20 +1206,26 @@ pub const App = struct {
                 const chars = b.borderChars();
                 const style = b.style;
 
-                if (b.border != .none) {
-                    win.writeCell(0, 0, .{ .char = .{ .grapheme = chars.tl, .width = 1 }, .style = style });
-                    win.writeCell(win.width -| 1, 0, .{ .char = .{ .grapheme = chars.tr, .width = 1 }, .style = style });
-                    win.writeCell(0, win.height -| 1, .{ .char = .{ .grapheme = chars.bl, .width = 1 }, .style = style });
-                    win.writeCell(win.width -| 1, win.height -| 1, .{ .char = .{ .grapheme = chars.br, .width = 1 }, .style = style });
+                std.log.debug("render box: w={} h={}", .{ win.width, win.height });
 
-                    for (1..win.width -| 1) |col| {
-                        win.writeCell(@intCast(col), 0, .{ .char = .{ .grapheme = chars.h, .width = 1 }, .style = style });
-                        win.writeCell(@intCast(col), win.height -| 1, .{ .char = .{ .grapheme = chars.h, .width = 1 }, .style = style });
+                if (b.border != .none and win.width >= 2 and win.height >= 2) {
+                    win.writeCell(0, 0, .{ .char = .{ .grapheme = chars.tl, .width = 1 }, .style = style });
+                    win.writeCell(win.width - 1, 0, .{ .char = .{ .grapheme = chars.tr, .width = 1 }, .style = style });
+                    win.writeCell(0, win.height - 1, .{ .char = .{ .grapheme = chars.bl, .width = 1 }, .style = style });
+                    win.writeCell(win.width - 1, win.height - 1, .{ .char = .{ .grapheme = chars.br, .width = 1 }, .style = style });
+
+                    if (win.width > 2) {
+                        for (1..win.width - 1) |col| {
+                            win.writeCell(@intCast(col), 0, .{ .char = .{ .grapheme = chars.h, .width = 1 }, .style = style });
+                            win.writeCell(@intCast(col), win.height - 1, .{ .char = .{ .grapheme = chars.h, .width = 1 }, .style = style });
+                        }
                     }
 
-                    for (1..win.height -| 1) |row| {
-                        win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = chars.v, .width = 1 }, .style = style });
-                        win.writeCell(win.width -| 1, @intCast(row), .{ .char = .{ .grapheme = chars.v, .width = 1 }, .style = style });
+                    if (win.height > 2) {
+                        for (1..win.height - 1) |row| {
+                            win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = chars.v, .width = 1 }, .style = style });
+                            win.writeCell(win.width - 1, @intCast(row), .{ .char = .{ .grapheme = chars.v, .width = 1 }, .style = style });
+                        }
                     }
                 }
 
@@ -1648,6 +1661,31 @@ pub const App = struct {
                                                         try self.sendDirect(encoded_msg);
                                                     }
                                                 }.appSendMouse,
+                                                .close_fn = struct {
+                                                    fn appClosePty(ctx: *anyopaque, id: u32) anyerror!void {
+                                                        const self: *App = @ptrCast(@alignCast(ctx));
+
+                                                        var params = try self.allocator.alloc(msgpack.Value, 1);
+                                                        params[0] = .{ .unsigned = @intCast(id) };
+
+                                                        const msgid = self.state.next_msgid;
+                                                        self.state.next_msgid +%= 1;
+
+                                                        var arr = try self.allocator.alloc(msgpack.Value, 4);
+                                                        arr[0] = .{ .unsigned = 0 }; // request
+                                                        arr[1] = .{ .unsigned = msgid };
+                                                        arr[2] = .{ .string = "close_pty" };
+                                                        arr[3] = .{ .array = params };
+
+                                                        const encoded_msg = try msgpack.encodeFromValue(self.allocator, .{ .array = arr });
+                                                        defer self.allocator.free(encoded_msg);
+
+                                                        self.allocator.free(arr);
+                                                        self.allocator.free(params);
+
+                                                        try self.sendDirect(encoded_msg);
+                                                    }
+                                                }.appClosePty,
                                             },
                                         }) catch |err| {
                                             std.log.err("Failed to update UI with pty_attach: {}", .{err});
@@ -1943,6 +1981,35 @@ pub const App = struct {
                     try app.sendDirect(encoded_msg);
                 }
             }.sendMouse,
+            .close_fn = struct {
+                fn closePty(app_ctx: *anyopaque, pty_id: u32) anyerror!void {
+                    const app: *App = @ptrCast(@alignCast(app_ctx));
+
+                    var params = try app.allocator.alloc(msgpack.Value, 1);
+                    params[0] = .{ .unsigned = @intCast(pty_id) };
+
+                    // Use 0 for request type (it's a request, but we don't wait for response here as it's fire-and-forget from Lua perspective)
+                    // Actually, let's use request type 0 and a dummy msgid, or just notification type 2?
+                    // Server handles "close_pty" as a request (returns msgpack.Value.nil).
+                    // So we should send a request.
+                    const msgid = app.state.next_msgid;
+                    app.state.next_msgid +%= 1;
+
+                    var arr = try app.allocator.alloc(msgpack.Value, 4);
+                    arr[0] = .{ .unsigned = 0 }; // request
+                    arr[1] = .{ .unsigned = msgid };
+                    arr[2] = .{ .string = "close_pty" };
+                    arr[3] = .{ .array = params };
+
+                    const encoded_msg = try msgpack.encodeFromValue(app.allocator, .{ .array = arr });
+                    defer app.allocator.free(encoded_msg);
+
+                    app.allocator.free(arr);
+                    app.allocator.free(params);
+
+                    try app.sendDirect(encoded_msg);
+                }
+            }.closePty,
         };
     }
 };

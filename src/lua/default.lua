@@ -2,10 +2,10 @@ local prise = require("prise")
 
 -- Powerline symbols
 local PL = {
-    right_solid = "", -- \ue0c0 (fire)
-    right_thin = "", -- \ue0c1
-    left_solid = "", -- \ue0c2
-    left_thin = "", -- \ue0c3
+    right_solid = "",
+    right_thin = "",
+    left_solid = "",
+    left_thin = "",
 }
 
 -- Color theme (Catppuccin Mocha inspired)
@@ -36,6 +36,13 @@ local state = {
     timer = nil,
     pending_split = nil,
     next_split_id = 1,
+    -- Command palette
+    palette = {
+        visible = false,
+        input = nil, -- TextInput handle
+        selected = 1,
+        scroll_offset = 0,
+    },
 }
 
 local M = {}
@@ -205,6 +212,27 @@ local function get_focused_pty()
         return path[#path].pty
     end
     return nil
+end
+
+local function remove_pane_by_id(id)
+    local new_root, next_focus = remove_pane_recursive(state.root, id)
+    state.root = new_root
+
+    if not state.root then
+        prise.quit()
+    else
+        if state.focused_id == id then
+            if next_focus then
+                state.focused_id = next_focus
+            else
+                local first = get_first_leaf(state.root)
+                if first then
+                    state.focused_id = first.id
+                end
+            end
+        end
+    end
+    prise.request_frame()
 end
 
 -- Count all panes in the tree
@@ -439,6 +467,113 @@ local function move_focus(direction)
     end
 end
 
+-- Command palette commands
+local commands = {
+    {
+        name = "Split Horizontal",
+        action = function()
+            state.pending_split = { direction = "row" }
+            prise.spawn({})
+        end,
+    },
+    {
+        name = "Split Vertical",
+        action = function()
+            state.pending_split = { direction = "col" }
+            prise.spawn({})
+        end,
+    },
+    {
+        name = "Split Auto",
+        action = function()
+            local pty = get_focused_pty()
+            if pty then
+                local size = pty:size()
+                if size.cols > (size.rows * 2.2) then
+                    state.pending_split = { direction = "row" }
+                else
+                    state.pending_split = { direction = "col" }
+                end
+                prise.spawn({})
+            end
+        end,
+    },
+    {
+        name = "Focus Left",
+        action = function()
+            move_focus("left")
+        end,
+    },
+    {
+        name = "Focus Right",
+        action = function()
+            move_focus("right")
+        end,
+    },
+    {
+        name = "Focus Up",
+        action = function()
+            move_focus("up")
+        end,
+    },
+    {
+        name = "Focus Down",
+        action = function()
+            move_focus("down")
+        end,
+    },
+    {
+        name = "Detach Session",
+        action = function()
+            prise.detach("default")
+        end,
+    },
+    {
+        name = "Quit",
+        action = function()
+            prise.quit()
+        end,
+    },
+}
+
+local function filter_commands(query)
+    if not query or query == "" then
+        return commands
+    end
+    local q = query:lower()
+    local results = {}
+    for _, cmd in ipairs(commands) do
+        if cmd.name:lower():find(q, 1, true) then
+            table.insert(results, cmd)
+        end
+    end
+    return results
+end
+
+local function open_palette()
+    if not state.palette.input then
+        state.palette.input = prise.create_text_input()
+    end
+    state.palette.visible = true
+    state.palette.selected = 1
+    state.palette.scroll_offset = 0
+    state.palette.input:clear()
+    prise.request_frame()
+end
+
+local function close_palette()
+    state.palette.visible = false
+    prise.request_frame()
+end
+
+local function execute_selected()
+    local filtered = filter_commands(state.palette.input:text())
+    if filtered[state.palette.selected] then
+        close_palette()
+        filtered[state.palette.selected].action()
+    end
+end
+
 -- --- Main Functions ---
 
 function M.update(event)
@@ -478,6 +613,60 @@ function M.update(event)
         end
         prise.request_frame()
     elseif event.type == "key_press" then
+        -- Handle command palette
+        if state.palette.visible then
+            local k = event.data.key
+            local filtered = filter_commands(state.palette.input:text())
+
+            prise.log.debug(
+                "palette key: "
+                    .. tostring(k)
+                    .. " len="
+                    .. #k
+                    .. " ctrl="
+                    .. tostring(event.data.ctrl)
+                    .. " super="
+                    .. tostring(event.data.super)
+            )
+
+            if k == "Escape" then
+                close_palette()
+                return
+            elseif k == "Enter" then
+                execute_selected()
+                return
+            elseif k == "ArrowUp" or (k == "k" and event.data.ctrl) then
+                if state.palette.selected > 1 then
+                    state.palette.selected = state.palette.selected - 1
+                    prise.request_frame()
+                end
+                return
+            elseif k == "ArrowDown" or (k == "j" and event.data.ctrl) then
+                if state.palette.selected < #filtered then
+                    state.palette.selected = state.palette.selected + 1
+                    prise.request_frame()
+                end
+                return
+            elseif k == "Backspace" then
+                state.palette.input:delete_backward()
+                state.palette.selected = 1
+                prise.request_frame()
+                return
+            elseif #k == 1 and not event.data.ctrl and not event.data.alt and not event.data.super then
+                state.palette.input:insert(k)
+                state.palette.selected = 1
+                prise.request_frame()
+                return
+            end
+            return
+        end
+
+        -- Super+p to open command palette
+        if event.data.key == "p" and event.data.super then
+            open_palette()
+            return
+        end
+
         -- Handle pending command mode (after Ctrl+b)
         if state.pending_command then
             local handled = false
@@ -521,6 +710,15 @@ function M.update(event)
                 -- Detach from session
                 prise.detach("default")
                 handled = true
+            elseif k == "w" then
+                -- Close current pane
+                local path = state.focused_id and find_node_path(state.root, state.focused_id)
+                if path then
+                    local pane = path[#path]
+                    pane.pty:close()
+                    remove_pane_by_id(pane.id)
+                    handled = true
+                end
             elseif k == "q" then
                 -- Quit
                 prise.quit()
@@ -601,26 +799,7 @@ function M.update(event)
     elseif event.type == "pty_exited" then
         local id = event.data.id
         prise.log.info("Lua: pty_exited " .. id)
-
-        local new_root, next_focus = remove_pane_recursive(state.root, id)
-        state.root = new_root
-
-        if not state.root then
-            prise.quit()
-        else
-            -- If focused pane is gone, focus another one
-            if state.focused_id == id then
-                if next_focus then
-                    state.focused_id = next_focus
-                else
-                    local first = get_first_leaf(state.root)
-                    if first then
-                        state.focused_id = first.id
-                    end
-                end
-            end
-        end
-        prise.request_frame()
+        remove_pane_by_id(id)
     elseif event.type == "mouse" then
         local d = event.data
         if d.action == "press" and d.button == "left" then
@@ -711,6 +890,53 @@ local function render_node(node)
     end
 end
 
+-- Build the command palette overlay
+local function build_palette()
+    if not state.palette.visible or not state.palette.input then
+        return nil
+    end
+
+    local text = state.palette.input:text()
+    prise.log.debug("build_palette: text='" .. text .. "'")
+    local filtered = filter_commands(text)
+    if #filtered == 0 then
+        table.insert(filtered, { name = "No matches" })
+    end
+    prise.log.debug("build_palette: filtered count=" .. #filtered)
+    local items = {}
+    for _, cmd in ipairs(filtered) do
+        table.insert(items, cmd.name)
+    end
+
+    local palette_style = { bg = theme.bg2, fg = theme.fg_bright }
+    local selected_style = { bg = theme.accent, fg = theme.fg_dark }
+    local input_style = { bg = theme.bg3, fg = theme.fg_bright }
+
+    return prise.Positioned({
+        anchor = "top_center",
+        y = 2,
+        child = prise.Box({
+            border = "rounded",
+            style = palette_style,
+            child = prise.Column({
+                cross_axis_align = "stretch",
+                children = {
+                    prise.TextInput({
+                        input = state.palette.input,
+                        style = input_style,
+                    }),
+                    prise.List({
+                        items = items,
+                        selected = state.palette.selected,
+                        style = palette_style,
+                        selected_style = selected_style,
+                    }),
+                },
+            }),
+        }),
+    })
+end
+
 -- Build the powerline-style status bar
 local function build_status_bar()
     local mode_color = state.pending_command and theme.mode_command or theme.mode_normal
@@ -760,13 +986,25 @@ function M.view()
     local content = render_node(state.root)
     local status_bar = build_status_bar()
 
-    return prise.Column({
+    local main_ui = prise.Column({
         cross_axis_align = "stretch",
         children = {
             content,
             status_bar,
         },
     })
+
+    local palette = build_palette()
+    if palette then
+        return prise.Stack({
+            children = {
+                main_ui,
+                palette,
+            },
+        })
+    end
+
+    return main_ui
 end
 
 function M.get_state()

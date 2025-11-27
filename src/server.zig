@@ -1228,6 +1228,10 @@ const Server = struct {
         return env_list;
     }
 
+    fn parseClosePtyParams(params: msgpack.Value) !usize {
+        return parsePtyId(params);
+    }
+
     fn parseAttachPtyParams(params: msgpack.Value) !usize {
         return parsePtyId(params);
     }
@@ -1346,6 +1350,24 @@ const Server = struct {
             std.log.info("Created PTY {} with PID {}", .{ pty_id, process.pid });
 
             return msgpack.Value{ .unsigned = pty_id };
+        } else if (std.mem.eql(u8, method, "close_pty")) {
+            const pty_id = parseClosePtyParams(params) catch {
+                return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
+            };
+
+            if (self.ptys.fetchRemove(pty_id)) |kv| {
+                const pty_instance = kv.value;
+                pty_instance.stopAndCancelIO(self.loop);
+                // Send pty_exited notification (use 0 status for explicit close)
+                self.sendPtyExited(pty_id, 0) catch |err| {
+                    std.log.err("Failed to send pty_exited on close: {}", .{err});
+                };
+                pty_instance.joinAndFree(self.allocator);
+                std.log.info("Closed PTY {}", .{pty_id});
+                return msgpack.Value.nil;
+            } else {
+                return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
+            }
         } else if (std.mem.eql(u8, method, "attach_pty")) {
             std.log.info("attach_pty called with params: {}", .{params});
             const pty_id = parseAttachPtyParams(params) catch |err| {
