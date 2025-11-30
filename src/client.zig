@@ -1537,6 +1537,12 @@ pub const App = struct {
             .recv => |initial_bytes_read| {
                 if (initial_bytes_read == 0) {
                     log.info("Server closed connection", .{});
+                    app.state.should_quit = true;
+                    if (app.connected) {
+                        posix.close(app.fd);
+                        app.connected = false;
+                    }
+                    app.vx.deviceStatusReport(app.tty.writer()) catch {};
                     return;
                 }
 
@@ -1781,6 +1787,12 @@ pub const App = struct {
 
                     if (n == 0) {
                         log.info("Server closed connection", .{});
+                        app.state.should_quit = true;
+                        if (app.connected) {
+                            posix.close(app.fd);
+                            app.connected = false;
+                        }
+                        app.vx.deviceStatusReport(app.tty.writer()) catch {};
                         return;
                     }
                     current_bytes_read = n;
