@@ -5,8 +5,8 @@
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .ghostty = .{
-            .url = "git+https://github.com/rockorager/ghostty?ref=main#f222ae766e7464543004b4b5bb191e08bdc51d9c",
-            .hash = "ghostty-1.3.0-dev-5UdBCyDQPQSQ6_X6dtLfm8nrMJb3N3uhYEQGMsA4jW8B",
+            .url = "git+https://github.com/ghostty-org/ghostty?ref=main#34fd1dd0f6b5fd474caba73aad8f3e69446af176",
+            .hash = "ghostty-1.3.0-dev-5UdBC-IvPgR4TcHkoLiOJsA5mNdy8X8g2Fx-tUpLNSE3",
         },
         .vaxis = .{
             .url = "git+https://github.com/rockorager/libvaxis#main",
