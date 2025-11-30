@@ -349,46 +349,11 @@ const Pty = struct {
         }
         log.info("PTY read thread exiting for PTY {} (running={})", .{ self.id, self.running.load(.seq_cst) });
 
-        // Reap the child process (use WNOHANG with retries, escalating signals)
-        var status: u32 = 0;
-        var attempts: u32 = 0;
-        while (true) {
-            const result = posix.waitpid(self.process.pid, posix.W.NOHANG);
-            if (result.pid != 0) {
-                status = result.status;
-                log.info("PTY {} process {} exited with status {}", .{ self.id, self.process.pid, status });
-                break;
-            }
-            // Check if process still exists (kill with signal 0)
-            posix.kill(self.process.pid, 0) catch |err| {
-                if (err == error.ProcessNotFound) {
-                    log.info("PTY {} process {} no longer exists", .{ self.id, self.process.pid });
-                    break;
-                }
-            };
-            // Escalate signals: SIGHUP -> SIGTERM -> SIGKILL
-            // 10ms sleep between retries gives the process time to handle the signal
-            // and exit cleanly. Shorter sleeps waste CPU; longer delays slow shutdown.
-            if (attempts < 5) {
-                log.info("PTY {} process {} still alive, sending HUP", .{ self.id, self.process.pid });
-                _ = posix.kill(-self.process.pid, posix.SIG.HUP) catch {};
-            } else if (attempts < 10) {
-                log.info("PTY {} process {} still alive, sending TERM", .{ self.id, self.process.pid });
-                _ = posix.kill(-self.process.pid, posix.SIG.TERM) catch {};
-            } else {
-                log.info("PTY {} process {} still alive, sending KILL", .{ self.id, self.process.pid });
-                _ = posix.kill(-self.process.pid, posix.SIG.KILL) catch {};
-                // SIGKILL can't be caught - but still use WNOHANG to avoid hanging
-                // if process was already reaped by earlier iteration
-            }
-            attempts += 1;
-            // Give up after 20 attempts (200ms) - process is gone or something is very wrong
-            if (attempts >= 20) {
-                log.warn("PTY {} giving up waiting for process {} after {} attempts", .{ self.id, self.process.pid, attempts });
-                break;
-            }
-            std.Thread.sleep(10 * std.time.ns_per_ms);
-        }
+        // Reap the child process. SIGHUP was already sent by stopAndCancelIO or
+        // by the kernel when the PTY master was closed, so just wait.
+        const result = posix.waitpid(self.process.pid, 0);
+        const status = result.status;
+        log.info("PTY {} process {} exited with status {}", .{ self.id, self.process.pid, status });
 
         self.exit_status.store(status, .seq_cst);
         self.exited.store(true, .seq_cst);
@@ -893,7 +858,9 @@ const Client = struct {
                 }
             },
             .err => |err| {
-                log.err("Send failed: {}", .{err});
+                if (err != error.BrokenPipe) {
+                    log.err("Send failed: {}", .{err});
+                }
                 // Free current buffer
                 if (client.send_buffer) |buf| {
                     allocator.free(buf);
