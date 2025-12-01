@@ -95,6 +95,7 @@ pub const Handler = struct {
                 self.terminal.carriageReturn();
             },
             .reverse_index => self.terminal.reverseIndex(),
+
             .cursor_up => self.terminal.cursorUp(value.value),
             .cursor_down => self.terminal.cursorDown(value.value),
             .cursor_left => self.terminal.cursorLeft(value.value),
@@ -110,19 +111,9 @@ pub const Handler = struct {
                 self.terminal.screens.active.cursor.y + 1 +| value.value,
                 self.terminal.screens.active.cursor.x + 1,
             ),
-            .cursor_style => {
-                const blink = switch (value) {
-                    .default, .steady_block, .steady_bar, .steady_underline => false,
-                    .blinking_block, .blinking_bar, .blinking_underline => true,
-                };
-                const style: Screen.CursorStyle = switch (value) {
-                    .default, .blinking_block, .steady_block => .block,
-                    .blinking_bar, .steady_bar => .bar,
-                    .blinking_underline, .steady_underline => .underline,
-                };
-                self.terminal.modes.set(.cursor_blinking, blink);
-                self.terminal.screens.active.cursor.cursor_style = style;
-            },
+
+            .cursor_style => try self.handleCursorStyle(value),
+
             .erase_display_below => self.terminal.eraseDisplay(.below, value),
             .erase_display_above => self.terminal.eraseDisplay(.above, value),
             .erase_display_complete => self.terminal.eraseDisplay(.complete, value),
@@ -132,6 +123,7 @@ pub const Handler = struct {
             .erase_line_left => self.terminal.eraseLine(.left, value),
             .erase_line_complete => self.terminal.eraseLine(.complete, value),
             .erase_line_right_unless_pending_wrap => self.terminal.eraseLine(.right_unless_pending_wrap, value),
+
             .delete_chars => self.terminal.deleteChars(value),
             .erase_chars => self.terminal.eraseChars(value),
             .insert_lines => self.terminal.insertLines(value),
@@ -139,12 +131,14 @@ pub const Handler = struct {
             .delete_lines => self.terminal.deleteLines(value),
             .scroll_up => self.terminal.scrollUp(value),
             .scroll_down => self.terminal.scrollDown(value),
+
             .horizontal_tab => try self.horizontalTab(value),
             .horizontal_tab_back => try self.horizontalTabBack(value),
             .tab_clear_current => self.terminal.tabClear(.current),
             .tab_clear_all => self.terminal.tabClear(.all),
             .tab_set => self.terminal.tabSet(),
             .tab_reset => self.terminal.tabReset(),
+
             .set_mode => try self.setMode(value.mode, true),
             .reset_mode => try self.setMode(value.mode, false),
             .save_mode => self.terminal.modes.save(value.mode),
@@ -152,19 +146,17 @@ pub const Handler = struct {
                 const v = self.terminal.modes.restore(value.mode);
                 try self.setMode(value.mode, v);
             },
+
             .top_and_bottom_margin => self.terminal.setTopAndBottomMargin(value.top_left, value.bottom_right),
             .left_and_right_margin => self.terminal.setLeftAndRightMargin(value.top_left, value.bottom_right),
-            .left_and_right_margin_ambiguous => {
-                if (self.terminal.modes.get(.enable_left_and_right_margin)) {
-                    self.terminal.setLeftAndRightMargin(0, 0);
-                } else {
-                    self.terminal.saveCursor();
-                }
-            },
+            .left_and_right_margin_ambiguous => try self.handleLeftRightMarginAmbiguous(),
+
             .save_cursor => self.terminal.saveCursor(),
             .restore_cursor => try self.terminal.restoreCursor(),
+
             .invoke_charset => self.terminal.invokeCharset(value.bank, value.charset, value.locking),
             .configure_charset => self.terminal.configureCharset(value.slot, value.charset),
+
             .set_attribute => switch (value) {
                 .unknown => {},
                 else => self.terminal.setAttribute(value) catch {},
@@ -172,66 +164,40 @@ pub const Handler = struct {
             .protected_mode_off => self.terminal.setProtectedMode(.off),
             .protected_mode_iso => self.terminal.setProtectedMode(.iso),
             .protected_mode_dec => self.terminal.setProtectedMode(.dec),
+
             .mouse_shift_capture => self.terminal.flags.mouse_shift_capture = if (value) .true else .false,
             .kitty_keyboard_push => self.terminal.screens.active.kitty_keyboard.push(value.flags),
             .kitty_keyboard_pop => self.terminal.screens.active.kitty_keyboard.pop(@intCast(value)),
             .kitty_keyboard_set => self.terminal.screens.active.kitty_keyboard.set(.set, value.flags),
             .kitty_keyboard_set_or => self.terminal.screens.active.kitty_keyboard.set(.@"or", value.flags),
             .kitty_keyboard_set_not => self.terminal.screens.active.kitty_keyboard.set(.not, value.flags),
-            .modify_key_format => {
-                self.terminal.flags.modify_other_keys_2 = false;
-                switch (value) {
-                    .other_keys_numeric => self.terminal.flags.modify_other_keys_2 = true,
-                    else => {},
-                }
-            },
+            .modify_key_format => try self.handleModifyKeyFormat(value),
+
             .active_status_display => self.terminal.status_display = value,
             .decaln => try self.terminal.decaln(),
             .full_reset => self.terminal.fullReset(),
+
             .start_hyperlink => try self.terminal.screens.active.startHyperlink(value.uri, value.id),
             .end_hyperlink => self.terminal.screens.active.endHyperlink(),
-            .prompt_start => {
-                self.terminal.screens.active.cursor.page_row.semantic_prompt = .prompt;
-                self.terminal.flags.shell_redraws_prompt = value.redraw;
-            },
+
+            .prompt_start => try self.handlePromptStart(value),
             .prompt_continuation => self.terminal.screens.active.cursor.page_row.semantic_prompt = .prompt_continuation,
             .prompt_end => self.terminal.markSemanticPrompt(.input),
             .end_of_input => self.terminal.markSemanticPrompt(.command),
             .end_of_command => self.terminal.screens.active.cursor.page_row.semantic_prompt = .input,
+
             .mouse_shape => self.terminal.mouse_shape = value,
+
             .color_operation => try self.colorOperation(value.op, &value.requests),
             .kitty_color_report => try self.kittyColorOperation(value),
 
-            // Custom: Device attributes
-            .device_attributes => {
-                switch (value) {
-                    .primary => {
-                        // Primary DA (CSI c) - report as VT100 with advanced video option
-                        // ESC [ ? 1 ; 2 c
-                        // 1 = 132 columns
-                        // 2 = printer port
-                        try self.write("\x1b[?1;2c");
-                    },
-                    .secondary => {
-                        // Secondary DA (CSI > c) - report terminal type and version
-                        // ESC [ > 0 ; 0 ; 0 c
-                        try self.write("\x1b[>0;0;0c");
-                    },
-                    .tertiary => {
-                        // Tertiary DA (CSI = c) - usually ignored
-                    },
-                }
-            },
+            .device_attributes => try self.handleDeviceAttributes(value),
 
-            // No supported DCS commands have any terminal-modifying effects,
-            // but they may in the future. For now we just ignore it.
             .dcs_hook,
             .dcs_put,
             .dcs_unhook,
             => {},
 
-            // APC can modify terminal state (Kitty graphics) but we don't
-            // currently support it in the readonly stream.
             .apc_start,
             .apc_end,
             .apc_put,
@@ -243,40 +209,13 @@ pub const Handler = struct {
                 }
             },
 
-            .request_mode => {
-                try self.requestMode(value.mode);
-            },
-            .request_mode_unknown => {
-                try self.requestModeUnknown(value.mode, value.ansi);
-            },
+            .request_mode => try self.requestMode(value.mode),
+            .request_mode_unknown => try self.requestModeUnknown(value.mode, value.ansi),
 
-            .kitty_keyboard_query => {
-                const flags = self.terminal.screens.active.kitty_keyboard.current();
-                var buf: [32]u8 = undefined;
-                const resp = std.fmt.bufPrint(&buf, "\x1b[?{}u", .{flags.int()}) catch return;
-                try self.write(resp);
-            },
+            .kitty_keyboard_query => try self.handleKittyKeyboardQuery(),
 
-            .report_pwd => {
-                if (self.cwd_fn) |func| {
-                    const url = value.url;
-                    // Parse file:// URL to extract path
-                    // Format: file://hostname/path or file:///path
-                    const path = if (std.mem.startsWith(u8, url, "file://")) blk: {
-                        const after_scheme = url[7..];
-                        // Skip hostname (find next /)
-                        if (std.mem.indexOfScalar(u8, after_scheme, '/')) |idx| {
-                            break :blk after_scheme[idx..];
-                        }
-                        break :blk after_scheme;
-                    } else url;
-                    if (path.len > 0) {
-                        try func(self.cwd_ctx, path);
-                    }
-                }
-            },
+            .report_pwd => try self.handleReportPwd(value.url),
 
-            // Have no terminal-modifying effect
             .bell,
             .enquiry,
             .size_report,
@@ -288,6 +227,93 @@ pub const Handler = struct {
             .title_push,
             .title_pop,
             => {},
+        }
+    }
+
+    /// Handle cursor style action by setting blink mode and style.
+    fn handleCursorStyle(self: *Handler, value: anytype) !void {
+        const blink = switch (value) {
+            .default, .steady_block, .steady_bar, .steady_underline => false,
+            .blinking_block, .blinking_bar, .blinking_underline => true,
+        };
+        const style: Screen.CursorStyle = switch (value) {
+            .default, .blinking_block, .steady_block => .block,
+            .blinking_bar, .steady_bar => .bar,
+            .blinking_underline, .steady_underline => .underline,
+        };
+        self.terminal.modes.set(.cursor_blinking, blink);
+        self.terminal.screens.active.cursor.cursor_style = style;
+    }
+
+    /// Handle left-right margin ambiguous action.
+    fn handleLeftRightMarginAmbiguous(self: *Handler) !void {
+        if (self.terminal.modes.get(.enable_left_and_right_margin)) {
+            self.terminal.setLeftAndRightMargin(0, 0);
+        } else {
+            self.terminal.saveCursor();
+        }
+    }
+
+    /// Handle modify key format action.
+    fn handleModifyKeyFormat(self: *Handler, value: anytype) !void {
+        self.terminal.flags.modify_other_keys_2 = false;
+        switch (value) {
+            .other_keys_numeric => self.terminal.flags.modify_other_keys_2 = true,
+            else => {},
+        }
+    }
+
+    /// Handle prompt start action with redraw flag.
+    fn handlePromptStart(self: *Handler, value: anytype) !void {
+        self.terminal.screens.active.cursor.page_row.semantic_prompt = .prompt;
+        self.terminal.flags.shell_redraws_prompt = value.redraw;
+    }
+
+    /// Handle device attributes query with appropriate response.
+    fn handleDeviceAttributes(self: *Handler, value: anytype) !void {
+        switch (value) {
+            .primary => {
+                // Primary DA (CSI c) - report as VT100 with advanced video option
+                // ESC [ ? 1 ; 2 c
+                // 1 = 132 columns
+                // 2 = printer port
+                try self.write("\x1b[?1;2c");
+            },
+            .secondary => {
+                // Secondary DA (CSI > c) - report terminal type and version
+                // ESC [ > 0 ; 0 ; 0 c
+                try self.write("\x1b[>0;0;0c");
+            },
+            .tertiary => {
+                // Tertiary DA (CSI = c) - usually ignored
+            },
+        }
+    }
+
+    /// Handle kitty keyboard query by reporting current state.
+    fn handleKittyKeyboardQuery(self: *Handler) !void {
+        const flags = self.terminal.screens.active.kitty_keyboard.current();
+        var buf: [32]u8 = undefined;
+        const resp = std.fmt.bufPrint(&buf, "\x1b[?{}u", .{flags.int()}) catch return;
+        try self.write(resp);
+    }
+
+    /// Handle report current working directory (OSC 7).
+    fn handleReportPwd(self: *Handler, url: []const u8) !void {
+        if (self.cwd_fn) |func| {
+            // Parse file:// URL to extract path
+            // Format: file://hostname/path or file:///path
+            const path = if (std.mem.startsWith(u8, url, "file://")) blk: {
+                const after_scheme = url[7..];
+                // Skip hostname (find next /)
+                if (std.mem.indexOfScalar(u8, after_scheme, '/')) |idx| {
+                    break :blk after_scheme[idx..];
+                }
+                break :blk after_scheme;
+            } else url;
+            if (path.len > 0) {
+                try func(self.cwd_ctx, path);
+            }
         }
     }
 
