@@ -1129,7 +1129,9 @@ const Client = struct {
     fn handleRpcRequest(self: *Client, loop: *io.Loop, req: rpc.Request) !void {
         std.debug.assert(req.method.len > 0);
 
-        const result = try self.server.handleRequest(self, req.method, req.params);
+        const result = self.server.handleRequest(self, req.method, req.params) catch |err| {
+            return self.sendErrorResponse(loop, req.msgid, err);
+        };
         defer result.deinit(self.server.allocator);
 
         const response_arr = try self.server.allocator.alloc(msgpack.Value, 4);
@@ -1138,6 +1140,22 @@ const Client = struct {
         response_arr[1] = msgpack.Value{ .unsigned = req.msgid }; // msgid
         response_arr[2] = msgpack.Value.nil; // no error
         response_arr[3] = result; // result
+
+        const response_value = msgpack.Value{ .array = response_arr };
+        const response_bytes = try msgpack.encodeFromValue(self.server.allocator, response_value);
+        defer self.server.allocator.free(response_bytes);
+
+        std.debug.assert(response_bytes.len <= LIMITS.MESSAGE_SIZE_MAX);
+        try self.sendData(loop, response_bytes);
+    }
+
+    fn sendErrorResponse(self: *Client, loop: *io.Loop, msgid: u32, err: anyerror) !void {
+        const response_arr = try self.server.allocator.alloc(msgpack.Value, 4);
+        defer self.server.allocator.free(response_arr);
+        response_arr[0] = msgpack.Value{ .unsigned = 1 }; // type
+        response_arr[1] = msgpack.Value{ .unsigned = msgid }; // msgid
+        response_arr[2] = msgpack.Value{ .string = @errorName(err) }; // error
+        response_arr[3] = msgpack.Value.nil; // no result
 
         const response_value = msgpack.Value{ .array = response_arr };
         const response_bytes = try msgpack.encodeFromValue(self.server.allocator, response_value);
