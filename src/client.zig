@@ -211,6 +211,7 @@ pub const ServerAction = union(enum) {
     redraw: msgpack.Value,
     attached: i64,
     pty_exited: struct { pty_id: u32, status: u32 },
+    cwd_changed: struct { pty_id: u32, cwd: []const u8 },
     detached,
     color_query: ColorQueryTarget,
     server_info: struct { pty_validity: i64 },
@@ -362,7 +363,7 @@ pub const ClientLogic = struct {
         } else if (std.mem.eql(u8, notif.method, "pty_exited")) {
             return parsePtyExited(notif.params);
         } else if (std.mem.eql(u8, notif.method, "cwd_changed")) {
-            try handleCwdChanged(state, notif.params);
+            return try handleCwdChanged(state, notif.params);
         } else if (std.mem.eql(u8, notif.method, "color_query")) {
             return parseColorQuery(notif.params);
         }
@@ -430,8 +431,8 @@ pub const ClientLogic = struct {
         return .{ .pty_exited = .{ .pty_id = pty_id, .status = status } };
     }
 
-    fn handleCwdChanged(state: *ClientState, params: msgpack.Value) !void {
-        if (params != .map) return;
+    fn handleCwdChanged(state: *ClientState, params: msgpack.Value) !ServerAction {
+        if (params != .map) return .none;
 
         var pty_id_val: ?msgpack.Value = null;
         var cwd_val: ?msgpack.Value = null;
@@ -444,19 +445,22 @@ pub const ClientLogic = struct {
             }
         }
 
-        const pty_id = switch (pty_id_val orelse return) {
+        const pty_id = switch (pty_id_val orelse return .none) {
             .integer => |i| @as(i64, @intCast(i)),
             .unsigned => |u| @as(i64, @intCast(u)),
-            else => return,
+            else => return .none,
         };
 
-        const cwd = if (cwd_val) |v| (if (v == .string) v.string else null) else null;
-        if (cwd) |cwd_str| {
-            if (state.cwd_map.getPtr(pty_id)) |entry| {
-                state.allocator.free(entry.*);
-            }
-            try state.cwd_map.put(pty_id, try state.allocator.dupe(u8, cwd_str));
+        const cwd = if (cwd_val) |v| (if (v == .string) v.string else null) else return .none;
+        const cwd_str = cwd orelse return .none;
+
+        if (state.cwd_map.getPtr(pty_id)) |entry| {
+            state.allocator.free(entry.*);
         }
+        const owned_cwd = try state.allocator.dupe(u8, cwd_str);
+        try state.cwd_map.put(pty_id, owned_cwd);
+
+        return .{ .cwd_changed = .{ .pty_id = @intCast(pty_id), .cwd = cwd_str } };
     }
 
     pub fn processPipeMessage(state: *ClientState, value: msgpack.Value) !PipeAction {
@@ -609,6 +613,11 @@ pub const App = struct {
     // Pending color queries from server (pty_id -> list of targets)
     pending_color_queries: std.ArrayList(PendingColorQuery) = undefined,
 
+    // Current session name (owned by App)
+    current_session_name: ?[]const u8 = null,
+    // Auto-save timer for debouncing
+    autosave_timer: ?io.Task = null,
+
     pub const PendingColorQuery = struct {
         pty_id: u32,
         target: ServerAction.ColorQueryTarget.Target,
@@ -717,6 +726,13 @@ pub const App = struct {
             self.render_timer = null;
         }
 
+        if (self.autosave_timer) |*task| {
+            if (self.io_loop) |loop| {
+                task.cancel(loop) catch {};
+            }
+            self.autosave_timer = null;
+        }
+
         // Close the socket
         if (self.connected) {
             posix.close(self.fd);
@@ -743,6 +759,9 @@ pub const App = struct {
         }
         self.pending_attach_cwd.deinit();
         self.pending_color_queries.deinit(self.allocator);
+        if (self.current_session_name) |name| {
+            self.allocator.free(name);
+        }
         if (self.hit_regions.len > 0) self.allocator.free(self.hit_regions);
         if (self.split_handles.len > 0) self.allocator.free(self.split_handles);
         self.vx.deinit(self.allocator, self.tty.writer());
@@ -864,6 +883,22 @@ pub const App = struct {
                 app_ptr.sendDirect(encoded) catch {};
             }
         }.detachCb);
+
+        // Register save callback
+        self.ui.setSaveCallback(self, struct {
+            fn saveCb(ctx: *anyopaque) void {
+                const app_ptr: *App = @ptrCast(@alignCast(ctx));
+                app_ptr.scheduleAutoSave();
+            }
+        }.saveCb);
+
+        // Register get_session_name callback
+        self.ui.setGetSessionNameCallback(self, struct {
+            fn getNameCb(ctx: *anyopaque) ?[]const u8 {
+                const app_ptr: *App = @ptrCast(@alignCast(ctx));
+                return app_ptr.current_session_name;
+            }
+        }.getNameCb);
 
         // Manually trigger initial resize to connect
         const ws = try vaxis.Tty.getWinsize(self.tty.fd);
@@ -1772,8 +1807,13 @@ pub const App = struct {
     fn onServerInfoReceived(self: *App) !void {
         // After receiving server info, proceed with spawn or session attach
         if (self.attach_session) |session_name| {
+            // Use the attached session name
+            self.current_session_name = try self.allocator.dupe(u8, session_name);
             try self.startSessionAttach(session_name);
         } else {
+            // Generate a new session name for fresh launch
+            self.current_session_name = try self.ui.getNextSessionName();
+            log.info("Starting new session: {s}", .{self.current_session_name.?});
             try self.spawnInitialPty();
         }
     }
@@ -2282,6 +2322,12 @@ pub const App = struct {
                                     app.allocator.destroy(entry.value);
                                 }
                             },
+                            .cwd_changed => |info| {
+                                log.debug("CWD changed for PTY {}: {s}", .{ info.pty_id, info.cwd });
+                                app.ui.update(.{ .cwd_changed = .{ .pty_id = info.pty_id, .cwd = info.cwd } }) catch |err| {
+                                    log.err("Failed to update UI with cwd_changed: {}", .{err});
+                                };
+                            },
                             .detached => {
                                 log.info("Detach complete, cleaning up {} surfaces", .{app.surfaces.count()});
                                 // Clean up all surfaces before closing
@@ -2441,6 +2487,40 @@ pub const App = struct {
 
         try file.writeAll(final_json);
         log.info("Session saved to {s}", .{path});
+    }
+
+    const AUTOSAVE_DELAY_MS = 1000;
+
+    pub fn scheduleAutoSave(self: *App) void {
+        const name = self.current_session_name orelse return;
+        const loop = self.io_loop orelse return;
+
+        // Cancel existing timer if any
+        if (self.autosave_timer) |*task| {
+            task.cancel(loop) catch {};
+            self.autosave_timer = null;
+        }
+
+        // Schedule new timer (timeout takes nanoseconds)
+        self.autosave_timer = loop.timeout(AUTOSAVE_DELAY_MS * std.time.ns_per_ms, .{
+            .ptr = self,
+            .cb = onAutoSaveTimer,
+        }) catch |err| {
+            log.warn("Failed to schedule autosave timer: {}", .{err});
+            return;
+        };
+        _ = name;
+    }
+
+    fn onAutoSaveTimer(loop: *io.Loop, completion: io.Completion) anyerror!void {
+        _ = loop;
+        const self = completion.userdataCast(App);
+        self.autosave_timer = null;
+
+        const name = self.current_session_name orelse return;
+        self.saveSession(name) catch |err| {
+            log.warn("Auto-save failed: {}", .{err});
+        };
     }
 
     fn injectPtyValidity(self: *App, json: []const u8) ![]u8 {

@@ -75,6 +75,10 @@ pub const UI = struct {
     redraw_ctx: *anyopaque = undefined,
     detach_callback: ?*const fn (ctx: *anyopaque, session_name: []const u8) anyerror!void = null,
     detach_ctx: *anyopaque = undefined,
+    save_callback: ?*const fn (ctx: *anyopaque) void = null,
+    save_ctx: *anyopaque = undefined,
+    get_session_name_callback: ?*const fn (ctx: *anyopaque) ?[]const u8 = null,
+    get_session_name_ctx: *anyopaque = undefined,
     text_inputs: std.AutoHashMap(u32, *TextInput),
     next_text_input_id: u32 = 1,
 
@@ -174,6 +178,59 @@ pub const UI = struct {
         self.detach_callback = cb;
     }
 
+    pub fn setSaveCallback(self: *UI, ctx: *anyopaque, cb: *const fn (ctx: *anyopaque) void) void {
+        self.save_ctx = ctx;
+        self.save_callback = cb;
+    }
+
+    pub fn setGetSessionNameCallback(self: *UI, ctx: *anyopaque, cb: *const fn (ctx: *anyopaque) ?[]const u8) void {
+        self.get_session_name_ctx = ctx;
+        self.get_session_name_callback = cb;
+    }
+
+    pub fn getNextSessionName(self: *UI) ![]const u8 {
+        const home = std.posix.getenv("HOME") orelse return self.allocator.dupe(u8, AMORY_NAMES[0]);
+
+        const sessions_dir = try std.fs.path.join(self.allocator, &.{ home, ".local", "state", "prise", "sessions" });
+        defer self.allocator.free(sessions_dir);
+
+        var dir = std.fs.openDirAbsolute(sessions_dir, .{ .iterate = true }) catch {
+            return self.allocator.dupe(u8, AMORY_NAMES[0]);
+        };
+        defer dir.close();
+
+        var used = std.StringHashMap(void).init(self.allocator);
+        defer used.deinit();
+
+        var iter = dir.iterate();
+        while (try iter.next()) |entry| {
+            if (entry.kind != .file) continue;
+            const name = entry.name;
+            if (!std.mem.endsWith(u8, name, ".json")) continue;
+            const base = name[0 .. name.len - 5];
+            try used.put(base, {});
+        }
+
+        // Find first unused name from the list
+        for (AMORY_NAMES) |name| {
+            if (!used.contains(name)) {
+                return self.allocator.dupe(u8, name);
+            }
+        }
+
+        // All names used - append number to first name
+        var suffix: u32 = 2;
+        var buf: [32]u8 = undefined;
+        while (suffix < 1000) : (suffix += 1) {
+            const suffixed = std.fmt.bufPrint(&buf, "{s}-{d}", .{ AMORY_NAMES[0], suffix }) catch break;
+            if (!used.contains(suffixed)) {
+                return self.allocator.dupe(u8, suffixed);
+            }
+        }
+
+        return self.allocator.dupe(u8, AMORY_NAMES[0]);
+    }
+
     fn loadPriseModule(lua: *ziglua.Lua) i32 {
         lua.doString(prise_module) catch {
             lua.pushNil();
@@ -203,6 +260,14 @@ pub const UI = struct {
         // Register next_session_name
         lua.pushFunction(ziglua.wrap(nextSessionName));
         lua.setField(-2, "next_session_name");
+
+        // Register save (triggers auto-save)
+        lua.pushFunction(ziglua.wrap(save));
+        lua.setField(-2, "save");
+
+        // Register get_session_name
+        lua.pushFunction(ziglua.wrap(getSessionName));
+        lua.setField(-2, "get_session_name");
 
         // Register create_text_input
         lua.pushFunction(ziglua.wrap(createTextInput));
@@ -288,6 +353,35 @@ pub const UI = struct {
             cb(ui.redraw_ctx);
         }
         return 0;
+    }
+
+    fn save(lua: *ziglua.Lua) i32 {
+        _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
+        const ui = lua.toUserdata(UI, -1) catch return 0;
+        lua.pop(1);
+
+        if (ui.save_callback) |cb| {
+            cb(ui.save_ctx);
+        }
+        return 0;
+    }
+
+    fn getSessionName(lua: *ziglua.Lua) i32 {
+        _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
+        const ui = lua.toUserdata(UI, -1) catch {
+            lua.pushNil();
+            return 1;
+        };
+        lua.pop(1);
+
+        if (ui.get_session_name_callback) |cb| {
+            if (cb(ui.get_session_name_ctx)) |name| {
+                _ = lua.pushString(name);
+                return 1;
+            }
+        }
+        lua.pushNil();
+        return 1;
     }
 
     fn detach(lua: *ziglua.Lua) i32 {
@@ -398,55 +492,13 @@ pub const UI = struct {
         };
         lua.pop(1);
 
-        const home = std.posix.getenv("HOME") orelse {
+        const name = ui.getNextSessionName() catch {
             _ = lua.pushString(AMORY_NAMES[0]);
             return 1;
         };
+        defer ui.allocator.free(name);
 
-        const sessions_dir = std.fs.path.join(ui.allocator, &.{ home, ".local", "state", "prise", "sessions" }) catch {
-            _ = lua.pushString(AMORY_NAMES[0]);
-            return 1;
-        };
-        defer ui.allocator.free(sessions_dir);
-
-        var dir = std.fs.openDirAbsolute(sessions_dir, .{ .iterate = true }) catch {
-            _ = lua.pushString(AMORY_NAMES[0]);
-            return 1;
-        };
-        defer dir.close();
-
-        var used = std.StringHashMap(void).init(ui.allocator);
-        defer used.deinit();
-
-        var iter = dir.iterate();
-        while (iter.next() catch null) |entry| {
-            if (entry.kind != .file) continue;
-            const name = entry.name;
-            if (!std.mem.endsWith(u8, name, ".json")) continue;
-            const base = name[0 .. name.len - 5];
-            used.put(base, {}) catch continue;
-        }
-
-        // Find first unused name from the list
-        for (AMORY_NAMES) |name| {
-            if (!used.contains(name)) {
-                _ = lua.pushString(name);
-                return 1;
-            }
-        }
-
-        // All names used - append number to first name
-        var suffix: u32 = 2;
-        var buf: [32]u8 = undefined;
-        while (suffix < 1000) : (suffix += 1) {
-            const suffixed = std.fmt.bufPrint(&buf, "{s}-{d}", .{ AMORY_NAMES[0], suffix }) catch break;
-            if (!used.contains(suffixed)) {
-                _ = lua.pushString(suffixed);
-                return 1;
-            }
-        }
-
-        _ = lua.pushString(AMORY_NAMES[0]);
+        _ = lua.pushString(name);
         return 1;
     }
 

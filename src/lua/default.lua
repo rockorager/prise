@@ -730,6 +730,7 @@ function M.update(event)
         end
         update_pty_focus(old_focused_id, state.focused_id)
         prise.request_frame()
+        prise.save() -- Auto-save on pane added
     elseif event.type == "key_press" then
         -- Handle command palette
         if state.palette.visible then
@@ -935,6 +936,7 @@ function M.update(event)
         local id = event.data.id
         prise.log.info("Lua: pty_exited " .. id)
         remove_pane_by_id(id)
+        prise.save() -- Auto-save on pane removed
     elseif event.type == "mouse" then
         local d = event.data
         if d.action == "press" and d.button == "left" then
@@ -1005,7 +1007,11 @@ function M.update(event)
 
         if update_split_ratio(state.root) then
             prise.request_frame()
+            prise.save() -- Auto-save on layout change
         end
+    elseif event.type == "cwd_changed" then
+        -- CWD changed for a PTY
+        prise.save() -- Auto-save on cwd change
     end
 end
 
@@ -1105,7 +1111,8 @@ end
 ---@return table
 local function build_status_bar()
     local mode_color = state.pending_command and THEME.mode_command or THEME.mode_normal
-    local mode_text = state.pending_command and " CMD " or " PRISE "
+    local session_name = (prise.get_session_name() or "prise"):upper()
+    local mode_text = state.pending_command and " CMD " or (" " .. session_name .. " ")
 
     -- Get pane title
     local title = "Terminal"
