@@ -57,8 +57,9 @@
 
 local M = {}
 
+---Create a terminal widget that displays a PTY
 ---@param opts TerminalOpts
----@return table
+---@return table Terminal widget
 function M.Terminal(opts)
     return {
         type = "terminal",
@@ -70,8 +71,9 @@ function M.Terminal(opts)
     }
 end
 
+---Create a text widget with optional styling and segments
 ---@param opts string|TextSegment[]|TextOpts
----@return table
+---@return table Text widget
 function M.Text(opts)
     if type(opts) == "string" then
         return {
@@ -103,8 +105,9 @@ function M.Text(opts)
     }
 end
 
+---Create a column layout that arranges children vertically
 ---@param opts table[]|LayoutOpts
----@return table
+---@return table Column widget
 function M.Column(opts)
     -- If opts is an array (has numeric keys), it's just the children
     if opts[1] then
@@ -124,8 +127,9 @@ function M.Column(opts)
     }
 end
 
+---Create a row layout that arranges children horizontally
 ---@param opts table[]|LayoutOpts
----@return table
+---@return table Row widget
 function M.Row(opts)
     -- If opts is an array (has numeric keys), it's just the children
     if opts[1] then
@@ -145,8 +149,9 @@ function M.Row(opts)
     }
 end
 
+---Create a stacked layout that overlays children on top of each other
 ---@param opts table[]|LayoutOpts
----@return table
+---@return table Stack widget
 function M.Stack(opts)
     -- If opts is an array (has numeric keys), it's just the children
     if opts[1] then
@@ -164,8 +169,9 @@ function M.Stack(opts)
     }
 end
 
+---Create a positioned widget that places a child at absolute coordinates
 ---@param opts PositionedOpts
----@return table
+---@return table Positioned widget
 function M.Positioned(opts)
     return {
         type = "positioned",
@@ -178,8 +184,9 @@ function M.Positioned(opts)
     }
 end
 
+---Create a text input widget for capturing user input
 ---@param opts TextInputOpts
----@return table
+---@return table TextInput widget
 function M.TextInput(opts)
     return {
         type = "text_input",
@@ -189,8 +196,9 @@ function M.TextInput(opts)
     }
 end
 
+---Create a list widget with items and optional selection
 ---@param opts ListOpts|string[]
----@return table
+---@return table List widget
 function M.List(opts)
     return {
         type = "list",
@@ -202,8 +210,9 @@ function M.List(opts)
     }
 end
 
+---Create a box widget with border and styling options
 ---@param opts BoxOpts
----@return table
+---@return table Box widget
 function M.Box(opts)
     return {
         type = "box",
@@ -215,8 +224,9 @@ function M.Box(opts)
     }
 end
 
+---Create a padding widget that adds spacing around a child
 ---@param opts PaddingOpts
----@return table
+---@return table Padding widget
 function M.Padding(opts)
     return {
         type = "padding",
