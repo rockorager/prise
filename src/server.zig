@@ -32,6 +32,8 @@ pub const LIMITS = struct {
     pub const SEND_QUEUE_MAX: usize = 1024;
     pub const TITLE_LEN_MAX: usize = 4096;
     pub const CWD_LEN_MAX: usize = 4096; // typical PATH_MAX
+    pub const COLOR_QUERY_MAX: usize = 32;
+    pub const COLOR_QUERY_TIMEOUT_MS: i64 = 5000;
 };
 
 var signal_write_fd: posix.fd_t = undefined;
@@ -67,6 +69,12 @@ fn writeAllFd(fd: posix.fd_t, data: []const u8) !void {
 }
 
 const Pty = struct {
+    // Type declarations must come before fields
+    const ColorQuery = struct {
+        target: vt_handler.ColorTarget,
+        timestamp_ms: i64,
+    };
+
     id: usize,
     process: pty.Process,
     clients: std.ArrayList(*Client),
@@ -82,6 +90,11 @@ const Pty = struct {
     // Current working directory (from OSC 7)
     cwd: std.ArrayList(u8),
     cwd_dirty: bool = false,
+
+    // Pending color query requests from PTY applications
+    color_queries_buf: [LIMITS.COLOR_QUERY_MAX]ColorQuery = undefined,
+    color_queries_len: usize = 0,
+    color_queries_mutex: std.Thread.Mutex = .{},
 
     // Exit state
     exited: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
@@ -256,6 +269,43 @@ const Pty = struct {
         self.cwd_dirty = true;
     }
 
+    fn queueColorQuery(self: *Pty, target: vt_handler.ColorTarget) void {
+        self.color_queries_mutex.lock();
+        defer self.color_queries_mutex.unlock();
+
+        const now_ms = std.time.milliTimestamp();
+
+        // Expire old queries first
+        var i: usize = 0;
+        while (i < self.color_queries_len) {
+            if (now_ms - self.color_queries_buf[i].timestamp_ms > LIMITS.COLOR_QUERY_TIMEOUT_MS) {
+                // Shift remaining elements down
+                const remaining = self.color_queries_len - i - 1;
+                if (remaining > 0) {
+                    std.mem.copyForwards(
+                        ColorQuery,
+                        self.color_queries_buf[i..][0..remaining],
+                        self.color_queries_buf[i + 1 ..][0..remaining],
+                    );
+                }
+                self.color_queries_len -= 1;
+            } else {
+                i += 1;
+            }
+        }
+
+        if (self.color_queries_len >= LIMITS.COLOR_QUERY_MAX) {
+            log.warn("Color query queue full, dropping query", .{});
+            return;
+        }
+
+        self.color_queries_buf[self.color_queries_len] = .{
+            .target = target,
+            .timestamp_ms = now_ms,
+        };
+        self.color_queries_len += 1;
+    }
+
     // Removed broadcast - we'll send msgpack-RPC redraw notifications instead
 
     fn readThread(self: *Pty, server: *Server) void {
@@ -303,6 +353,14 @@ const Pty = struct {
                 };
             }
         }.onCwd);
+
+        // Set up color query callback (OSC 4/10/11/12)
+        handler.setColorQueryCallback(self, struct {
+            fn onColorQuery(ctx: ?*anyopaque, target: vt_handler.ColorTarget) !void {
+                const pty_inst: *Pty = @ptrCast(@alignCast(ctx));
+                pty_inst.queueColorQuery(target);
+            }
+        }.onColorQuery);
 
         var stream = vt_handler.Stream.initAlloc(self.allocator, handler);
         defer stream.deinit();
@@ -2287,6 +2345,11 @@ const Server = struct {
             };
         }
 
+        // Send pending color_query notifications
+        self.sendColorQueries(pty_instance) catch |err| {
+            std.log.err("Failed to send color_query for pty {}: {}", .{ pty_instance.id, err });
+        };
+
         // Update timestamp
         pty_instance.last_render_time = std.time.milliTimestamp();
     }
@@ -2331,6 +2394,88 @@ const Server = struct {
             if (attached) {
                 try client.sendData(self.loop, msg_bytes);
             }
+        }
+    }
+
+    fn sendColorQueries(self: *Server, pty_instance: *Pty) !void {
+        pty_instance.color_queries_mutex.lock();
+        defer pty_instance.color_queries_mutex.unlock();
+
+        const now_ms = std.time.milliTimestamp();
+
+        while (pty_instance.color_queries_len > 0) {
+            const query = pty_instance.color_queries_buf[0];
+
+            // Helper to remove first element
+            const removeFirst = struct {
+                fn remove(p: *Pty) void {
+                    const remaining = p.color_queries_len - 1;
+                    if (remaining > 0) {
+                        std.mem.copyForwards(
+                            Pty.ColorQuery,
+                            p.color_queries_buf[0..remaining],
+                            p.color_queries_buf[1..][0..remaining],
+                        );
+                    }
+                    p.color_queries_len -= 1;
+                }
+            }.remove;
+
+            // Skip expired queries
+            if (now_ms - query.timestamp_ms > LIMITS.COLOR_QUERY_TIMEOUT_MS) {
+                removeFirst(pty_instance);
+                continue;
+            }
+
+            // Build notification params based on target type
+            var map_items = try self.allocator.alloc(msgpack.Value.KeyValue, 2);
+            defer self.allocator.free(map_items);
+
+            map_items[0] = .{ .key = .{ .string = "pty_id" }, .value = .{ .unsigned = pty_instance.id } };
+
+            switch (query.target) {
+                .palette => |idx| {
+                    map_items[1] = .{ .key = .{ .string = "index" }, .value = .{ .unsigned = idx } };
+                },
+                .dynamic => |dyn| {
+                    const name: []const u8 = switch (dyn) {
+                        .foreground => "foreground",
+                        .background => "background",
+                        .cursor => "cursor",
+                        else => {
+                            removeFirst(pty_instance);
+                            continue;
+                        },
+                    };
+                    map_items[1] = .{ .key = .{ .string = "kind" }, .value = .{ .string = name } };
+                },
+                .special => {
+                    removeFirst(pty_instance);
+                    continue;
+                },
+            }
+
+            const params = msgpack.Value{ .map = map_items };
+            const msg_bytes = try msgpack.encode(self.allocator, .{ 2, "color_query", params });
+            defer self.allocator.free(msg_bytes);
+
+            // Send to each client attached to this pty
+            for (self.clients.items) |client| {
+                var attached = false;
+                for (client.attached_ptys.items) |pid| {
+                    if (pid == pty_instance.id) {
+                        attached = true;
+                        break;
+                    }
+                }
+                if (attached) {
+                    client.sendData(self.loop, msg_bytes) catch |err| {
+                        log.err("Failed to send color_query: {}", .{err});
+                    };
+                }
+            }
+
+            removeFirst(pty_instance);
         }
     }
 

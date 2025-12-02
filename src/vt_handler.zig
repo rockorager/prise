@@ -14,6 +14,8 @@ const osc_color = ghostty_vt.osc.color;
 const kitty_color = ghostty_vt.kitty.color;
 const Action = ghostty_vt.StreamAction;
 
+pub const ColorTarget = osc_color.Target;
+
 /// Custom VT handler that wraps the ghostty Terminal and can be extended
 /// to handle responses to queries (e.g. for device attributes, etc.)
 pub const Handler = struct {
@@ -32,6 +34,10 @@ pub const Handler = struct {
     /// Optional callback for notifying cwd changes (OSC 7)
     cwd_fn: ?*const fn (ctx: ?*anyopaque, cwd: []const u8) anyerror!void = null,
     cwd_ctx: ?*anyopaque = null,
+
+    /// Optional callback for color query requests (OSC 4/10/11/12)
+    color_query_fn: ?*const fn (ctx: ?*anyopaque, target: osc_color.Target) anyerror!void = null,
+    color_query_ctx: ?*anyopaque = null,
 
     pub fn init(terminal: *Terminal) Handler {
         return .{
@@ -71,6 +77,16 @@ pub const Handler = struct {
     ) void {
         self.cwd_ctx = ctx;
         self.cwd_fn = cwd_fn;
+    }
+
+    /// Set the callback for color query requests (OSC 4/10/11/12)
+    pub fn setColorQueryCallback(
+        self: *Handler,
+        ctx: ?*anyopaque,
+        color_query_fn: *const fn (ctx: ?*anyopaque, target: osc_color.Target) anyerror!void,
+    ) void {
+        self.color_query_ctx = ctx;
+        self.color_query_fn = color_query_fn;
     }
 
     /// Write data back to the PTY (if callback is set)
@@ -477,9 +493,12 @@ pub const Handler = struct {
                     mask.* = .initEmpty();
                 },
 
-                .query,
-                .reset_special,
-                => {},
+                .query => |target| {
+                    if (self.color_query_fn) |func| {
+                        try func(self.color_query_ctx, target);
+                    }
+                },
+                .reset_special => {},
             }
         }
     }
@@ -514,7 +533,20 @@ pub const Handler = struct {
                         else => {},
                     },
                 },
-                .query => {},
+                .query => |key| {
+                    if (self.color_query_fn) |func| {
+                        const target: osc_color.Target = switch (key) {
+                            .palette => |p| .{ .palette = p },
+                            .special => |s| .{ .dynamic = switch (s) {
+                                .foreground => .foreground,
+                                .background => .background,
+                                .cursor => .cursor,
+                                else => continue,
+                            } },
+                        };
+                        try func(self.color_query_ctx, target);
+                    }
+                },
             }
         }
     }
