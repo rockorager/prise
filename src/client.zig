@@ -495,6 +495,7 @@ pub const App = struct {
     first_resize_done: bool = false,
     socket_path: []const u8 = undefined,
     attach_session: ?[]const u8 = null,
+    initial_cwd: ?[]const u8 = null,
     last_render_time: i64 = 0,
     render_timer: ?io.Task = null,
 
@@ -1558,12 +1559,16 @@ pub const App = struct {
                         app.state.next_msgid += 1;
                         try app.state.pending_requests.put(msgid, .spawn);
 
-                        var params_kv = try app.allocator.alloc(msgpack.Value.KeyValue, 3);
+                        const param_count: usize = if (app.initial_cwd != null) 4 else 3;
+                        var params_kv = try app.allocator.alloc(msgpack.Value.KeyValue, param_count);
                         defer app.allocator.free(params_kv);
-                        log.info("Sending spawn_pty: rows={} cols={}", .{ ws.rows, ws.cols });
+                        log.info("Sending spawn_pty: rows={} cols={} cwd={?s}", .{ ws.rows, ws.cols, app.initial_cwd });
                         params_kv[0] = .{ .key = .{ .string = "rows" }, .value = .{ .unsigned = ws.rows } };
                         params_kv[1] = .{ .key = .{ .string = "cols" }, .value = .{ .unsigned = ws.cols } };
                         params_kv[2] = .{ .key = .{ .string = "attach" }, .value = .{ .boolean = true } };
+                        if (app.initial_cwd) |cwd| {
+                            params_kv[3] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = cwd } };
+                        }
                         const params_val = msgpack.Value{ .map = params_kv };
                         var arr = try app.allocator.alloc(msgpack.Value, 4);
                         defer app.allocator.free(arr);

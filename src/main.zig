@@ -158,6 +158,9 @@ fn runClient(allocator: std.mem.Allocator, socket_path: []const u8, attach_sessi
     app.socket_path = socket_path;
     app.attach_session = attach_session;
 
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    app.initial_cwd = posix.getcwd(&cwd_buf) catch null;
+
     try app.setup(&loop);
     try loop.run(.until_done);
 
