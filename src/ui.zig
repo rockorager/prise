@@ -332,6 +332,10 @@ pub const UI = struct {
         _ = lua.pushString(platform);
         lua.setField(-2, "platform");
 
+        // Register gwidth
+        lua.pushFunction(ziglua.wrap(gwidth));
+        lua.setField(-2, "gwidth");
+
         registerTimerMetatable(lua);
 
         return 1;
@@ -588,6 +592,13 @@ pub const UI = struct {
         const msg = lua.toString(1) catch "";
         logger.err("{s}", .{msg});
         return 0;
+    }
+
+    fn gwidth(lua: *ziglua.Lua) i32 {
+        const str = lua.toString(1) catch "";
+        const width = vaxis.gwidth.gwidth(str, .unicode);
+        lua.pushInteger(@intCast(width));
+        return 1;
     }
 
     fn setTimeout(lua: *ziglua.Lua) i32 {

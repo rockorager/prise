@@ -1423,7 +1423,7 @@ local function format_palette_item(name, shortcut, width)
     if not shortcut then
         return name
     end
-    local padding = width - #name - #shortcut
+    local padding = width - prise.gwidth(name) - prise.gwidth(shortcut)
     if padding < 2 then
         padding = 2
     end
