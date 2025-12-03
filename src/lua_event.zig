@@ -21,6 +21,7 @@ pub const PtyAttachInfo = struct {
     set_focus_fn: *const fn (app: *anyopaque, id: u32, focused: bool) anyerror!void,
     close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
+    copy_selection_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
 };
 
 pub const PtyExitedInfo = struct {
@@ -128,6 +129,7 @@ fn pushPtyAttachEvent(lua: *ziglua.Lua, info: PtyAttachInfo) void {
         .set_focus_fn = info.set_focus_fn,
         .close_fn = info.close_fn,
         .cwd_fn = info.cwd_fn,
+        .copy_selection_fn = info.copy_selection_fn,
     };
 
     _ = lua.getMetatableRegistry("PrisePty");
@@ -379,6 +381,7 @@ const PtyHandle = struct {
     set_focus_fn: *const fn (app: *anyopaque, id: u32, focused: bool) anyerror!void,
     close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
+    copy_selection_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
 };
 
 fn ptyIndex(lua: *ziglua.Lua) i32 {
@@ -419,6 +422,10 @@ fn ptyIndex(lua: *ziglua.Lua) i32 {
         lua.pushFunction(ziglua.wrap(ptyCwd));
         return 1;
     }
+    if (std.mem.eql(u8, key, "copy_selection")) {
+        lua.pushFunction(ziglua.wrap(ptyCopySelection));
+        return 1;
+    }
     return 0;
 }
 
@@ -453,6 +460,14 @@ fn ptyCwd(lua: *ziglua.Lua) i32 {
         lua.pushNil();
     }
     return 1;
+}
+
+fn ptyCopySelection(lua: *ziglua.Lua) i32 {
+    const pty = lua.checkUserdata(PtyHandle, 1, "PrisePty");
+    pty.copy_selection_fn(pty.app, pty.id) catch |err| {
+        log.err("Failed to copy selection: {}", .{err});
+    };
+    return 0;
 }
 
 fn ptySendKey(lua: *ziglua.Lua) i32 {
@@ -685,6 +700,7 @@ pub fn pushPtyUserdata(
     set_focus_fn: *const fn (app: *anyopaque, id: u32, focused: bool) anyerror!void,
     close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
+    copy_selection_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
 ) !void {
     const pty = lua.newUserdata(PtyHandle, @sizeOf(PtyHandle));
     pty.* = .{
@@ -697,6 +713,7 @@ pub fn pushPtyUserdata(
         .set_focus_fn = set_focus_fn,
         .close_fn = close_fn,
         .cwd_fn = cwd_fn,
+        .copy_selection_fn = copy_selection_fn,
     };
 
     _ = lua.getMetatableRegistry("PrisePty");

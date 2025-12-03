@@ -800,6 +800,7 @@ pub const UI = struct {
         set_focus_fn: *const fn (app: *anyopaque, id: u32, focused: bool) anyerror!void,
         close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
         cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
+        copy_selection_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     };
 
     pub const PtyLookupFn = *const fn (ctx: *anyopaque, id: u32) ?PtyLookupResult;
@@ -848,7 +849,7 @@ pub const UI = struct {
         const result = lookup_ctx.lookup_fn(lookup_ctx.ctx, id);
 
         if (result) |r| {
-            lua_event.pushPtyUserdata(lua, id, r.surface, r.app, r.send_key_fn, r.send_mouse_fn, r.send_paste_fn, r.set_focus_fn, r.close_fn, r.cwd_fn) catch {
+            lua_event.pushPtyUserdata(lua, id, r.surface, r.app, r.send_key_fn, r.send_mouse_fn, r.send_paste_fn, r.set_focus_fn, r.close_fn, r.cwd_fn, r.copy_selection_fn) catch {
                 lua.pushNil();
             };
         } else {

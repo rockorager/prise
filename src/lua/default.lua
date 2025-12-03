@@ -1252,6 +1252,23 @@ function M.update(event)
             return
         end
 
+        -- Copy selection: Cmd+c (macOS) or Ctrl+Shift+c (Linux)
+        if event.data.key == "c" then
+            local is_copy = false
+            if prise.platform == "macos" then
+                is_copy = event.data.super and not event.data.ctrl and not event.data.alt
+            else
+                is_copy = event.data.ctrl and event.data.shift and not event.data.super
+            end
+            if is_copy then
+                local pty = get_focused_pty()
+                if pty then
+                    pty:copy_selection()
+                end
+                return
+            end
+        end
+
         -- Pass key to focused PTY
         local root = get_active_root()
         if root and state.focused_id then

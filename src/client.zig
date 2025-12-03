@@ -184,6 +184,7 @@ pub const ClientState = struct {
         attach: struct { pty_id: i64, cwd: ?[]const u8 = null },
         detach,
         get_server_info,
+        copy_selection,
     };
 
     pub fn init(allocator: std.mem.Allocator) ClientState {
@@ -215,6 +216,7 @@ pub const ServerAction = union(enum) {
     detached,
     color_query: ColorQueryTarget,
     server_info: struct { pty_validity: i64 },
+    copy_to_clipboard: []const u8,
 
     pub const ColorQueryTarget = struct {
         pty_id: u32,
@@ -285,9 +287,17 @@ pub const ClientLogic = struct {
                 },
                 .detach => .detached,
                 .get_server_info => handleServerInfoResult(state, result),
+                .copy_selection => handleCopySelectionResult(result),
             };
         }
         return handleUnsolicitedResult(state, result);
+    }
+
+    fn handleCopySelectionResult(result: msgpack.Value) ServerAction {
+        if (result == .string) {
+            return .{ .copy_to_clipboard = result.string };
+        }
+        return .none;
     }
 
     fn handleServerInfoResult(state: *ClientState, result: msgpack.Value) ServerAction {
@@ -2269,6 +2279,12 @@ pub const App = struct {
                                                         return self.state.cwd_map.get(@intCast(id));
                                                     }
                                                 }.appGetCwd,
+                                                .copy_selection_fn = struct {
+                                                    fn appCopySelection(ctx: *anyopaque, id: u32) anyerror!void {
+                                                        const self: *App = @ptrCast(@alignCast(ctx));
+                                                        try self.requestCopySelection(id);
+                                                    }
+                                                }.appCopySelection,
                                             },
                                         }) catch |err| {
                                             log.err("Failed to update UI with pty_attach: {}", .{err});
@@ -2396,6 +2412,9 @@ pub const App = struct {
                             .server_info => {
                                 try app.onServerInfoReceived();
                             },
+                            .copy_to_clipboard => |text| {
+                                app.copyToClipboard(text);
+                            },
                             .none => {},
                         }
 
@@ -2491,6 +2510,35 @@ pub const App = struct {
     fn cwdLookup(ctx: *anyopaque, id: i64) ?[]const u8 {
         const self: *App = @ptrCast(@alignCast(ctx));
         return self.state.cwd_map.get(id);
+    }
+
+    pub fn requestCopySelection(self: *App, pty_id: u32) !void {
+        const msgid = self.state.next_msgid;
+        self.state.next_msgid += 1;
+
+        try self.state.pending_requests.put(msgid, .copy_selection);
+
+        var params = try self.allocator.alloc(msgpack.Value, 1);
+        defer self.allocator.free(params);
+        params[0] = .{ .unsigned = pty_id };
+
+        const msg = try msgpack.encode(self.allocator, .{ 0, msgid, "get_selection", msgpack.Value{ .array = params } });
+        defer self.allocator.free(msg);
+
+        try self.sendDirect(msg);
+    }
+
+    fn copyToClipboard(self: *App, text: []const u8) void {
+        const encoder = std.base64.standard.Encoder;
+        const encoded_len = encoder.calcSize(text.len);
+        const encoded = self.allocator.alloc(u8, encoded_len) catch return;
+        defer self.allocator.free(encoded);
+        _ = encoder.encode(encoded, text);
+
+        const writer = self.tty.writer();
+        writer.print("\x1b]52;c;{s}\x1b\\", .{encoded}) catch |err| {
+            log.err("Failed to write OSC 52: {}", .{err});
+        };
     }
 
     pub fn saveSession(self: *App, name: []const u8) !void {
@@ -2922,6 +2970,12 @@ pub const App = struct {
                     return app.state.cwd_map.get(@intCast(pty_id));
                 }
             }.getCwd,
+            .copy_selection_fn = struct {
+                fn copySelection(app_ctx: *anyopaque, pty_id: u32) anyerror!void {
+                    const app: *App = @ptrCast(@alignCast(app_ctx));
+                    try app.requestCopySelection(pty_id);
+                }
+            }.copySelection,
         };
     }
 };
