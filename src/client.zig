@@ -180,7 +180,7 @@ pub const ClientState = struct {
     pty_validity: ?i64 = null,
 
     pub const RequestInfo = union(enum) {
-        spawn,
+        spawn: struct { cwd: ?[]const u8 = null },
         attach: struct { pty_id: i64, cwd: ?[]const u8 = null },
         detach,
         get_server_info,
@@ -277,7 +277,7 @@ pub const ClientLogic = struct {
         if (request_info) |entry| {
             log.info("processServerMessage: found pending request: {s}", .{@tagName(entry.value)});
             return switch (entry.value) {
-                .spawn => handleSpawnResult(state, result),
+                .spawn => |spawn_info| handleSpawnResult(state, result, spawn_info.cwd),
                 .attach => |attach_info| {
                     state.pty_id = attach_info.pty_id;
                     state.attached = true;
@@ -308,7 +308,7 @@ pub const ClientLogic = struct {
         return .none;
     }
 
-    fn handleSpawnResult(state: *ClientState, result: msgpack.Value) ServerAction {
+    fn handleSpawnResult(state: *ClientState, result: msgpack.Value, cwd: ?[]const u8) ServerAction {
         const id: i64 = switch (result) {
             .integer => |i| i,
             .unsigned => |u| @intCast(u),
@@ -318,6 +318,12 @@ pub const ClientLogic = struct {
         if (id >= 0) {
             state.pty_id = id;
             state.attached = true;
+            if (cwd) |c| {
+                const owned_cwd = state.allocator.dupe(u8, c) catch return .{ .attached = id };
+                state.cwd_map.put(id, owned_cwd) catch {
+                    state.allocator.free(owned_cwd);
+                };
+            }
             return .{ .attached = id };
         }
         return .none;
@@ -1844,7 +1850,7 @@ pub const App = struct {
 
         const msgid = self.state.next_msgid;
         self.state.next_msgid += 1;
-        try self.state.pending_requests.put(msgid, .spawn);
+        try self.state.pending_requests.put(msgid, .{ .spawn = .{ .cwd = self.initial_cwd } });
 
         var env_map = try std.process.getEnvMap(self.allocator);
         defer env_map.deinit();
@@ -1927,7 +1933,7 @@ pub const App = struct {
             if (!validity_matches) {
                 const msgid = self.state.next_msgid;
                 self.state.next_msgid += 1;
-                try self.state.pending_requests.put(msgid, .spawn);
+                try self.state.pending_requests.put(msgid, .{ .spawn = .{ .cwd = cwd } });
                 try self.spawnPtyWithCwd(msgid, cwd);
                 continue;
             }
@@ -2294,7 +2300,7 @@ pub const App = struct {
                                 log.info("Spawning new PTY with cwd: {s}", .{if (info.cwd) |c| c else "default"});
                                 const msgid = app.state.next_msgid;
                                 app.state.next_msgid += 1;
-                                try app.state.pending_requests.put(msgid, .spawn);
+                                try app.state.pending_requests.put(msgid, .{ .spawn = .{ .cwd = info.cwd } });
 
                                 // Build env array from current process environment
                                 var env_map = try std.process.getEnvMap(app.allocator);
@@ -2438,7 +2444,7 @@ pub const App = struct {
         self.state.next_msgid += 1;
 
         log.info("spawnPty: sending request msgid={}", .{msgid});
-        try self.state.pending_requests.put(msgid, .spawn);
+        try self.state.pending_requests.put(msgid, .{ .spawn = .{ .cwd = opts.cwd } });
 
         // Build env array from current process environment
         var env_map = try std.process.getEnvMap(self.allocator);
@@ -2966,7 +2972,7 @@ test "ClientLogic - processServerMessage" {
         var state = ClientState.init(testing.allocator);
         defer state.deinit();
         // Manually add a pending spawn request
-        try state.pending_requests.put(1, .spawn);
+        try state.pending_requests.put(1, .{ .spawn = .{} });
 
         const msg = rpc.Message{
             .response = .{
