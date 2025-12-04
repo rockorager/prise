@@ -41,5 +41,11 @@ payload=$(jq -n \
     comments: (if ($comments | length) == 0 then null else $comments end)
   } | with_entries(select(.value != null))')
 
+# Check if payload has any content to post
+if [[ $(echo "$payload" | jq 'has("body") or has("comments")') == "false" ]]; then
+  echo "No content to post after filtering"
+  exit 0
+fi
+
 echo "$payload" | gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --method POST --input -
 echo "Review posted successfully"

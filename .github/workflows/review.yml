@@ -6,8 +6,8 @@ on:
 
 jobs:
   review:
-    # Skip draft PRs
-    if: ${{ !github.event.pull_request.draft }}
+    # Skip draft PRs and untrusted contributors
+    if: ${{ !github.event.pull_request.draft && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -41,7 +41,7 @@ jobs:
           echo "$HOME/.amp/bin" >> "$GITHUB_PATH"
 
       - name: Setup Zig
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@fa65c4058643678a4e4a9a60513944a7d8d35440 # v2
         with:
           version: 0.15.2
 
@@ -86,7 +86,7 @@ jobs:
           Here is the diff to review:
           PROMPT
             cat diff.patch
-          } | amp -x --dangerously-allow-all
+          } | amp -x
 
       - name: Post review
         env:
