@@ -1,0 +1,31 @@
+#!/bin/bash
+set -euo pipefail
+
+if [[ "${TOOLBOX_ACTION:-}" == "describe" ]]; then
+  cat <<'EOF'
+{"name":"leave_inline_comment","description":"Leave an inline comment on a specific line in the PR diff","args":{"message":["string","The comment explaining the issue or feedback"],"path":["string","File path relative to repo root"],"line":["number","Line number in the new version of the file"],"suggested_fix":["string","Optional replacement code for trivial fixes"]}}
+EOF
+  exit 0
+fi
+
+if [[ -z "${COMMENTS_FILE:-}" ]]; then
+  echo "COMMENTS_FILE not set" >&2
+  exit 1
+fi
+
+# Read JSON from stdin and transform it
+input=$(cat)
+
+# Validate required fields and build output
+if ! echo "$input" | jq -e '.message and .path and .line' > /dev/null 2>&1; then
+  echo '{"success":false,"error":"Missing required arguments: message, path, line"}'
+  exit 1
+fi
+
+# Add type field and append to comments file
+echo "$input" | jq -c '. + {type: "inline"}' >> "$COMMENTS_FILE"
+
+path=$(echo "$input" | jq -r '.path')
+line=$(echo "$input" | jq -r '.line')
+echo "Inline comment: $path:$line" >&2
+echo '{"success":true}'

@@ -1,0 +1,29 @@
+#!/bin/bash
+set -euo pipefail
+
+if [[ "${TOOLBOX_ACTION:-}" == "describe" ]]; then
+  cat <<'EOF'
+{"name":"leave_general_comment","description":"Leave a general comment on the PR (not tied to a specific line)","args":{"message":["string","The overall feedback or summary"]}}
+EOF
+  exit 0
+fi
+
+if [[ -z "${COMMENTS_FILE:-}" ]]; then
+  echo "COMMENTS_FILE not set" >&2
+  exit 1
+fi
+
+# Read JSON from stdin
+input=$(cat)
+
+# Validate required fields
+if ! echo "$input" | jq -e '.message' > /dev/null 2>&1; then
+  echo '{"success":false,"error":"Missing required argument: message"}'
+  exit 1
+fi
+
+# Add type field and append to comments file
+echo "$input" | jq -c '. + {type: "general"}' >> "$COMMENTS_FILE"
+
+echo "General comment recorded" >&2
+echo '{"success":true}'

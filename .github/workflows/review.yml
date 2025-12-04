@@ -2,30 +2,94 @@ name: Amp Code Review
 
 on:
   pull_request:
-    types: [opened, reopened, ready_for_review]
-  workflow_dispatch:
+    types: [opened, reopened, ready_for_review, synchronize]
 
 jobs:
   review:
-    # Skip draft PRs unless manually triggered
-    if: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+    # Skip draft PRs
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
-    # Ensure only one review runs per PR
     concurrency:
-      group: pr-${{ github.event.pull_request.number }}
+      group: pr-review-${{ github.event.pull_request.number }}
       cancel-in-progress: true
 
     permissions:
       pull-requests: write
-      checks: write
       contents: read
 
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      REPO: ${{ github.repository }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+
     steps:
-      - name: Run Amp Code Review
-        uses: docker://ghcr.io/sourcegraph/cra-github:latest
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          AMP_API_KEY: ${{ secrets.AMP_API_KEY }}
+      - name: Checkout
+        uses: actions/checkout@v4
         with:
-          args: node /app/dist/bin/review-action.js
+          fetch-depth: 0
+
+      - name: Checkout PR branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh pr checkout "$PR_NUMBER"
+
+      - name: Install Amp CLI
+        run: |
+          curl -fsSL https://ampcode.com/install.sh | bash
+          echo "$HOME/.amp/bin" >> "$GITHUB_PATH"
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Gather PR context
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr view "$PR_NUMBER" --json title,body,author > pr.json
+          gh pr diff "$PR_NUMBER" > diff.patch
+          echo "Diff size: $(wc -c < diff.patch) bytes"
+
+      - name: Run Amp review
+        env:
+          AMP_API_KEY: ${{ secrets.AMP_API_KEY }}
+          AMP_TOOLBOX: .github/review-tools
+          COMMENTS_FILE: ${{ runner.temp }}/comments.jsonl
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          touch "$COMMENTS_FILE"
+
+          {
+            cat <<'PROMPT'
+          You are reviewing a pull request for a Zig project.
+
+          Review this diff and leave inline comments on specific lines where you find:
+          - Bugs or logic errors
+          - Security issues
+          - Memory safety problems (leaks, use-after-free, bounds issues)
+          - Missing error handling
+          - Style issues that violate the project conventions
+
+          For trivial fixes (typos, obvious mistakes), include a suggested_fix.
+          Be concise and constructive. Only comment on things that matter.
+          If the code looks good, leave a general comment saying so.
+
+          The project follows TigerStyle conventions:
+          - Assertions for invariants at API boundaries
+          - Explicit bounds on collections
+          - Functions under 70 lines
+          - camelCase for functions, snake_case for variables, PascalCase for types
+
+          Here is the diff to review:
+          PROMPT
+            cat diff.patch
+          } | amp -x --dangerously-allow-all
+
+      - name: Post review
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          COMMENTS_FILE: ${{ runner.temp }}/comments.jsonl
+        run: .github/review-tools/post-review.sh
