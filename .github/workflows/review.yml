@@ -3,16 +3,22 @@ name: Amp Code Review
 on:
   pull_request:
     types: [opened, reopened, ready_for_review, synchronize]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review'
+        required: true
+        type: number
 
 jobs:
   review:
-    # Skip draft PRs and untrusted contributors
-    if: ${{ !github.event.pull_request.draft && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association) }}
+    # Skip draft PRs and untrusted contributors (unless manually triggered)
+    if: ${{ github.event_name == 'workflow_dispatch' || (!github.event.pull_request.draft && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.pull_request.author_association)) }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     concurrency:
-      group: pr-review-${{ github.event.pull_request.number }}
+      group: pr-review-${{ github.event.pull_request.number || inputs.pr_number }}
       cancel-in-progress: true
 
     permissions:
@@ -20,9 +26,8 @@ jobs:
       contents: read
 
     env:
-      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr_number }}
       REPO: ${{ github.repository }}
-      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
 
     steps:
       - name: Checkout
@@ -33,7 +38,9 @@ jobs:
       - name: Checkout PR branch
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh pr checkout "$PR_NUMBER"
+        run: |
+          gh pr checkout "$PR_NUMBER"
+          echo "HEAD_SHA=$(gh pr view "$PR_NUMBER" --json headRefOid --jq .headRefOid)" >> "$GITHUB_ENV"
 
       - name: Install Amp CLI
         run: |
