@@ -146,6 +146,45 @@ pub fn build(b: *std.Build) void {
     });
     test_step.dependOn(&b.addRunArtifact(mdman_tests).step);
 
+    // Generate man pages from docs/*.md
+    const man_step = b.step("man", "Generate man pages");
+    const man_sources = .{
+        .{ "prise.1.md", "prise.1", "1" },
+    };
+    inline for (man_sources) |entry| {
+        const md_file, const man_file, const section = entry;
+        const run_mdman = b.addRunArtifact(mdman);
+        run_mdman.addArgs(&.{ "-n", "prise", "-s", section });
+        run_mdman.addFileArg(b.path("docs/" ++ md_file));
+        const output = run_mdman.captureStdOut();
+        man_step.dependOn(&b.addInstallFile(output, "share/man/man" ++ section ++ "/" ++ man_file).step);
+    }
+    b.getInstallStep().dependOn(man_step);
+
+    // Generate HTML documentation (not installed, for website builds)
+    const web_step = b.step("web", "Generate HTML documentation");
+    const web_wf = b.addWriteFiles();
+    inline for (man_sources) |entry| {
+        const md_file, _, _ = entry;
+        const html_file = md_file[0 .. md_file.len - 3] ++ ".html";
+
+        const run_html = b.addRunArtifact(mdman);
+        run_html.addArgs(&.{ "-n", "prise", "--html-fragment" });
+        run_html.addFileArg(b.path("docs/" ++ md_file));
+        const fragment = run_html.captureStdOut();
+
+        const cat = b.addSystemCommand(&.{ "cat", "--" });
+        cat.addFileArg(b.path("docs/web/header.html"));
+        cat.addFileArg(fragment);
+        cat.addFileArg(b.path("docs/web/footer.html"));
+        _ = web_wf.addCopyFile(cat.captureStdOut(), html_file);
+    }
+    web_step.dependOn(&b.addInstallDirectory(.{
+        .source_dir = web_wf.getDirectory(),
+        .install_dir = .prefix,
+        .install_subdir = "web",
+    }).step);
+
     const setup_step = b.step("setup", "Setup development environment (install pre-commit hook)");
 
     const pre_commit_hook =

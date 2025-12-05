@@ -51,9 +51,10 @@ fn renderNode(writer: anytype, node: Node) !void {
     switch (node) {
         .heading => |h| {
             const tag = if (h.level == 1) "h1" else "h2";
-            try writer.print("<{s}>", .{tag});
+            const id = slugify(h.text);
+            try writer.print("<{s} id=\"{s}\"><a href=\"#{s}\">", .{ tag, id, id });
             try escapeAndWrite(writer, h.text);
-            try writer.print("</{s}>\n", .{tag});
+            try writer.print("</a></{s}>\n", .{tag});
         },
         .paragraph => |spans| {
             try writer.writeAll("<p>");
@@ -128,4 +129,31 @@ fn escapeAndWrite(writer: anytype, text: []const u8) !void {
             else => try writer.writeByte(c),
         }
     }
+}
+
+fn slugify(text: []const u8) []const u8 {
+    const S = struct {
+        var buf: [256]u8 = undefined;
+    };
+    var len: usize = 0;
+
+    for (text) |c| {
+        if (len >= S.buf.len) break;
+        if (c >= 'A' and c <= 'Z') {
+            S.buf[len] = c + 32;
+            len += 1;
+        } else if ((c >= 'a' and c <= 'z') or (c >= '0' and c <= '9')) {
+            S.buf[len] = c;
+            len += 1;
+        } else if (c == ' ' or c == '-' or c == '_') {
+            if (len > 0 and S.buf[len - 1] != '-') {
+                S.buf[len] = '-';
+                len += 1;
+            }
+        }
+    }
+
+    while (len > 0 and S.buf[len - 1] == '-') len -= 1;
+
+    return S.buf[0..len];
 }
