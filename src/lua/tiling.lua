@@ -21,11 +21,18 @@ local prise = require("prise")
 ---@field root? Node
 ---@field last_focused_id? number
 
+---@class PaletteRegion
+---@field start_y number
+---@field end_y number
+---@field index number
+
 ---@class PaletteState
 ---@field visible boolean
 ---@field input? userdata
 ---@field selected number
 ---@field scroll_offset number
+---@field regions PaletteRegion[]
+---@field palette_y number
 
 ---@class State
 ---@field tabs Tab[]
@@ -39,6 +46,8 @@ local prise = require("prise")
 ---@field pending_new_tab? boolean
 ---@field next_split_id number
 ---@field palette PaletteState
+---@field screen_cols number
+---@field screen_rows number
 
 ---@class Command
 ---@field name string
@@ -159,6 +168,8 @@ local state = {
         input = nil, -- TextInput handle
         selected = 1,
         scroll_offset = 0,
+        regions = {}, -- Click regions for items
+        palette_y = 5, -- Y offset of the palette
     },
     -- Rename session prompt
     rename = {
@@ -169,6 +180,9 @@ local state = {
     tab_regions = {},
     -- Currently hovered tab index (nil if none)
     hovered_tab = nil,
+    -- Screen dimensions
+    screen_cols = 80,
+    screen_rows = 24,
 }
 
 local M = {}
@@ -1622,6 +1636,28 @@ function M.update(event)
         end
 
         if d.action == "press" and d.button == "left" then
+            -- Check if click is on command palette item
+            if state.palette.visible and #state.palette.regions > 0 then
+                -- Convert float coords to integer cell positions
+                local click_x = math.floor(d.x)
+                local click_y = math.floor(d.y)
+
+                -- Palette is 60 chars wide, centered horizontally
+                local palette_width = 60
+                local palette_start_x = math.floor((state.screen_cols - palette_width) / 2)
+                local palette_end_x = palette_start_x + palette_width
+
+                if click_x >= palette_start_x and click_x < palette_end_x then
+                    for _, region in ipairs(state.palette.regions) do
+                        if click_y >= region.start_y and click_y < region.end_y then
+                            state.palette.selected = region.index
+                            execute_selected()
+                            return
+                        end
+                    end
+                end
+            end
+
             -- Check if click is on tab bar (y < 1 and we have tab regions)
             if d.y < 1 and #state.tab_regions > 0 then
                 for _, region in ipairs(state.tab_regions) do
@@ -1656,6 +1692,8 @@ function M.update(event)
             end
         end
     elseif event.type == "winsize" then
+        state.screen_cols = event.data.cols or state.screen_cols
+        state.screen_rows = event.data.rows or state.screen_rows
         prise.request_frame()
     elseif event.type == "focus_in" then
         state.app_focused = true
@@ -1766,6 +1804,7 @@ end
 ---@return table?
 local function build_palette()
     if not state.palette.visible or not state.palette.input then
+        state.palette.regions = {}
         return nil
     end
 
@@ -1787,9 +1826,22 @@ local function build_palette()
     local selected_style = { bg = THEME.accent, fg = THEME.fg_dark }
     local input_style = { bg = THEME.bg1, fg = THEME.fg_bright }
 
+    -- Calculate click regions for items
+    -- Palette layout: y=5, padding top=1, text input=1 line, separator=1 line
+    -- Items start at y = 5 + 1 + 1 + 1 = 8
+    local items_start_y = state.palette.palette_y + 1 + 1 + 1
+    state.palette.regions = {}
+    for i = 1, #items do
+        table.insert(state.palette.regions, {
+            start_y = items_start_y + (i - 1),
+            end_y = items_start_y + i,
+            index = i,
+        })
+    end
+
     return prise.Positioned({
         anchor = "top_center",
-        y = 5,
+        y = state.palette.palette_y,
         child = prise.Box({
             border = "none",
             max_width = 60,
