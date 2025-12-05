@@ -4,7 +4,7 @@ Documentation=https://prise.sh
 
 [Service]
 Type=simple
-ExecStart=prise serve
++ExecStart=%h/.local/bin/prise serve
 Restart=on-failure
 RestartSec=5
 
