@@ -196,6 +196,8 @@ function M.setup(opts)
 end
 
 local RESIZE_STEP = 0.05 -- 5% step for keyboard resize
+local PALETTE_WIDTH = 60 -- Total width of command palette
+local PALETTE_INNER_WIDTH = 56 -- Inner width (PALETTE_WIDTH - 4 for padding)
 
 ---Check if a key event matches a keybind
 ---@param event_data table The event.data from a key_press event
@@ -1642,10 +1644,8 @@ function M.update(event)
                 local click_x = math.floor(d.x)
                 local click_y = math.floor(d.y)
 
-                -- Palette is 60 chars wide, centered horizontally
-                local palette_width = 60
-                local palette_start_x = math.floor((state.screen_cols - palette_width) / 2)
-                local palette_end_x = palette_start_x + palette_width
+                local palette_start_x = math.floor((state.screen_cols - PALETTE_WIDTH) / 2)
+                local palette_end_x = palette_start_x + PALETTE_WIDTH
 
                 if click_x >= palette_start_x and click_x < palette_end_x then
                     for _, region in ipairs(state.palette.regions) do
@@ -1817,32 +1817,39 @@ local function build_palette()
     local text = state.palette.input:text()
     prise.log.debug("build_palette: text='" .. text .. "'")
     local filtered = filter_commands(text)
-    if #filtered == 0 then
+    local has_commands = #filtered > 0
+    if not has_commands then
         table.insert(filtered, { name = "No matches" })
     end
     prise.log.debug("build_palette: filtered count=" .. #filtered)
 
-    local palette_width = 56 -- inner width (60 - 4 for padding)
     local items = {}
     for _, cmd in ipairs(filtered) do
-        table.insert(items, format_palette_item(cmd.name, cmd.shortcut, palette_width))
+        table.insert(items, format_palette_item(cmd.name, cmd.shortcut, PALETTE_INNER_WIDTH))
     end
 
     local palette_style = { bg = THEME.bg1, fg = THEME.fg_bright }
     local selected_style = { bg = THEME.accent, fg = THEME.fg_dark }
     local input_style = { bg = THEME.bg1, fg = THEME.fg_bright }
 
-    -- Calculate click regions for items
+    -- Calculate click regions for visible items only (skip if no real commands)
     -- Palette layout: y=5, padding top=1, text input=1 line, separator=1 line
     -- Items start at y = 5 + 1 + 1 + 1 = 8
     local items_start_y = state.palette.palette_y + 1 + 1 + 1
     state.palette.regions = {}
-    for i = 1, #items do
-        table.insert(state.palette.regions, {
-            start_y = items_start_y + (i - 1),
-            end_y = items_start_y + i,
-            index = i,
-        })
+    if has_commands then
+        -- Calculate visible height: screen height minus palette header and padding
+        -- Subtract: palette_y (5) + padding (2) + input (1) + separator (1) + bottom padding (1)
+        local available_height = state.screen_rows - items_start_y - 1
+        local visible_count = math.min(#items - state.palette.scroll_offset, available_height)
+        for display_row = 1, visible_count do
+            local item_index = state.palette.scroll_offset + display_row
+            table.insert(state.palette.regions, {
+                start_y = items_start_y + (display_row - 1),
+                end_y = items_start_y + display_row,
+                index = item_index,
+            })
+        end
     end
 
     return prise.Positioned({
@@ -1850,7 +1857,7 @@ local function build_palette()
         y = state.palette.palette_y,
         child = prise.Box({
             border = "none",
-            max_width = 60,
+            max_width = PALETTE_WIDTH,
             style = palette_style,
             child = prise.Padding({
                 top = 1,
@@ -1864,10 +1871,11 @@ local function build_palette()
                             input = state.palette.input,
                             style = input_style,
                         }),
-                        prise.Text({ text = string.rep("─", 60), style = { fg = THEME.bg3 } }),
+                        prise.Text({ text = string.rep("─", PALETTE_WIDTH), style = { fg = THEME.bg3 } }),
                         prise.List({
                             items = items,
                             selected = state.palette.selected,
+                            scroll_offset = state.palette.scroll_offset,
                             style = palette_style,
                             selected_style = selected_style,
                         }),
@@ -1893,7 +1901,7 @@ local function build_rename()
         y = 5,
         child = prise.Box({
             border = "none",
-            max_width = 60,
+            max_width = PALETTE_WIDTH,
             style = palette_style,
             child = prise.Padding({
                 top = 1,
