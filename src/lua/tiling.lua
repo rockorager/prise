@@ -1420,7 +1420,7 @@ function M.update(event)
                 handled = true
             elseif k == "d" then
                 -- Detach from session
-                prise.detach(prise.next_session_name())
+                prise.detach(prise.get_session_name())
                 handled = true
             elseif k == "t" then
                 -- New tab
