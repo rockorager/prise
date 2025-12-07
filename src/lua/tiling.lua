@@ -176,6 +176,11 @@ local state = {
         visible = false,
         input = nil, -- TextInput handle
     },
+    -- Rename tab prompt
+    rename_tab = {
+        visible = false,
+        input = nil, -- TextInput handle
+    },
     -- Tab bar hit regions: array of {start_x, end_x, tab_index}
     tab_regions = {},
     -- Currently hovered tab index (nil if none)
@@ -1017,6 +1022,13 @@ local commands = {
         end,
     },
     {
+        name = "Rename Tab",
+        shortcut = key_prefix .. " r",
+        action = function()
+            open_rename_tab()
+        end,
+    },
+    {
         name = "Next Tab",
         shortcut = key_prefix .. " n",
         action = function()
@@ -1249,6 +1261,38 @@ local function execute_rename()
     close_rename()
 end
 
+local function open_rename_tab()
+    if not state.rename_tab.input then
+        state.rename_tab.input = prise.create_text_input()
+    end
+    local tab = get_active_tab()
+    local current_title = (tab and tab.title) or ""
+    state.rename_tab.input:clear()
+    state.rename_tab.input:insert(current_title)
+    state.rename_tab.visible = true
+    prise.request_frame()
+end
+
+local function close_rename_tab()
+    state.rename_tab.visible = false
+    prise.request_frame()
+end
+
+local function execute_rename_tab()
+    local new_title = state.rename_tab.input:text()
+    local tab = get_active_tab()
+    if tab then
+        -- If empty, clear title to show index number
+        if new_title == "" then
+            tab.title = nil
+        else
+            tab.title = new_title
+        end
+        prise.save() -- Auto-save on tab renamed
+    end
+    close_rename_tab()
+end
+
 -- --- Main Functions ---
 
 ---@param event { type: string, data: table }
@@ -1387,6 +1431,28 @@ function M.update(event)
             return
         end
 
+        -- Handle rename tab prompt
+        if state.rename_tab.visible then
+            local k = event.data.key
+
+            if k == "Escape" then
+                close_rename_tab()
+                return
+            elseif k == "Enter" then
+                execute_rename_tab()
+                return
+            elseif k == "Backspace" then
+                state.rename_tab.input:delete_backward()
+                prise.request_frame()
+                return
+            elseif #k == 1 and not event.data.ctrl and not event.data.alt and not event.data.super then
+                state.rename_tab.input:insert(k)
+                prise.request_frame()
+                return
+            end
+            return
+        end
+
         -- Open command palette
         if matches_keybind(event.data, config.keybinds.palette) then
             open_palette()
@@ -1461,6 +1527,10 @@ function M.update(event)
             elseif k == "c" then
                 -- Close current tab
                 close_current_tab()
+                handled = true
+            elseif k == "r" then
+                -- Rename current tab
+                open_rename_tab()
                 handled = true
             elseif k >= "1" and k <= "9" then
                 -- Switch to tab N
@@ -1923,6 +1993,43 @@ local function build_rename()
     })
 end
 
+---Build the rename tab modal
+---@return table?
+local function build_rename_tab()
+    if not state.rename_tab.visible or not state.rename_tab.input then
+        return nil
+    end
+
+    local palette_style = { bg = THEME.bg1, fg = THEME.fg_bright }
+    local input_style = { bg = THEME.bg1, fg = THEME.fg_bright }
+
+    return prise.Positioned({
+        anchor = "top_center",
+        y = 5,
+        child = prise.Box({
+            border = "none",
+            max_width = PALETTE_WIDTH,
+            style = palette_style,
+            child = prise.Padding({
+                top = 1,
+                bottom = 1,
+                left = 2,
+                right = 2,
+                child = prise.Column({
+                    cross_axis_align = "stretch",
+                    children = {
+                        prise.Text({ text = "Rename Tab", style = { fg = THEME.fg_dim } }),
+                        prise.TextInput({
+                            input = state.rename_tab.input,
+                            style = input_style,
+                        }),
+                    },
+                }),
+            }),
+        }),
+    })
+end
+
 ---Build the tab bar (only shown if more than 1 tab)
 ---@return table?
 local function build_tab_bar()
@@ -2043,11 +2150,12 @@ function M.view()
 
     local palette = build_palette()
     local rename = build_rename()
+    local rename_tab = build_rename_tab()
     local tab_bar = build_tab_bar()
     prise.log.debug("view: palette.visible=" .. tostring(state.palette.visible))
 
     -- When zoomed, render only the zoomed pane
-    local overlay_visible = state.palette.visible or state.rename.visible
+    local overlay_visible = state.palette.visible or state.rename.visible or state.rename_tab.visible
     local content
     if state.zoomed_pane_id then
         local path = find_node_path(root, state.zoomed_pane_id)
@@ -2081,7 +2189,7 @@ function M.view()
         children = main_children,
     })
 
-    local overlay = palette or rename
+    local overlay = palette or rename or rename_tab
     if overlay then
         return prise.Stack({
             children = {
