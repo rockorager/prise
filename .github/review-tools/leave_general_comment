@@ -22,7 +22,10 @@ if ! echo "$input" | jq -e '.message' > /dev/null 2>&1; then
   exit 1
 fi
 
-# Add type field and append to comments file
+# Add thread link if available, then add type field and append to comments file
+if [[ -n "${AMP_THREAD_URL:-}" ]]; then
+  input=$(echo "$input" | jq --arg url "$AMP_THREAD_URL" '.message += "\n\n---\n[View Amp thread](" + $url + ")"')
+fi
 echo "$input" | jq -c '. + {type: "general"}' >> "$COMMENTS_FILE"
 
 echo "General comment recorded" >&2
