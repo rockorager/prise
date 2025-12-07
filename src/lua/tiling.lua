@@ -779,6 +779,43 @@ local function deserialize_node(saved, pty_lookup)
     return nil
 end
 
+local MIN_PANE_SHARE = 0.05
+
+---Get the effective ratio for a child in a split
+---@param split Split
+---@param idx number
+---@return number
+local function effective_ratio(split, idx)
+    local n = #split.children
+    return split.children[idx].ratio or (1.0 / n)
+end
+
+---Adjust the ratios of two adjacent siblings, keeping their combined share constant
+---@param split Split
+---@param left_idx number
+---@param right_idx number
+---@param delta number Amount to add to left child (negative grows right child)
+local function adjust_pair(split, left_idx, right_idx, delta)
+    local left_r = effective_ratio(split, left_idx)
+    local right_r = effective_ratio(split, right_idx)
+    local total = left_r + right_r
+
+    local new_left = left_r + delta
+
+    -- Clamp so each keeps at least MIN_PANE_SHARE
+    if new_left < MIN_PANE_SHARE then
+        new_left = MIN_PANE_SHARE
+    end
+    if new_left > total - MIN_PANE_SHARE then
+        new_left = total - MIN_PANE_SHARE
+    end
+
+    local new_right = total - new_left
+
+    split.children[left_idx].ratio = new_left
+    split.children[right_idx].ratio = new_right
+end
+
 ---@param dimension "width"|"height"
 ---@param delta_ratio number
 local function resize_pane(dimension, delta_ratio)
@@ -820,45 +857,29 @@ local function resize_pane(dimension, delta_ratio)
 
     local num_children = #parent_split.children
 
-    -- Determine which divider to move based on delta direction and child position.
-    -- delta > 0 means "resize right/down" (move a divider to increase space on the right/bottom)
-    -- delta < 0 means "resize left/up" (move a divider to increase space on the left/top)
-    --
-    -- For child at index i:
-    -- - "resize left" (delta < 0): move the left divider left = shrink child[i-1], grow child[i]
-    -- - "resize right" (delta > 0): move the right divider right = grow child[i], shrink child[i+1]
-    local target_idx
+    -- Use pairwise adjustment to move the divider between two adjacent siblings.
+    -- This keeps other siblings unaffected and matches user expectation of
+    -- "move the nearest divider in that direction".
     if delta_ratio < 0 then
-        -- Resize left/up: affect the child to our left (shrink it)
-        target_idx = child_idx - 1
-        if target_idx < 1 then
-            return -- No left neighbor to resize
+        -- Resize left/up: grow current pane by taking from left neighbor
+        if child_idx > 1 then
+            -- Move divider between (child_idx-1, child_idx) to the left
+            adjust_pair(parent_split, child_idx - 1, child_idx, delta_ratio)
+        else
+            return
         end
     else
-        -- Resize right/down: affect the current child (grow it by increasing its ratio)
-        target_idx = child_idx
-        if target_idx >= num_children then
-            return -- No right neighbor to take space from
+        -- Resize right/down: grow current pane by taking from right neighbor
+        if child_idx < num_children then
+            -- Move divider between (child_idx, child_idx+1) to the right
+            adjust_pair(parent_split, child_idx, child_idx + 1, delta_ratio)
+        else
+            return
         end
     end
 
-    local target_child = parent_split.children[target_idx]
-    local current_ratio = target_child.ratio or (1.0 / num_children)
-    local new_ratio = current_ratio + delta_ratio
-
-    -- Clamp to valid range per child
-    local min_ratio = 0.1 / num_children
-    local max_ratio = 1.0 - (0.1 * (num_children - 1) / num_children)
-    if new_ratio < min_ratio then
-        new_ratio = min_ratio
-    end
-    if new_ratio > max_ratio then
-        new_ratio = max_ratio
-    end
-
-    target_child.ratio = new_ratio
-
     prise.request_frame()
+    prise.save()
 end
 
 ---@param direction "left"|"right"|"up"|"down"
