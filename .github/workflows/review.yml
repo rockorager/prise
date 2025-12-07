@@ -93,7 +93,7 @@ jobs:
           Here is the diff to review:
           PROMPT
             cat diff.patch
-          } | amp -x
+          } | amp -x --visibility public
 
       - name: Post review
         env:
