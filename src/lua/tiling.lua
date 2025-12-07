@@ -909,6 +909,41 @@ local function move_focus(direction)
     end
 end
 
+local function open_rename_tab()
+    if not state.rename_tab.input then
+        state.rename_tab.input = prise.create_text_input()
+    end
+    local tab = get_active_tab()
+    local current_title = (tab and tab.title) or ""
+    state.rename_tab.input:clear()
+    state.rename_tab.input:insert(current_title)
+    state.rename_tab.visible = true
+    prise.request_frame()
+end
+
+local function close_rename_tab()
+    state.rename_tab.visible = false
+    prise.request_frame()
+end
+
+local function execute_rename_tab()
+    if not state.rename_tab.input then
+        return
+    end
+    local new_title = state.rename_tab.input:text()
+    local tab = get_active_tab()
+    if tab then
+        -- If empty, clear title to show index number
+        if new_title == "" then
+            tab.title = nil
+        else
+            tab.title = new_title
+        end
+        prise.save() -- Auto-save on tab renamed
+    end
+    close_rename_tab()
+end
+
 -- Platform-dependent key prefix for shortcuts
 local key_prefix = prise.platform == "macos" and "󰘳 +k" or "Super+k"
 
@@ -1259,38 +1294,6 @@ local function execute_rename()
         prise.rename_session(new_name)
     end
     close_rename()
-end
-
-local function open_rename_tab()
-    if not state.rename_tab.input then
-        state.rename_tab.input = prise.create_text_input()
-    end
-    local tab = get_active_tab()
-    local current_title = (tab and tab.title) or ""
-    state.rename_tab.input:clear()
-    state.rename_tab.input:insert(current_title)
-    state.rename_tab.visible = true
-    prise.request_frame()
-end
-
-local function close_rename_tab()
-    state.rename_tab.visible = false
-    prise.request_frame()
-end
-
-local function execute_rename_tab()
-    local new_title = state.rename_tab.input:text()
-    local tab = get_active_tab()
-    if tab then
-        -- If empty, clear title to show index number
-        if new_title == "" then
-            tab.title = nil
-        else
-            tab.title = new_title
-        end
-        prise.save() -- Auto-save on tab renamed
-    end
-    close_rename_tab()
 end
 
 -- --- Main Functions ---
