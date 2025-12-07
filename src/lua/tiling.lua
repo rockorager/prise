@@ -797,14 +797,13 @@ local function resize_pane(dimension, delta_ratio)
     -- Traverse up to find a split of the correct direction
     local parent_split = nil
     local child_idx = nil
-    local node = nil
 
     for i = #path - 1, 1, -1 do
         if path[i].type == "split" and path[i].direction == target_split_dir then
             parent_split = path[i]
-            node = path[i + 1]
+            local node = path[i + 1]
 
-            -- Find index
+            -- Find index of current node in parent's children
             for k, c in ipairs(parent_split.children) do
                 if c == node then
                     child_idx = k
@@ -819,21 +818,45 @@ local function resize_pane(dimension, delta_ratio)
         return
     end
 
-    -- The first child's ratio controls the split position.
-    -- "Resize left/right" moves the divider in that direction regardless of which pane is focused.
-    local first_child = parent_split.children[1]
-    local current_ratio = first_child.ratio or 0.5
+    local num_children = #parent_split.children
+
+    -- Determine which divider to move based on delta direction and child position.
+    -- delta > 0 means "resize right/down" (move a divider to increase space on the right/bottom)
+    -- delta < 0 means "resize left/up" (move a divider to increase space on the left/top)
+    --
+    -- For child at index i:
+    -- - "resize left" (delta < 0): move the left divider left = shrink child[i-1], grow child[i]
+    -- - "resize right" (delta > 0): move the right divider right = grow child[i], shrink child[i+1]
+    local target_idx
+    if delta_ratio < 0 then
+        -- Resize left/up: affect the child to our left (shrink it)
+        target_idx = child_idx - 1
+        if target_idx < 1 then
+            return -- No left neighbor to resize
+        end
+    else
+        -- Resize right/down: affect the current child (grow it by increasing its ratio)
+        target_idx = child_idx
+        if target_idx >= num_children then
+            return -- No right neighbor to take space from
+        end
+    end
+
+    local target_child = parent_split.children[target_idx]
+    local current_ratio = target_child.ratio or (1.0 / num_children)
     local new_ratio = current_ratio + delta_ratio
 
-    -- Clamp to valid range
-    if new_ratio < 0.1 then
-        new_ratio = 0.1
+    -- Clamp to valid range per child
+    local min_ratio = 0.1 / num_children
+    local max_ratio = 1.0 - (0.1 * (num_children - 1) / num_children)
+    if new_ratio < min_ratio then
+        new_ratio = min_ratio
     end
-    if new_ratio > 0.9 then
-        new_ratio = 0.9
+    if new_ratio > max_ratio then
+        new_ratio = max_ratio
     end
 
-    first_child.ratio = new_ratio
+    target_child.ratio = new_ratio
 
     prise.request_frame()
 end
