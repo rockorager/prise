@@ -800,6 +800,10 @@ local function adjust_pair(split, left_idx, right_idx, delta)
     local right_r = effective_ratio(split, right_idx)
     local total = left_r + right_r
 
+    if total < 2 * MIN_PANE_SHARE then
+        return
+    end
+
     local new_left = left_r + delta
 
     -- Clamp so each keeps at least MIN_PANE_SHARE
