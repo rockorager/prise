@@ -815,13 +815,14 @@ local function resize_pane(dimension, delta_ratio)
         end
     end
 
-    if not parent_split or not child_idx or child_idx ~= 1 then
-        -- Only resize first child (sets the split ratio)
+    if not parent_split or not child_idx then
         return
     end
 
-    -- Get current ratio (nil means 0.5)
-    local current_ratio = node.ratio or 0.5
+    -- The first child's ratio controls the split position.
+    -- "Resize left/right" moves the divider in that direction regardless of which pane is focused.
+    local first_child = parent_split.children[1]
+    local current_ratio = first_child.ratio or 0.5
     local new_ratio = current_ratio + delta_ratio
 
     -- Clamp to valid range
@@ -832,7 +833,7 @@ local function resize_pane(dimension, delta_ratio)
         new_ratio = 0.9
     end
 
-    node.ratio = new_ratio
+    first_child.ratio = new_ratio
 
     prise.request_frame()
 end
