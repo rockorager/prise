@@ -127,7 +127,7 @@ pub fn build(b: *std.Build) void {
 
     const check_fmt = b.addSystemCommand(&.{
         "sh", "-c",
-        \\zig fmt --check src tools build.zig && stylua --check src/lua || {
+        \\zig fmt --check src --exclude src/lua && zig fmt --check tools build.zig && stylua --check src/lua || {
         \\  echo ""; echo "Format check failed. Run 'zig build fmt' to fix."; exit 1;
         \\}
         ,
@@ -138,6 +138,7 @@ pub fn build(b: *std.Build) void {
 
     const fmt_zig = b.addFmt(.{
         .paths = &.{ "src", "build.zig", "tools" },
+        .exclude_paths = &.{"src/lua"},
         .check = false,
     });
     fmt_step.dependOn(&fmt_zig.step);

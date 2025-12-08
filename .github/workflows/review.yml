@@ -84,6 +84,9 @@ jobs:
           Be concise and constructive. Only comment on things that matter.
           If the code looks good, leave a general comment saying so.
 
+          IMPORTANT: Always leave a general comment at the end. Include a link to this Amp thread
+          in your general comment so reviewers can see the full review context.
+
           The project follows TigerStyle conventions:
           - Assertions for invariants at API boundaries
           - Explicit bounds on collections

@@ -1,4 +1,5 @@
 local prise = require("prise")
+local utils = require("utils")
 
 ---@class Pane
 ---@field type "pane"
@@ -147,18 +148,7 @@ local config = {
     },
 }
 
----Deep merge tables (source into target)
----@param target table
----@param source table
-local function deep_merge(target, source)
-    for k, v in pairs(source) do
-        if type(v) == "table" and type(target[k]) == "table" then
-            deep_merge(target[k], v)
-        else
-            target[k] = v
-        end
-    end
-end
+local merge_config = utils.merge_config
 
 -- Convenience alias for theme access
 local THEME = config.theme
@@ -209,7 +199,7 @@ local M = {}
 ---@param opts? PriseConfig Configuration options to merge
 function M.setup(opts)
     if opts then
-        deep_merge(config, opts)
+        merge_config(config, opts)
     end
 end
 
