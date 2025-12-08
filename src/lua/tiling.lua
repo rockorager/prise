@@ -1667,6 +1667,38 @@ function M.update(event)
                 -- Quit
                 prise.detach(prise.get_session_name())
                 handled = true
+            elseif k == "(" then
+                -- Previous session
+                local sessions = prise.list_sessions()
+                if #sessions > 1 then
+                    local current = prise.get_session_name()
+                    local current_idx = 1
+                    for i, name in ipairs(sessions) do
+                        if name == current then
+                            current_idx = i
+                            break
+                        end
+                    end
+                    local prev_idx = (current_idx - 2 + #sessions) % #sessions + 1
+                    prise.switch_session(sessions[prev_idx])
+                end
+                handled = true
+            elseif k == ")" then
+                -- Next session
+                local sessions = prise.list_sessions()
+                if #sessions > 1 then
+                    local current = prise.get_session_name()
+                    local current_idx = 1
+                    for i, name in ipairs(sessions) do
+                        if name == current then
+                            current_idx = i
+                            break
+                        end
+                    end
+                    local next_idx = current_idx % #sessions + 1
+                    prise.switch_session(sessions[next_idx])
+                end
+                handled = true
             elseif k == "z" then
                 -- Toggle zoom
                 if state.zoomed_pane_id then

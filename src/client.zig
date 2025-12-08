@@ -7,6 +7,7 @@ const lua_event = @import("lua_event.zig");
 const msgpack = @import("msgpack.zig");
 const redraw = @import("redraw.zig");
 const rpc = @import("rpc.zig");
+const session = @import("session.zig");
 const Surface = @import("Surface.zig");
 const UI = @import("ui.zig").UI;
 const vaxis_helper = @import("vaxis_helper.zig");
@@ -183,6 +184,7 @@ pub const ClientState = struct {
         spawn: struct { cwd: ?[]const u8 = null },
         attach: struct { pty_id: i64, cwd: ?[]const u8 = null },
         detach,
+        switch_session: []const u8,
         get_server_info,
         copy_selection,
     };
@@ -214,6 +216,7 @@ pub const ServerAction = union(enum) {
     pty_exited: struct { pty_id: u32, status: u32 },
     cwd_changed: struct { pty_id: u32, cwd: []const u8 },
     detached,
+    switch_session: []const u8,
     color_query: ColorQueryTarget,
     server_info: struct { pty_validity: i64 },
     copy_to_clipboard: []const u8,
@@ -292,6 +295,7 @@ pub const ClientLogic = struct {
                     return .{ .attached = attach_info.pty_id };
                 },
                 .detach => .detached,
+                .switch_session => |session_name| .{ .switch_session = session_name },
                 .get_server_info => handleServerInfoResult(state, result),
                 .copy_selection => handleCopySelectionResult(result),
             };
@@ -773,11 +777,7 @@ pub const App = struct {
         if (self.tty_thread) |thread| {
             thread.join();
         }
-        var surface_it = self.surfaces.valueIterator();
-        while (surface_it.next()) |surface| {
-            surface.*.deinit();
-            self.allocator.destroy(surface.*);
-        }
+        self.clearSurfaces();
         self.surfaces.deinit();
 
         self.pipe_buf.deinit(self.allocator);
@@ -800,6 +800,15 @@ pub const App = struct {
 
         posix.close(self.pipe_read_fd);
         posix.close(self.pipe_write_fd);
+    }
+
+    fn clearSurfaces(self: *App) void {
+        var surface_it = self.surfaces.valueIterator();
+        while (surface_it.next()) |surface| {
+            surface.*.deinit();
+            self.allocator.destroy(surface.*);
+        }
+        self.surfaces.clearRetainingCapacity();
     }
 
     pub fn setup(self: *App, loop: *io.Loop) !void {
@@ -880,49 +889,11 @@ pub const App = struct {
             }
         }.redrawCb);
 
-        // Register detach callback
         self.ui.setDetachCallback(self, struct {
             fn detachCb(ctx: *anyopaque, session_name: []const u8) anyerror!void {
                 const app_ptr: *App = @ptrCast(@alignCast(ctx));
                 try app_ptr.saveSession(session_name);
-
-                // Build array of PTY IDs to detach
-                var pty_ids = try app_ptr.allocator.alloc(msgpack.Value, app_ptr.surfaces.count());
-                defer app_ptr.allocator.free(pty_ids);
-                var i: usize = 0;
-                var key_iter = app_ptr.surfaces.keyIterator();
-                while (key_iter.next()) |pty_id| {
-                    pty_ids[i] = .{ .unsigned = pty_id.* };
-                    i += 1;
-                }
-
-                // Send single detach_session request with all PTY IDs
-                const msgid = app_ptr.state.next_msgid;
-                app_ptr.state.next_msgid +%= 1;
-
-                var params = try app_ptr.allocator.alloc(msgpack.Value, 2);
-                params[0] = .{ .array = pty_ids };
-                params[1] = .{ .unsigned = @intCast(app_ptr.fd) };
-
-                var arr = try app_ptr.allocator.alloc(msgpack.Value, 4);
-                arr[0] = .{ .unsigned = 0 }; // request
-                arr[1] = .{ .unsigned = msgid };
-                arr[2] = .{ .string = "detach_ptys" };
-                arr[3] = .{ .array = params };
-
-                const encoded = msgpack.encodeFromValue(app_ptr.allocator, msgpack.Value{ .array = arr }) catch {
-                    app_ptr.allocator.free(arr);
-                    app_ptr.allocator.free(params);
-                    return;
-                };
-                defer app_ptr.allocator.free(encoded);
-                app_ptr.allocator.free(arr);
-                app_ptr.allocator.free(params);
-
-                // Track that we're waiting for detach response
-                try app_ptr.state.pending_requests.put(msgid, .detach);
-
-                app_ptr.sendDirect(encoded) catch {};
+                try app_ptr.sendDetachPtysRequest(null);
             }
         }.detachCb);
 
@@ -949,6 +920,25 @@ pub const App = struct {
                 try app_ptr.renameCurrentSession(new_name);
             }
         }.renameCb);
+
+        // Register list_sessions callback
+        self.ui.setListSessionsCallback(self, struct {
+            fn listCb(ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![][]const u8 {
+                const app_ptr: *App = @ptrCast(@alignCast(ctx));
+                return app_ptr.listSessions(allocator);
+            }
+        }.listCb);
+
+        // Register switch_session callback
+        self.ui.setSwitchSessionCallback(self, struct {
+            fn switchCb(ctx: *anyopaque, session_name: []const u8) anyerror!void {
+                const app_ptr: *App = @ptrCast(@alignCast(ctx));
+                const current_name = app_ptr.current_session_name orelse return error.NoCurrentSession;
+                if (std.mem.eql(u8, current_name, session_name)) return;
+                try app_ptr.saveSession(current_name);
+                try app_ptr.sendDetachPtysRequest(session_name);
+            }
+        }.switchCb);
 
         // Manually trigger initial resize to connect
         const ws = try vaxis.Tty.getWinsize(self.tty.fd);
@@ -2432,15 +2422,7 @@ pub const App = struct {
                             },
                             .detached => {
                                 log.info("Detach complete, cleaning up {} surfaces", .{app.surfaces.count()});
-                                // Clean up all surfaces before closing
-                                var surface_it = app.surfaces.valueIterator();
-                                while (surface_it.next()) |surface| {
-                                    log.info("Cleaning up surface", .{});
-                                    surface.*.deinit();
-                                    app.allocator.destroy(surface.*);
-                                }
-                                log.info("Cleared surfaces", .{});
-                                app.surfaces.clearRetainingCapacity();
+                                app.clearSurfaces();
 
                                 app.state.should_quit = true;
 
@@ -2468,6 +2450,22 @@ pub const App = struct {
                                 app.vx.deviceStatusReport(app.tty.writer()) catch {};
                                 log.info("Returning from detach handler", .{});
                                 return;
+                            },
+                            .switch_session => |session_name| {
+                                log.info("Switching to session: {s}", .{session_name});
+                                app.clearSurfaces();
+
+                                // Update current session name (transfer ownership)
+                                if (app.current_session_name) |old_name| {
+                                    app.allocator.free(old_name);
+                                }
+                                app.current_session_name = session_name;
+
+                                // Load and attach to the new session
+                                app.startSessionAttach(session_name) catch |err| {
+                                    log.err("Failed to load session {s}: {}", .{ session_name, err });
+                                    app.state.should_quit = true;
+                                };
                             },
                             .color_query => |query| {
                                 try app.handleColorQuery(query);
@@ -2675,6 +2673,54 @@ pub const App = struct {
         };
 
         return error.SessionAlreadyExists;
+    }
+
+    pub fn listSessions(self: *App, allocator: std.mem.Allocator) ![][]const u8 {
+        _ = self;
+        return session.getSessionNames(allocator);
+    }
+
+    /// Sends a detach_ptys request. If `switch_session_name` is provided, the request
+    /// will trigger a session switch after detach; otherwise it's a plain detach.
+    fn sendDetachPtysRequest(self: *App, switch_session_name: ?[]const u8) !void {
+        var pty_ids = try self.allocator.alloc(msgpack.Value, self.surfaces.count());
+        defer self.allocator.free(pty_ids);
+        var i: usize = 0;
+        var key_iter = self.surfaces.keyIterator();
+        while (key_iter.next()) |pty_id| {
+            pty_ids[i] = .{ .unsigned = pty_id.* };
+            i += 1;
+        }
+
+        const msgid = self.state.next_msgid;
+        self.state.next_msgid +%= 1;
+
+        var params = try self.allocator.alloc(msgpack.Value, 2);
+        params[0] = .{ .array = pty_ids };
+        params[1] = .{ .unsigned = @intCast(self.fd) };
+
+        var arr = try self.allocator.alloc(msgpack.Value, 4);
+        arr[0] = .{ .unsigned = 0 }; // request
+        arr[1] = .{ .unsigned = msgid };
+        arr[2] = .{ .string = "detach_ptys" };
+        arr[3] = .{ .array = params };
+
+        const encoded = msgpack.encodeFromValue(self.allocator, msgpack.Value{ .array = arr }) catch {
+            self.allocator.free(arr);
+            self.allocator.free(params);
+            return;
+        };
+        defer self.allocator.free(encoded);
+        self.allocator.free(arr);
+        self.allocator.free(params);
+
+        const request_info: ClientState.RequestInfo = if (switch_session_name) |name|
+            .{ .switch_session = try self.allocator.dupe(u8, name) }
+        else
+            .detach;
+
+        try self.state.pending_requests.put(msgid, request_info);
+        try self.sendDirect(encoded);
     }
 
     pub fn deleteCurrentSession(self: *App) void {

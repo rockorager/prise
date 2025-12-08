@@ -7,6 +7,7 @@ const io = @import("io.zig");
 const msgpack = @import("msgpack.zig");
 const rpc = @import("rpc.zig");
 const server = @import("server.zig");
+const session = @import("session.zig");
 const client = @import("client.zig");
 const posix = std.posix;
 
@@ -264,8 +265,8 @@ fn handleSessionCommand(allocator: std.mem.Allocator, args: *std.process.ArgIter
         try printSessionHelp();
         return null;
     } else if (std.mem.eql(u8, subcmd, "attach")) {
-        const session = args.next() orelse try findMostRecentSession(allocator);
-        return .{ .attach_session = session };
+        const session_name = args.next() orelse try findMostRecentSession(allocator);
+        return .{ .attach_session = session_name };
     } else if (std.mem.eql(u8, subcmd, "list")) {
         try listSessions(allocator);
         return null;
@@ -401,19 +402,8 @@ fn runClient(allocator: std.mem.Allocator, socket_path: []const u8, args: ParseR
     }
 }
 
-fn getSessionsDir(allocator: std.mem.Allocator) !struct { dir: std.fs.Dir, path: []const u8 } {
-    const home = std.posix.getenv("HOME") orelse return error.NoHomeDirectory;
-    const sessions_dir = try std.fs.path.join(allocator, &.{ home, ".local", "state", "prise", "sessions" });
-
-    const dir = std.fs.openDirAbsolute(sessions_dir, .{ .iterate = true }) catch |err| {
-        allocator.free(sessions_dir);
-        if (err == error.FileNotFound) {
-            return error.NoSessionsFound;
-        }
-        return err;
-    };
-
-    return .{ .dir = dir, .path = sessions_dir };
+fn getSessionsDir(allocator: std.mem.Allocator) !session.SessionsDir {
+    return session.getSessionsDir(allocator);
 }
 
 fn listSessions(allocator: std.mem.Allocator) !void {
@@ -425,31 +415,16 @@ fn listSessionsTo(allocator: std.mem.Allocator, file: std.fs.File) !void {
     var writer = file.writer(&buf);
     defer writer.interface.flush() catch {};
 
-    const result = getSessionsDir(allocator) catch |err| {
-        if (err == error.NoSessionsFound) {
-            try writer.interface.print("No sessions found.\n", .{});
-            return;
-        }
-        return err;
-    };
-    defer allocator.free(result.path);
-    var dir = result.dir;
-    defer dir.close();
+    const names = try session.getSessionNames(allocator);
+    defer session.freeSessionNames(allocator, names);
 
-    var count: usize = 0;
-
-    var iter = dir.iterate();
-    while (try iter.next()) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
-
-        const name_without_ext = entry.name[0 .. entry.name.len - 5];
-        try writer.interface.print("{s}\n", .{name_without_ext});
-        count += 1;
+    if (names.len == 0) {
+        try writer.interface.print("No sessions found.\n", .{});
+        return;
     }
 
-    if (count == 0) {
-        try writer.interface.print("No sessions found.\n", .{});
+    for (names) |name| {
+        try writer.interface.print("{s}\n", .{name});
     }
 }
 
@@ -458,16 +433,14 @@ fn renameSession(allocator: std.mem.Allocator, old_name: []const u8, new_name: [
     var stdout = std.fs.File.stdout().writer(&buf);
     defer stdout.interface.flush() catch {};
 
-    const result = getSessionsDir(allocator) catch |err| {
+    var result = getSessionsDir(allocator) catch |err| {
         if (err == error.NoSessionsFound) {
             try stdout.interface.print("Session '{s}' not found.\n", .{old_name});
             return error.SessionNotFound;
         }
         return err;
     };
-    defer allocator.free(result.path);
-    var dir = result.dir;
-    defer dir.close();
+    defer result.deinit(allocator);
 
     var old_filename_buf: [256]u8 = undefined;
     const old_filename = std.fmt.bufPrint(&old_filename_buf, "{s}.json", .{old_name}) catch {
@@ -481,14 +454,14 @@ fn renameSession(allocator: std.mem.Allocator, old_name: []const u8, new_name: [
         return error.NameTooLong;
     };
 
-    dir.access(old_filename, .{}) catch {
+    result.dir.access(old_filename, .{}) catch {
         try stdout.interface.print("Session '{s}' not found.\n", .{old_name});
         return error.SessionNotFound;
     };
 
-    dir.access(new_filename, .{}) catch |err| {
+    result.dir.access(new_filename, .{}) catch |err| {
         if (err != error.FileNotFound) return err;
-        dir.rename(old_filename, new_filename) catch |rename_err| {
+        result.dir.rename(old_filename, new_filename) catch |rename_err| {
             try stdout.interface.print("Failed to rename session: {}\n", .{rename_err});
             return rename_err;
         };
@@ -505,16 +478,14 @@ fn deleteSession(allocator: std.mem.Allocator, name: []const u8) !void {
     var stdout = std.fs.File.stdout().writer(&buf);
     defer stdout.interface.flush() catch {};
 
-    const result = getSessionsDir(allocator) catch |err| {
+    var result = getSessionsDir(allocator) catch |err| {
         if (err == error.NoSessionsFound) {
             try stdout.interface.print("Session '{s}' not found.\n", .{name});
             return error.SessionNotFound;
         }
         return err;
     };
-    defer allocator.free(result.path);
-    var dir = result.dir;
-    defer dir.close();
+    defer result.deinit(allocator);
 
     var filename_buf: [256]u8 = undefined;
     const filename = std.fmt.bufPrint(&filename_buf, "{s}.json", .{name}) catch {
@@ -522,7 +493,7 @@ fn deleteSession(allocator: std.mem.Allocator, name: []const u8) !void {
         return error.NameTooLong;
     };
 
-    dir.deleteFile(filename) catch |err| {
+    result.dir.deleteFile(filename) catch |err| {
         if (err == error.FileNotFound) {
             try stdout.interface.print("Session '{s}' not found.\n", .{name});
             return error.SessionNotFound;
@@ -697,25 +668,23 @@ fn killPty(allocator: std.mem.Allocator, socket_path: []const u8, pty_id: u32) !
 }
 
 fn findMostRecentSession(allocator: std.mem.Allocator) ![]const u8 {
-    const result = getSessionsDir(allocator) catch |err| {
+    var result = getSessionsDir(allocator) catch |err| {
         if (err == error.NoSessionsFound) {
             log.err("No sessions directory found", .{});
         }
         return err;
     };
-    defer allocator.free(result.path);
-    var dir = result.dir;
-    defer dir.close();
+    defer result.deinit(allocator);
 
     var most_recent: ?[]const u8 = null;
     var most_recent_time: i128 = 0;
 
-    var iter = dir.iterate();
+    var iter = result.dir.iterate();
     while (try iter.next()) |entry| {
         if (entry.kind != .file) continue;
         if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
 
-        const stat = dir.statFile(entry.name) catch continue;
+        const stat = result.dir.statFile(entry.name) catch continue;
         const mtime = stat.mtime;
 
         if (mtime > most_recent_time) {

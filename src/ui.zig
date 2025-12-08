@@ -82,6 +82,10 @@ pub const UI = struct {
     get_session_name_ctx: *anyopaque = undefined,
     rename_session_callback: ?*const fn (ctx: *anyopaque, new_name: []const u8) anyerror!void = null,
     rename_session_ctx: *anyopaque = undefined,
+    list_sessions_callback: ?*const fn (ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![][]const u8 = null,
+    list_sessions_ctx: *anyopaque = undefined,
+    switch_session_callback: ?*const fn (ctx: *anyopaque, session_name: []const u8) anyerror!void = null,
+    switch_session_ctx: *anyopaque = undefined,
     text_inputs: std.AutoHashMap(u32, *TextInput),
     next_text_input_id: u32 = 1,
 
@@ -235,6 +239,16 @@ pub const UI = struct {
         self.rename_session_callback = cb;
     }
 
+    pub fn setListSessionsCallback(self: *UI, ctx: *anyopaque, cb: *const fn (ctx: *anyopaque, allocator: std.mem.Allocator) anyerror![][]const u8) void {
+        self.list_sessions_ctx = ctx;
+        self.list_sessions_callback = cb;
+    }
+
+    pub fn setSwitchSessionCallback(self: *UI, ctx: *anyopaque, cb: *const fn (ctx: *anyopaque, session_name: []const u8) anyerror!void) void {
+        self.switch_session_ctx = ctx;
+        self.switch_session_callback = cb;
+    }
+
     pub fn getNextSessionName(self: *UI) ![]const u8 {
         const home = std.posix.getenv("HOME") orelse return self.allocator.dupe(u8, AMORY_NAMES[0]);
 
@@ -352,6 +366,14 @@ pub const UI = struct {
         // Register rename_session
         lua.pushFunction(ziglua.wrap(renameSession));
         lua.setField(-2, "rename_session");
+
+        // Register list_sessions
+        lua.pushFunction(ziglua.wrap(listSessions));
+        lua.setField(-2, "list_sessions");
+
+        // Register switch_session
+        lua.pushFunction(ziglua.wrap(switchSession));
+        lua.setField(-2, "switch_session");
 
         // Register create_text_input
         lua.pushFunction(ziglua.wrap(createTextInput));
@@ -501,6 +523,61 @@ pub const UI = struct {
         } else {
             lua.pushBoolean(false);
         }
+        return 1;
+    }
+
+    fn listSessions(lua: *ziglua.Lua) i32 {
+        _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
+        const ui = lua.toUserdata(UI, -1) catch {
+            lua.createTable(0, 0);
+            return 1;
+        };
+        lua.pop(1);
+
+        if (ui.list_sessions_callback) |cb| {
+            const sessions = cb(ui.list_sessions_ctx, ui.allocator) catch {
+                lua.createTable(0, 0);
+                return 1;
+            };
+            defer {
+                for (sessions) |s| {
+                    ui.allocator.free(s);
+                }
+                ui.allocator.free(sessions);
+            }
+
+            lua.createTable(@intCast(sessions.len), 0);
+            for (sessions, 0..) |session, i| {
+                _ = lua.pushString(session);
+                lua.rawSetIndex(-2, @intCast(i + 1));
+            }
+        } else {
+            lua.createTable(0, 0);
+        }
+        return 1;
+    }
+
+    fn switchSession(lua: *ziglua.Lua) i32 {
+        _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
+        const ui = lua.toUserdata(UI, -1) catch {
+            lua.pushBoolean(false);
+            return 1;
+        };
+        lua.pop(1);
+
+        const session_name = lua.toString(1) catch {
+            lua.pushBoolean(false);
+            return 1;
+        };
+
+        const cb = ui.switch_session_callback orelse {
+            lua.pushBoolean(false);
+            return 1;
+        };
+        cb(ui.switch_session_ctx, session_name) catch |err| {
+            lua.raiseErrorStr("Failed to switch session: %s", .{@errorName(err).ptr});
+        };
+        lua.pushBoolean(true);
         return 1;
     }
 
