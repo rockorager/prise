@@ -97,6 +97,7 @@ local POWERLINE_SYMBOLS = {
 
 ---@class PriseBordersConfig
 ---@field enabled? boolean Show pane borders (default: false)
+---@field show_single_pane? boolean Show border when only one pane exists (default: false)
 ---@field style? "none"|"single"|"double"|"rounded" Border style (default: "single")
 ---@field focused_color? string Hex color for focused pane border (default: "#89b4fa")
 ---@field unfocused_color? string Hex color for unfocused borders (default: "#585b70")
@@ -132,6 +133,7 @@ local config = {
     },
     borders = {
         enabled = false,
+        show_single_pane = false,
         style = "single",
         focused_color = "#89b4fa", -- Blue (matches default theme.accent)
         unfocused_color = "#585b70", -- Gray (matches default theme.bg4)
@@ -674,6 +676,19 @@ local function count_panes(node)
         return count
     end
     return 0
+end
+
+---Determine if borders should be shown for the active tab
+---@return boolean
+local function should_show_borders()
+    if not config.borders.enabled then
+        return false
+    end
+    if config.borders.show_single_pane then
+        return true
+    end
+    local root = get_active_root()
+    return count_panes(root) > 1
 end
 
 ---Get index of focused pane (1-based) and total count in active tab
@@ -1894,8 +1909,8 @@ local function render_node(node, force_unfocused)
             focus = is_focused,
         })
 
-        -- Wrap in Box if borders are enabled
-        if config.borders.enabled then
+        -- Wrap in Box if borders should be shown
+        if should_show_borders() then
             local border_color = is_focused and config.borders.focused_color or config.borders.unfocused_color
 
             return prise.Box({
@@ -2235,8 +2250,9 @@ function M.view()
                 focus = not overlay_visible,
             })
 
-            -- Apply borders to zoomed pane if enabled
-            if config.borders.enabled then
+            -- Apply borders to zoomed pane if enabled and show_single_pane is true
+            -- (zoomed pane is a temporary single-pane view)
+            if config.borders.enabled and config.borders.show_single_pane then
                 content = prise.Box({
                     border = config.borders.style,
                     style = { fg = config.borders.focused_color }, -- Zoomed pane is always focused
