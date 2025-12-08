@@ -1967,7 +1967,7 @@ local function build_palette()
         table.insert(items, format_palette_item(cmd.name, cmd.shortcut, PALETTE_INNER_WIDTH))
     end
 
-    local palette_fg = config.borders.enabled and config.borders.focused_color or THEME.fg_bright
+    local palette_style = { bg = THEME.bg1, fg = THEME.fg_bright }
     local palette_style = { bg = THEME.bg1, fg = palette_fg }
     local selected_style = { bg = THEME.accent, fg = THEME.fg_dark }
     local input_style = { bg = THEME.bg1, fg = THEME.fg_bright }
