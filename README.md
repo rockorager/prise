@@ -153,6 +153,33 @@ ui.setup({
 return ui
 ```
 
+### Pane Borders
+
+Enable borders around panes for visual separation:
+
+```lua
+local ui = require("prise").tiling()
+
+ui.setup({
+    borders = {
+        enabled = true,
+        style = "rounded",              -- "single", "double", "rounded", or "none"
+        focused_color = "#89b4fa",      -- Blue for active pane (default)
+        unfocused_color = "#585b70",    -- Gray for inactive panes (default)
+    },
+})
+
+return ui
+```
+
+Available border styles:
+- `"single"` - Single-line borders: `┌─┐│└┘` (default)
+- `"double"` - Double-line borders: `╔═╗║╚╝`
+- `"rounded"` - Rounded corners: `╭─╮│╰╯`
+- `"none"` - Invisible borders (for consistent spacing)
+
+The focused pane uses `focused_color` (default: blue) to make it easy to identify the active terminal.
+
 ### Default Keybinds
 
 The default leader key is `Super+k` (Cmd+k on macOS). After pressing the leader:

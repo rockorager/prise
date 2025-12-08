@@ -94,8 +94,15 @@ local POWERLINE_SYMBOLS = {
 ---@field leader? PriseKeybind Key to enter command mode (default: super+k)
 ---@field palette? PriseKeybind Key to open command palette (default: super+p)
 
+---@class PriseBordersConfig
+---@field enabled? boolean Show pane borders (default: false)
+---@field style? "none"|"single"|"double"|"rounded" Border style (default: "single")
+---@field focused_color? string Hex color for focused pane border (default: "#89b4fa")
+---@field unfocused_color? string Hex color for unfocused borders (default: "#585b70")
+
 ---@class PriseConfig
 ---@field theme? PriseTheme Color theme options
+---@field borders? PriseBordersConfig Pane border options
 ---@field status_bar? PriseStatusBarConfig Status bar options
 ---@field tab_bar? PriseTabBarConfig Tab bar options
 ---@field keybinds? PriseKeybinds Keybind configuration
@@ -121,6 +128,12 @@ local config = {
         accent = "#89b4fa", -- Blue accent
         green = "#a6e3a1", -- Success/connected
         yellow = "#f9e2af", -- Warning
+    },
+    borders = {
+        enabled = false,
+        style = "single",
+        focused_color = "#89b4fa", -- Blue (matches default theme.accent)
+        unfocused_color = "#585b70", -- Gray (matches default theme.bg4)
     },
     status_bar = {
         enabled = true,
@@ -1885,11 +1898,25 @@ local function render_node(node, force_unfocused)
         prise.log.debug(
             "render_node: force_unfocused=" .. tostring(force_unfocused) .. " is_focused=" .. tostring(is_focused)
         )
-        return prise.Terminal({
+        local terminal = prise.Terminal({
             pty = node.pty,
             ratio = node.ratio,
             focus = is_focused,
         })
+
+        -- Wrap in Box if borders are enabled
+        if config.borders.enabled then
+            local border_color = is_focused and config.borders.focused_color or config.borders.unfocused_color
+
+            return prise.Box({
+                border = config.borders.style,
+                style = { fg = border_color },
+                child = terminal,
+                ratio = node.ratio, -- Propagate ratio for layout system
+            })
+        else
+            return terminal
+        end
     elseif is_split(node) then
         local children_widgets = {}
         for _, child in ipairs(node.children) do
@@ -1950,7 +1977,8 @@ local function build_palette()
         table.insert(items, format_palette_item(cmd.name, cmd.shortcut, PALETTE_INNER_WIDTH))
     end
 
-    local palette_style = { bg = THEME.bg1, fg = THEME.fg_bright }
+    local palette_fg = config.borders.enabled and config.borders.focused_color or THEME.fg_bright
+    local palette_style = { bg = THEME.bg1, fg = palette_fg }
     local selected_style = { bg = THEME.accent, fg = THEME.fg_dark }
     local input_style = { bg = THEME.bg1, fg = THEME.fg_bright }
 
@@ -2015,7 +2043,8 @@ local function build_rename()
         return nil
     end
 
-    local palette_style = { bg = THEME.bg1, fg = THEME.fg_bright }
+    local palette_fg = config.borders.enabled and config.borders.focused_color or THEME.fg_bright
+    local palette_style = { bg = THEME.bg1, fg = palette_fg }
     local input_style = { bg = THEME.bg1, fg = THEME.fg_bright }
 
     return prise.Positioned({
@@ -2052,7 +2081,8 @@ local function build_rename_tab()
         return nil
     end
 
-    local palette_style = { bg = THEME.bg1, fg = THEME.fg_bright }
+    local palette_fg = config.borders.enabled and config.borders.focused_color or THEME.fg_bright
+    local palette_style = { bg = THEME.bg1, fg = palette_fg }
     local input_style = { bg = THEME.bg1, fg = THEME.fg_bright }
 
     return prise.Positioned({
@@ -2213,10 +2243,21 @@ function M.view()
         local path = find_node_path(root, state.zoomed_pane_id)
         if path then
             local pane = path[#path]
-            content = prise.Terminal({
+            local terminal = prise.Terminal({
                 pty = pane.pty,
                 focus = not overlay_visible,
             })
+
+            -- Apply borders to zoomed pane if enabled
+            if config.borders.enabled then
+                content = prise.Box({
+                    border = config.borders.style,
+                    style = { fg = config.borders.focused_color }, -- Zoomed pane is always focused
+                    child = terminal,
+                })
+            else
+                content = terminal
+            end
         else
             state.zoomed_pane_id = nil
             content = render_node(root, overlay_visible)

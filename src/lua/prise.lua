@@ -47,6 +47,8 @@
 ---@field style? table
 ---@field max_width? number
 ---@field max_height? number
+---@field ratio? number For layout sizing
+---@field id? string|number For widget identification
 
 ---@class PaddingOpts
 ---@field child? table
@@ -241,6 +243,8 @@ function M.Box(opts)
         style = opts.style,
         max_width = opts.max_width,
         max_height = opts.max_height,
+        ratio = opts.ratio, -- Propagate ratio for layout system
+        id = opts.id, -- Propagate id for widget identification
     }
 end
 

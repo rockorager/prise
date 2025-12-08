@@ -87,6 +87,42 @@ ui.setup({
 })
 ```
 
+# BORDERS
+
+The **borders** table configures pane borders for visual separation.
+
+**enabled**
+:   Enable or disable pane borders globally. Default: **false**
+
+**style**
+:   Border drawing style. Options: **"none"**, **"single"**, **"double"**, **"rounded"**. Default: **"single"**
+
+**focused_color**
+:   Hex color code for the focused pane's border. Default: **#89b4fa**
+
+**unfocused_color**
+:   Hex color code for unfocused pane borders. Default: **#585b70**
+
+Available border styles:
+
+- **"single"** - Single-line borders: `┌─┐│└┘`
+- **"double"** - Double-line borders: `╔═╗║╚╝`
+- **"rounded"** - Rounded corners: `╭─╮│╰╯`
+- **"none"** - Invisible borders (for consistent spacing)
+
+Example:
+
+```lua
+ui.setup({
+    borders = {
+        enabled = true,
+        style = "double",
+        focused_color = "#f38ba8",  -- Pink
+        unfocused_color = "#313244", -- Dark gray
+    },
+})
+```
+
 # STATUS BAR
 
 The **status_bar** table configures the bottom status bar.
