@@ -48,6 +48,7 @@ pub fn build(b: *std.Build) void {
 
     b.installFile("src/lua/prise.lua", "share/prise/lua/prise.lua");
     b.installFile("src/lua/tiling.lua", "share/prise/lua/prise_tiling_ui.lua");
+    b.installFile("src/lua/utils.lua", "share/prise/lua/utils.lua");
 
     const os = @import("builtin").os.tag;
     if (os.isDarwin()) {

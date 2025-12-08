@@ -1968,7 +1968,6 @@ local function build_palette()
     end
 
     local palette_style = { bg = THEME.bg1, fg = THEME.fg_bright }
-    local palette_style = { bg = THEME.bg1, fg = palette_fg }
     local selected_style = { bg = THEME.accent, fg = THEME.fg_dark }
     local input_style = { bg = THEME.bg1, fg = THEME.fg_bright }
 
@@ -2034,7 +2033,6 @@ local function build_rename()
     end
 
     local palette_style = { bg = THEME.bg1, fg = THEME.fg_bright }
-    local palette_style = { bg = THEME.bg1, fg = palette_fg }
     local input_style = { bg = THEME.bg1, fg = THEME.fg_bright }
 
     return prise.Positioned({
@@ -2072,7 +2070,6 @@ local function build_rename_tab()
     end
 
     local palette_style = { bg = THEME.bg1, fg = THEME.fg_bright }
-    local palette_style = { bg = THEME.bg1, fg = palette_fg }
     local input_style = { bg = THEME.bg1, fg = THEME.fg_bright }
 
     return prise.Positioned({

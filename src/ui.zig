@@ -162,8 +162,9 @@ pub const UI = struct {
                 return error.DefaultUIFailed;
             };
         } else {
-            lua.doFile(config_path) catch |err| {
-                log.err("Failed to load init.lua: {}", .{err});
+            lua.doFile(config_path) catch {
+                const msg = lua.toString(-1) catch "unknown error";
+                log.err("Failed to load init.lua: {s}", .{msg});
                 return error.InitLuaFailed;
             };
         }
