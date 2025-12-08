@@ -2071,7 +2071,7 @@ local function build_rename_tab()
         return nil
     end
 
-    local palette_fg = config.borders.enabled and config.borders.focused_color or THEME.fg_bright
+    local palette_style = { bg = THEME.bg1, fg = THEME.fg_bright }
     local palette_style = { bg = THEME.bg1, fg = palette_fg }
     local input_style = { bg = THEME.bg1, fg = THEME.fg_bright }
 
