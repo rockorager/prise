@@ -84,6 +84,34 @@
 
       devShells = forAllSystems (
         { pkgs }:
+        let
+          zigdoc = pkgs.stdenvNoCC.mkDerivation {
+            pname = "zigdoc";
+            version = "0.1.0";
+            src = pkgs.fetchFromGitHub {
+              owner = "rockorager";
+              repo = "zigdoc";
+              rev = "v0.1.0";
+              hash = "sha256-nClG2L4ac0Bu+dGkanSFjoLHszeMoUFV9BdBEEKkdhA=";
+            };
+
+            nativeBuildInputs = [ pkgs.zigpkgs."0.15.2" ];
+
+            dontConfigure = true;
+
+            preBuild = ''
+              export HOME=$TMPDIR
+            '';
+
+            buildPhase = ''
+              runHook preBuild
+              zig build --prefix $out -Doptimize=ReleaseSafe
+              runHook postBuild
+            '';
+
+            dontInstall = true;
+          };
+        in
         {
           default = pkgs.mkShell {
             name = "prise-dev";
@@ -93,6 +121,7 @@
               [
                 zigpkgs."0.15.2"
                 stylua
+                zigdoc
               ]
               ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
                 pkgs.darwin.DarwinTools
