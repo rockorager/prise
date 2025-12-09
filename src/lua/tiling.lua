@@ -1519,6 +1519,21 @@ function M.update(event)
             local handled = false
             local k = event.data.key
 
+            -- Leader twice sends leader to inner shell (like tmux)
+            if matches_keybind(event.data, config.keybinds.leader) then
+                local pty = get_focused_pty()
+                if pty then
+                    pty:send_key(event.data)
+                end
+                if state.timer then
+                    state.timer:cancel()
+                    state.timer = nil
+                end
+                state.pending_command = false
+                prise.request_frame()
+                return
+            end
+
             if k == "h" then
                 move_focus("left")
                 handled = true
