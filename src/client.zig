@@ -1899,7 +1899,8 @@ pub const App = struct {
             try env_array.append(self.allocator, .{ .string = env_str });
         }
 
-        const param_count: usize = if (self.initial_cwd != null) 5 else 4;
+        const macos_option_as_alt = self.ui.getMacosOptionAsAlt();
+        const param_count: usize = if (self.initial_cwd != null) 6 else 5;
         var params_kv = try self.allocator.alloc(msgpack.Value.KeyValue, param_count);
         defer self.allocator.free(params_kv);
         log.info("Sending spawn_pty: rows={} cols={} cwd={?s} env_count={}", .{ ws.rows, ws.cols, self.initial_cwd, env_array.items.len });
@@ -1907,8 +1908,9 @@ pub const App = struct {
         params_kv[1] = .{ .key = .{ .string = "cols" }, .value = .{ .unsigned = ws.cols } };
         params_kv[2] = .{ .key = .{ .string = "attach" }, .value = .{ .boolean = true } };
         params_kv[3] = .{ .key = .{ .string = "env" }, .value = .{ .array = env_array.items } };
+        params_kv[4] = .{ .key = .{ .string = "macos_option_as_alt" }, .value = .{ .string = macos_option_as_alt } };
         if (self.initial_cwd) |cwd| {
-            params_kv[4] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = cwd } };
+            params_kv[5] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = cwd } };
         }
         const params_val = msgpack.Value{ .map = params_kv };
         const msg = try msgpack.encode(self.allocator, .{ 0, msgid, "spawn_pty", params_val });
@@ -1978,9 +1980,11 @@ pub const App = struct {
             self.state.next_msgid += 1;
             try self.state.pending_requests.put(msgid, .{ .attach = .{ .pty_id = @intCast(pty_id), .cwd = cwd } });
 
-            // Server expects params as array: [pty_id]
-            var params = try self.allocator.alloc(msgpack.Value, 1);
+            // Server expects params as array: [pty_id, macos_option_as_alt]
+            const macos_option_as_alt = self.ui.getMacosOptionAsAlt();
+            var params = try self.allocator.alloc(msgpack.Value, 2);
             params[0] = .{ .unsigned = pty_id };
+            params[1] = .{ .string = macos_option_as_alt };
             const params_val = msgpack.Value{ .array = params };
 
             var arr = try self.allocator.alloc(msgpack.Value, 4);
@@ -2022,15 +2026,17 @@ pub const App = struct {
             try env_array.append(self.allocator, .{ .string = env_str });
         }
 
-        const param_count: usize = if (cwd != null) 5 else 4;
+        const macos_option_as_alt = self.ui.getMacosOptionAsAlt();
+        const param_count: usize = if (cwd != null) 6 else 5;
         var params_kv = try self.allocator.alloc(msgpack.Value.KeyValue, param_count);
         defer self.allocator.free(params_kv);
         params_kv[0] = .{ .key = .{ .string = "rows" }, .value = .{ .unsigned = ws.rows } };
         params_kv[1] = .{ .key = .{ .string = "cols" }, .value = .{ .unsigned = ws.cols } };
         params_kv[2] = .{ .key = .{ .string = "attach" }, .value = .{ .boolean = true } };
         params_kv[3] = .{ .key = .{ .string = "env" }, .value = .{ .array = env_array.items } };
+        params_kv[4] = .{ .key = .{ .string = "macos_option_as_alt" }, .value = .{ .string = macos_option_as_alt } };
         if (cwd) |c| {
-            params_kv[4] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = c } };
+            params_kv[5] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = c } };
         }
         const params_val = msgpack.Value{ .map = params_kv };
         const msg = try msgpack.encode(self.allocator, .{ 0, msgid, "spawn_pty", params_val });

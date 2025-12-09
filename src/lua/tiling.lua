@@ -108,6 +108,7 @@ local POWERLINE_SYMBOLS = {
 ---@field status_bar? PriseStatusBarConfig Status bar options
 ---@field tab_bar? PriseTabBarConfig Tab bar options
 ---@field keybinds? PriseKeybinds Keybind configuration
+---@field macos_option_as_alt? "false"|"left"|"right"|"true" macOS Option key behavior (default: "false")
 
 -- Default configuration
 ---@type PriseConfig
@@ -148,6 +149,7 @@ local config = {
         leader = { key = "k", super = true },
         palette = { key = "p", super = true },
     },
+    macos_option_as_alt = "false",
 }
 
 local merge_config = utils.merge_config
@@ -203,6 +205,12 @@ function M.setup(opts)
     if opts then
         merge_config(config, opts)
     end
+end
+
+---Get the macos_option_as_alt setting
+---@return string
+function M.get_macos_option_as_alt()
+    return config.macos_option_as_alt or "false"
 end
 
 local RESIZE_STEP = 0.05 -- 5% step for keyboard resize

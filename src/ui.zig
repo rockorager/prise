@@ -766,6 +766,26 @@ pub const UI = struct {
         self.lua.deinit();
     }
 
+    pub fn getMacosOptionAsAlt(self: *UI) []const u8 {
+        _ = self.lua.getField(ziglua.registry_index, "prise_ui");
+        defer self.lua.pop(1);
+
+        _ = self.lua.getField(-1, "get_macos_option_as_alt");
+        if (self.lua.typeOf(-1) != .function) {
+            self.lua.pop(1);
+            return "false";
+        }
+
+        self.lua.call(.{ .args = 0, .results = 1 });
+        defer self.lua.pop(1);
+
+        const val = self.lua.toString(-1) catch return "false";
+        if (std.mem.eql(u8, val, "left")) return "left";
+        if (std.mem.eql(u8, val, "right")) return "right";
+        if (std.mem.eql(u8, val, "true")) return "true";
+        return "false";
+    }
+
     pub fn update(self: *UI, event: lua_event.Event) !void {
         _ = self.lua.getField(ziglua.registry_index, "prise_ui");
         defer self.lua.pop(1);
