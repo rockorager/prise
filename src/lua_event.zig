@@ -11,6 +11,11 @@ const vaxis_helper = @import("vaxis_helper.zig");
 
 const log = std.log.scoped(.lua_event);
 
+pub const CellSize = struct {
+    width: u16,
+    height: u16,
+};
+
 pub const PtyAttachInfo = struct {
     id: u32,
     surface: *Surface,
@@ -22,6 +27,7 @@ pub const PtyAttachInfo = struct {
     close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
     copy_selection_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
+    cell_size_fn: *const fn (app: *anyopaque) CellSize,
 };
 
 pub const PtyExitedInfo = struct {
@@ -130,6 +136,7 @@ fn pushPtyAttachEvent(lua: *ziglua.Lua, info: PtyAttachInfo) void {
         .close_fn = info.close_fn,
         .cwd_fn = info.cwd_fn,
         .copy_selection_fn = info.copy_selection_fn,
+        .cell_size_fn = info.cell_size_fn,
     };
 
     _ = lua.getMetatableRegistry("PrisePty");
@@ -382,6 +389,7 @@ const PtyHandle = struct {
     close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
     copy_selection_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
+    cell_size_fn: *const fn (app: *anyopaque) CellSize,
 };
 
 fn ptyIndex(lua: *ziglua.Lua) i32 {
@@ -431,11 +439,16 @@ fn ptyIndex(lua: *ziglua.Lua) i32 {
 
 fn ptySize(lua: *ziglua.Lua) i32 {
     const pty = lua.checkUserdata(PtyHandle, 1, "PrisePty");
-    lua.createTable(0, 2);
+    const cell_size = pty.cell_size_fn(pty.app);
+    lua.createTable(0, 4);
     lua.pushInteger(@intCast(pty.surface.rows));
     lua.setField(-2, "rows");
     lua.pushInteger(@intCast(pty.surface.cols));
     lua.setField(-2, "cols");
+    lua.pushInteger(@intCast(@as(u32, pty.surface.cols) * cell_size.width));
+    lua.setField(-2, "width_px");
+    lua.pushInteger(@intCast(@as(u32, pty.surface.rows) * cell_size.height));
+    lua.setField(-2, "height_px");
     return 1;
 }
 
@@ -701,6 +714,7 @@ pub fn pushPtyUserdata(
     close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
     copy_selection_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
+    cell_size_fn: *const fn (app: *anyopaque) CellSize,
 ) !void {
     const pty = lua.newUserdata(PtyHandle, @sizeOf(PtyHandle));
     pty.* = .{
@@ -714,6 +728,7 @@ pub fn pushPtyUserdata(
         .close_fn = close_fn,
         .cwd_fn = cwd_fn,
         .copy_selection_fn = copy_selection_fn,
+        .cell_size_fn = cell_size_fn,
     };
 
     _ = lua.getMetatableRegistry("PrisePty");

@@ -97,6 +97,7 @@ local POWERLINE_SYMBOLS = {
 
 ---@class PriseBordersConfig
 ---@field enabled? boolean Show pane borders (default: false)
+---@field show_single_pane? boolean Show border when only one pane exists (default: false)
 ---@field style? "none"|"single"|"double"|"rounded" Border style (default: "single")
 ---@field focused_color? string Hex color for focused pane border (default: "#89b4fa")
 ---@field unfocused_color? string Hex color for unfocused borders (default: "#585b70")
@@ -132,6 +133,7 @@ local config = {
     },
     borders = {
         enabled = false,
+        show_single_pane = false,
         style = "single",
         focused_color = "#89b4fa", -- Blue (matches default theme.accent)
         unfocused_color = "#585b70", -- Gray (matches default theme.bg4)
@@ -465,6 +467,25 @@ local function get_focused_pty()
     return nil
 end
 
+local function get_auto_split_direction()
+    local pty = get_focused_pty()
+    if pty then
+        local size = pty:size()
+        local wider
+        if size.width_px > 0 and size.height_px > 0 then
+            wider = size.width_px > size.height_px
+        else
+            wider = size.cols > size.rows
+        end
+        if wider then
+            return "row"
+        else
+            return "col"
+        end
+    end
+    return "row"
+end
+
 local function update_pty_focus(old_id, new_id)
     if old_id == new_id then
         return
@@ -674,6 +695,19 @@ local function count_panes(node)
         return count
     end
     return 0
+end
+
+---Determine if borders should be shown for the active tab
+---@return boolean
+local function should_show_borders()
+    if not config.borders.enabled then
+        return false
+    end
+    if config.borders.show_single_pane then
+        return true
+    end
+    local root = get_active_root()
+    return count_panes(root) > 1
 end
 
 ---Get index of focused pane (1-based) and total count in active tab
@@ -1025,15 +1059,8 @@ local commands = {
         shortcut = key_prefix .. " Enter",
         action = function()
             local pty = get_focused_pty()
-            if pty then
-                local size = pty:size()
-                if size.cols > (size.rows * 2.2) then
-                    state.pending_split = { direction = "row" }
-                else
-                    state.pending_split = { direction = "col" }
-                end
-                prise.spawn({ cwd = pty:cwd() })
-            end
+            state.pending_split = { direction = get_auto_split_direction() }
+            prise.spawn({ cwd = pty and pty:cwd() })
         end,
     },
     {
@@ -1519,6 +1546,21 @@ function M.update(event)
             local handled = false
             local k = event.data.key
 
+            -- Leader twice sends leader to inner shell (like tmux)
+            if matches_keybind(event.data, config.keybinds.leader) then
+                local pty = get_focused_pty()
+                if pty then
+                    pty:send_key(event.data)
+                end
+                if state.timer then
+                    state.timer:cancel()
+                    state.timer = nil
+                end
+                state.pending_command = false
+                prise.request_frame()
+                return
+            end
+
             if k == "h" then
                 move_focus("left")
                 handled = true
@@ -1627,18 +1669,9 @@ function M.update(event)
                 handled = true
             elseif k == "Enter" or k == "\r" or k == "\n" then
                 local pty = get_focused_pty()
-                if pty then
-                    local size = pty:size()
-                    -- Account for cell aspect ratio (roughly 1:2)
-                    -- Split along the longest visual axis
-                    if size.cols > (size.rows * 2.2) then
-                        state.pending_split = { direction = "row" }
-                    else
-                        state.pending_split = { direction = "col" }
-                    end
-                    prise.spawn({ cwd = pty:cwd() })
-                    handled = true
-                end
+                state.pending_split = { direction = get_auto_split_direction() }
+                prise.spawn({ cwd = pty and pty:cwd() })
+                handled = true
             end
 
             if handled then
@@ -1894,8 +1927,8 @@ local function render_node(node, force_unfocused)
             focus = is_focused,
         })
 
-        -- Wrap in Box if borders are enabled
-        if config.borders.enabled then
+        -- Wrap in Box if borders should be shown
+        if should_show_borders() then
             local border_color = is_focused and config.borders.focused_color or config.borders.unfocused_color
 
             return prise.Box({
@@ -2235,8 +2268,9 @@ function M.view()
                 focus = not overlay_visible,
             })
 
-            -- Apply borders to zoomed pane if enabled
-            if config.borders.enabled then
+            -- Apply borders to zoomed pane if enabled and show_single_pane is true
+            -- (zoomed pane is a temporary single-pane view)
+            if config.borders.enabled and config.borders.show_single_pane then
                 content = prise.Box({
                     border = config.borders.style,
                     style = { fg = config.borders.focused_color }, -- Zoomed pane is always focused

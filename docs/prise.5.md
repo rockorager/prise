@@ -94,6 +94,9 @@ The **borders** table configures pane borders for visual separation.
 **enabled**
 :   Enable or disable pane borders globally. Default: **false**
 
+**show_single_pane**
+:   Show borders when only one pane exists in a tab. When false, borders only appear after creating a split. Default: **false**
+
 **style**
 :   Border drawing style. Options: **"none"**, **"single"**, **"double"**, **"rounded"**. Default: **"single"**
 
@@ -116,6 +119,7 @@ Example:
 ui.setup({
     borders = {
         enabled = true,
+        show_single_pane = false,          -- Hide border for single pane
         style = "double",
         focused_color = "#f38ba8",  -- Pink
         unfocused_color = "#313244", -- Dark gray
