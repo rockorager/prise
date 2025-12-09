@@ -986,6 +986,7 @@ const Client = struct {
     send_queue: std.ArrayList([]u8),
     attached_ptys: std.ArrayList(usize),
     closing: bool = false,
+    macos_option_as_alt: key_encode.OptionAsAlt = .false,
     // Map style ID to its last known definition hash/attributes to detect changes
     // We store the Attributes struct directly.
     // style_cache: std.AutoHashMap(u16, redraw.UIEvent.Style.Attributes),
@@ -1295,7 +1296,7 @@ const Client = struct {
             var writer = std.Io.Writer.fixed(&encode_buf);
 
             pty_instance.terminal_mutex.lock();
-            key_encode.encode(&writer, key, &pty_instance.terminal) catch |err| {
+            key_encode.encode(&writer, key, &pty_instance.terminal, self.macos_option_as_alt) catch |err| {
                 log.err("Failed to encode key: {}", .{err});
                 pty_instance.terminal_mutex.unlock();
                 return;
@@ -1927,12 +1928,13 @@ const Server = struct {
     /// Timestamp (ms since epoch) when server started - used to detect server restarts
     start_time_ms: i64 = 0,
 
-    fn parseSpawnPtyParams(params: msgpack.Value) struct { size: pty.Winsize, attach: bool, cwd: ?[]const u8, env: ?[]const msgpack.Value } {
+    fn parseSpawnPtyParams(params: msgpack.Value) struct { size: pty.Winsize, attach: bool, cwd: ?[]const u8, env: ?[]const msgpack.Value, macos_option_as_alt: key_encode.OptionAsAlt } {
         var rows: u16 = 24;
         var cols: u16 = 80;
         var attach: bool = false;
         var cwd: ?[]const u8 = null;
         var env: ?[]const msgpack.Value = null;
+        var macos_option_as_alt: key_encode.OptionAsAlt = .false;
 
         if (params == .map) {
             for (params.map) |kv| {
@@ -1947,6 +1949,8 @@ const Server = struct {
                     cwd = kv.value.string;
                 } else if (std.mem.eql(u8, kv.key.string, "env") and kv.value == .array) {
                     env = kv.value.array;
+                } else if (std.mem.eql(u8, kv.key.string, "macos_option_as_alt")) {
+                    macos_option_as_alt = parseMacosOptionAsAlt(kv.value);
                 }
             }
         }
@@ -1961,6 +1965,7 @@ const Server = struct {
             .attach = attach,
             .cwd = cwd,
             .env = env,
+            .macos_option_as_alt = macos_option_as_alt,
         };
     }
 
@@ -1981,8 +1986,13 @@ const Server = struct {
         return parsePtyId(params);
     }
 
-    fn parseAttachPtyParams(params: msgpack.Value) !usize {
-        return parsePtyId(params);
+    fn parseAttachPtyParams(params: msgpack.Value) !struct { pty_id: usize, macos_option_as_alt: key_encode.OptionAsAlt } {
+        const pty_id = try parsePtyId(params);
+        const macos_option_as_alt = if (params == .array and params.array.len >= 2)
+            parseMacosOptionAsAlt(params.array[1])
+        else
+            .false;
+        return .{ .pty_id = pty_id, .macos_option_as_alt = macos_option_as_alt };
     }
 
     fn parsePtyId(params: msgpack.Value) !usize {
@@ -1994,6 +2004,21 @@ const Server = struct {
             .integer => |i| @intCast(i),
             else => error.InvalidParams,
         };
+    }
+
+    fn parseMacosOptionAsAlt(value: msgpack.Value) key_encode.OptionAsAlt {
+        if (value == .string) {
+            if (std.mem.eql(u8, value.string, "left")) {
+                return .left;
+            } else if (std.mem.eql(u8, value.string, "right")) {
+                return .right;
+            } else if (std.mem.eql(u8, value.string, "true")) {
+                return .true;
+            }
+        } else if (value == .boolean and value.boolean) {
+            return .true;
+        }
+        return .false;
     }
 
     fn parseWritePtyParams(params: msgpack.Value) !struct { id: usize, data: []const u8 } {
@@ -2108,6 +2133,7 @@ const Server = struct {
         });
 
         if (parsed.attach) {
+            client.macos_option_as_alt = parsed.macos_option_as_alt;
             try pty_instance.addClient(self.allocator, client);
             try client.attached_ptys.append(self.allocator, pty_id);
 
@@ -2141,28 +2167,30 @@ const Server = struct {
 
     fn handleAttachPty(self: *Server, client: *Client, params: msgpack.Value) !msgpack.Value {
         log.info("attach_pty called with params: {}", .{params});
-        const pty_id = parseAttachPtyParams(params) catch |err| {
+        const parsed = parseAttachPtyParams(params) catch |err| {
             log.warn("attach_pty: invalid params: {}", .{err});
             return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
         };
 
-        log.info("attach_pty: pty_id={} client_fd={}", .{ pty_id, client.fd });
+        log.info("attach_pty: pty_id={} client_fd={} macos_option_as_alt={}", .{ parsed.pty_id, client.fd, parsed.macos_option_as_alt });
 
-        const pty_instance = self.ptys.get(pty_id) orelse {
-            log.warn("attach_pty: PTY {} not found", .{pty_id});
+        const pty_instance = self.ptys.get(parsed.pty_id) orelse {
+            log.warn("attach_pty: PTY {} not found", .{parsed.pty_id});
             return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
         };
 
+        client.macos_option_as_alt = parsed.macos_option_as_alt;
+
         try pty_instance.addClient(self.allocator, client);
-        try client.attached_ptys.append(self.allocator, pty_id);
-        log.info("Client {} attached to PTY {}", .{ client.fd, pty_id });
+        try client.attached_ptys.append(self.allocator, parsed.pty_id);
+        log.info("Client {} attached to PTY {}", .{ client.fd, parsed.pty_id });
 
         const msg = try buildRedrawMessageFromPty(self.allocator, pty_instance, .full);
         defer self.allocator.free(msg);
 
         try self.sendRedraw(self.loop, pty_instance, msg, client);
 
-        return msgpack.Value{ .unsigned = pty_id };
+        return msgpack.Value{ .unsigned = parsed.pty_id };
     }
 
     fn handleWritePty(self: *Server, params: msgpack.Value) !msgpack.Value {
@@ -3339,8 +3367,14 @@ test "parseAttachPtyParams" {
     const testing = std.testing;
 
     var valid_args = [_]msgpack.Value{.{ .unsigned = 42 }};
-    const id = try Server.parseAttachPtyParams(.{ .array = &valid_args });
-    try testing.expectEqual(@as(usize, 42), id);
+    const result = try Server.parseAttachPtyParams(.{ .array = &valid_args });
+    try testing.expectEqual(@as(usize, 42), result.pty_id);
+    try testing.expectEqual(key_encode.OptionAsAlt.false, result.macos_option_as_alt);
+
+    var valid_args_with_opt = [_]msgpack.Value{ .{ .unsigned = 42 }, .{ .string = "left" } };
+    const result2 = try Server.parseAttachPtyParams(.{ .array = &valid_args_with_opt });
+    try testing.expectEqual(@as(usize, 42), result2.pty_id);
+    try testing.expectEqual(key_encode.OptionAsAlt.left, result2.macos_option_as_alt);
 
     var invalid_args = [_]msgpack.Value{};
     try testing.expectError(error.InvalidParams, Server.parseAttachPtyParams(.{ .array = &invalid_args }));

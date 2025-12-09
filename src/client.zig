@@ -2099,7 +2099,7 @@ pub const App = struct {
                         switch (action) {
                             .send_attach => |pty_id| {
                                 log.info("Sending attach_pty for session {}", .{pty_id});
-                                app.send_buffer = try msgpack.encode(app.allocator, .{ 0, @intFromEnum(MsgId.attach_pty), "attach_pty", .{pty_id} });
+                                app.send_buffer = try msgpack.encode(app.allocator, .{ 0, @intFromEnum(MsgId.attach_pty), "attach_pty", .{ pty_id, "false" } });
                                 _ = try l.send(app.fd, app.send_buffer.?, .{
                                     .ptr = app,
                                     .cb = onSendComplete,
