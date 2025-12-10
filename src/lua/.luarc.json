@@ -34,7 +34,9 @@
       "strict": "Error",
       "strong": "Error",
       "global": "Error",
-      "unbalanced": "Error"
+      "unbalanced": "Error",
+      "luadoc": "Error",
+      "ambiguity": "Error"
     },
 
     "severity": {
@@ -49,7 +51,19 @@
       "unused-local": "Error!",
       "unused-function": "Error!",
       "unused-vararg": "Error!",
-      "discard-returns": "Error!"
+      "discard-returns": "Error!",
+      "cast-local-type": "Error!",
+      "inject-field": "Error!",
+      "missing-parameter": "Error!",
+      "redundant-parameter": "Error!",
+      "lowercase-global": "Error!",
+      "duplicate-index": "Error!",
+      "duplicate-set-field": "Error!",
+      "missing-return": "Error!",
+      "missing-return-value": "Error!",
+      "redundant-return-value": "Error!",
+      "redundant-value": "Error!",
+      "deprecated": "Error!"
     },
 
     "neededFileStatus": {
@@ -64,7 +78,19 @@
       "unused-local": "Any!",
       "unused-function": "Any!",
       "unused-vararg": "Any!",
-      "discard-returns": "Any!"
+      "discard-returns": "Any!",
+      "cast-local-type": "Any!",
+      "inject-field": "Any!",
+      "missing-parameter": "Any!",
+      "redundant-parameter": "Any!",
+      "lowercase-global": "Any!",
+      "duplicate-index": "Any!",
+      "duplicate-set-field": "Any!",
+      "missing-return": "Any!",
+      "missing-return-value": "Any!",
+      "redundant-return-value": "Any!",
+      "redundant-value": "Any!",
+      "deprecated": "Any!"
     },
 
     "unusedLocalExclude": [
