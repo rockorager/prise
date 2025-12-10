@@ -52,6 +52,11 @@ jobs:
         with:
           version: 0.15.2
 
+      - name: Install lua-language-server
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua-language-server
+
       - name: Gather PR context
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
