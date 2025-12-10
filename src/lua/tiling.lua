@@ -1778,6 +1778,8 @@ function M.update(event)
                 state.pending_split = { direction = get_auto_split_direction() }
                 prise.spawn({ cwd = pty and pty:cwd() })
                 handled = true
+            elseif k == "Escape" then
+                handled = true
             end
 
             if handled then
