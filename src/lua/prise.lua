@@ -10,7 +10,7 @@
 ---@field style? table
 
 ---@class TextOpts
----@field content? TextSegment[]
+---@field content? (TextSegment|string)[]
 ---@field show_cursor? boolean
 
 ---@class LayoutOpts

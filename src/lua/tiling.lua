@@ -70,7 +70,7 @@ local POWERLINE_SYMBOLS = {
     left_thin = "",
 }
 
----@class PriseTheme
+---@class PriseThemeOptions
 ---@field mode_normal? string Color for normal mode indicator
 ---@field mode_command? string Color for command mode indicator
 ---@field bg1? string Darkest background
@@ -83,6 +83,20 @@ local POWERLINE_SYMBOLS = {
 ---@field accent? string Accent color
 ---@field green? string Success/connected color
 ---@field yellow? string Warning color
+
+---@class PriseTheme
+---@field mode_normal string
+---@field mode_command string
+---@field bg1 string
+---@field bg2 string
+---@field bg3 string
+---@field bg4 string
+---@field fg_bright string
+---@field fg_dim string
+---@field fg_dark string
+---@field accent string
+---@field green string
+---@field yellow string
 
 ---@class PriseStatusBarConfig
 ---@field enabled? boolean Show the status bar (default: true)
@@ -108,13 +122,20 @@ local POWERLINE_SYMBOLS = {
 ---@field focused_color? string Hex color for focused pane border (default: "#89b4fa")
 ---@field unfocused_color? string Hex color for unfocused borders (default: "#585b70")
 
----@class PriseConfig
----@field theme? PriseTheme Color theme options
+---@class PriseConfigOptions
+---@field theme? PriseThemeOptions Color theme options
 ---@field borders? PriseBordersConfig Pane border options
 ---@field status_bar? PriseStatusBarConfig Status bar options
 ---@field tab_bar? PriseTabBarConfig Tab bar options
 ---@field keybinds? PriseKeybinds Keybind configuration
 ---@field macos_option_as_alt? "false"|"left"|"right"|"true" macOS Option key behavior (default: "false")
+
+---@class PriseConfig
+---@field theme PriseTheme
+---@field borders PriseBordersConfig
+---@field status_bar PriseStatusBarConfig
+---@field tab_bar PriseTabBarConfig
+---@field keybinds PriseKeybinds
 
 -- Default configuration
 ---@type PriseConfig
@@ -207,7 +228,7 @@ local state = {
 local M = {}
 
 ---Configure the default UI
----@param opts? PriseConfig Configuration options to merge
+---@param opts? PriseConfigOptions Configuration options to merge
 function M.setup(opts)
     if opts then
         merge_config(config, opts)
@@ -249,13 +270,13 @@ end
 
 -- --- Helpers ---
 
----@param node? Node
+---@param node? table
 ---@return boolean
 local function is_pane(node)
     return node ~= nil and node.type == "pane"
 end
 
----@param node? Node
+---@param node? table
 ---@return boolean
 local function is_split(node)
     return node ~= nil and node.type == "split"
@@ -1982,6 +2003,8 @@ local function render_node(node, force_unfocused)
         else
             return prise.Column(props)
         end
+    else
+        error("render_node: unknown node type: " .. tostring(node.type))
     end
 end
 

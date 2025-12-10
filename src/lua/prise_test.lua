@@ -1,9 +1,48 @@
 local prise = require("prise")
 
+---Create a mock Pty for testing
+---@return Pty
+local function mock_pty()
+    ---@type Pty
+    local pty = {
+        id = function() return 1 end,
+        title = function() return "test" end,
+        cwd = function() return "/tmp" end,
+        size = function() return { rows = 24, cols = 80, width_px = 0, height_px = 0 } end,
+        send_key = function() end,
+        send_mouse = function() end,
+        send_paste = function() end,
+        set_focus = function() end,
+        close = function() end,
+        copy_selection = function() end,
+    }
+    return pty
+end
+
+---Create a mock TextInput for testing
+---@return TextInput
+local function mock_text_input()
+    ---@type TextInput
+    local input = {
+        id = function() return 1 end,
+        text = function() return "" end,
+        insert = function() end,
+        delete_backward = function() end,
+        delete_forward = function() end,
+        move_left = function() end,
+        move_right = function() end,
+        move_to_start = function() end,
+        move_to_end = function() end,
+        clear = function() end,
+        destroy = function() end,
+    }
+    return input
+end
+
 -- Test: Terminal creates correct widget
-local term = prise.Terminal({ pty = "fake_pty", ratio = 0.5, id = "t1", focus = true, show_cursor = false })
+local term = prise.Terminal({ pty = mock_pty(), ratio = 0.5, id = "t1", focus = true, show_cursor = false })
 assert(term.type == "terminal", "Terminal: type should be 'terminal'")
-assert(term.pty == "fake_pty", "Terminal: pty should be set")
+assert(term.pty ~= nil, "Terminal: pty should be set")
 assert(term.ratio == 0.5, "Terminal: ratio should be set")
 assert(term.id == "t1", "Terminal: id should be set")
 assert(term.focus == true, "Terminal: focus should be set")
@@ -115,9 +154,9 @@ assert(pos2.child.type == "box", "Positioned(array): should use first element as
 assert(pos2.x == 5, "Positioned(array): x should be set")
 
 -- Test: TextInput
-local input = prise.TextInput({ input = "fake_input", style = { fg = "blue" }, focus = true })
+local input = prise.TextInput({ input = mock_text_input(), style = { fg = "blue" }, focus = true })
 assert(input.type == "text_input", "TextInput: type should be 'text_input'")
-assert(input.input == "fake_input", "TextInput: input should be set")
+assert(input.input ~= nil, "TextInput: input should be set")
 assert(input.style.fg == "blue", "TextInput: style should be set")
 assert(input.focus == true, "TextInput: focus should be set")
 

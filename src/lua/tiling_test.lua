@@ -286,6 +286,7 @@ local right_nested = {
     },
 }
 leaf = t.get_last_leaf(right_nested)
+assert(leaf ~= nil, "get_last_leaf: right-heavy nested should return leaf")
 assert(leaf.id == 3, "get_last_leaf: right-heavy nested")
 
 -- === format_palette_item ===
