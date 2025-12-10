@@ -107,7 +107,7 @@ pub const UI = struct {
 
         const extra_paths = try std.fmt.allocPrint(
             allocator,
-            "{s}/.local/share/prise/lua/?.lua;/usr/local/share/prise/lua/?.lua;/usr/share/prise/lua/?.lua;{s}",
+            "{s}/.local/share/prise/lua/?.lua;/usr/local/share/prise/lua/?.lua;/usr/share/prise/lua/?.lua;/opt/homebrew/share/prise/lua/?.lua;{s}",
             .{ home, current_path },
         );
         defer allocator.free(extra_paths);
