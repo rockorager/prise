@@ -1,5 +1,5 @@
 ---@class TerminalOpts
----@field pty userdata
+---@field pty Pty
 ---@field ratio? number
 ---@field id? string
 ---@field focus? boolean
@@ -30,7 +30,7 @@
 ---@field id? string|number
 
 ---@class TextInputOpts
----@field input userdata
+---@field input TextInput
 ---@field style? table
 ---@field focus? boolean
 
@@ -62,7 +62,7 @@
 ---@field update fun(event: table) Handle an input event
 ---@field view fun(): table Return the widget tree to render
 ---@field get_state? fun(cwd_lookup: fun(id: number): string?): table Serialize UI state for persistence
----@field set_state? fun(saved: table?, pty_lookup: fun(id: number): userdata?) Restore UI state
+---@field set_state? fun(saved: table?, pty_lookup: fun(id: number): Pty?) Restore UI state
 ---@field setup? fun(opts: table?) Configure the UI (optional)
 
 local M = {}
@@ -92,7 +92,7 @@ function M.Terminal(opts)
 end
 
 ---Create a text widget with optional styling and segments
----@param opts string|TextSegment[]|TextOpts
+---@param opts string|TextSegment[]|TextOpts|TextSegment
 ---@return table Text widget
 function M.Text(opts)
     if type(opts) == "string" then

@@ -4,7 +4,7 @@ local utils = require("utils")
 ---@class Pane
 ---@field type "pane"
 ---@field id number
----@field pty userdata
+---@field pty Pty
 ---@field ratio? number
 
 ---@class Split
@@ -29,11 +29,15 @@ local utils = require("utils")
 
 ---@class PaletteState
 ---@field visible boolean
----@field input? userdata
+---@field input? TextInput
 ---@field selected number
 ---@field scroll_offset number
 ---@field regions PaletteRegion[]
 ---@field palette_y number
+
+---@class RenameState
+---@field visible boolean
+---@field input? TextInput
 
 ---@class State
 ---@field tabs Tab[]
@@ -42,11 +46,13 @@ local utils = require("utils")
 ---@field focused_id? number
 ---@field zoomed_pane_id? number
 ---@field pending_command boolean
----@field timer? userdata
+---@field timer? Timer
 ---@field pending_split? { direction: "row"|"col" }
 ---@field pending_new_tab? boolean
 ---@field next_split_id number
 ---@field palette PaletteState
+---@field rename RenameState
+---@field rename_tab RenameState
 ---@field screen_cols number
 ---@field screen_rows number
 
@@ -157,6 +163,7 @@ local merge_config = utils.merge_config
 -- Convenience alias for theme access
 local THEME = config.theme
 
+---@type State
 local state = {
     tabs = {},
     active_tab = 1,
@@ -245,13 +252,13 @@ end
 ---@param node? Node
 ---@return boolean
 local function is_pane(node)
-    return node and node.type == "pane"
+    return node ~= nil and node.type == "pane"
 end
 
 ---@param node? Node
 ---@return boolean
 local function is_split(node)
-    return node and node.type == "split"
+    return node ~= nil and node.type == "split"
 end
 
 ---Get the currently active tab
@@ -337,10 +344,12 @@ local function get_first_leaf(node)
     if not node then
         return nil
     end
-    if is_pane(node) then
+    if node.type == "pane" then
+        ---@cast node Pane
         return node
     end
-    if is_split(node) then
+    if node.type == "split" then
+        ---@cast node Split
         return get_first_leaf(node.children[1])
     end
     return nil
@@ -352,10 +361,12 @@ local function get_last_leaf(node)
     if not node then
         return nil
     end
-    if is_pane(node) then
+    if node.type == "pane" then
+        ---@cast node Pane
         return node
     end
-    if is_split(node) then
+    if node.type == "split" then
+        ---@cast node Split
         return get_last_leaf(node.children[#node.children])
     end
     return nil
@@ -462,7 +473,7 @@ local function remove_pane_recursive(node, id)
     return nil, nil
 end
 
----@return userdata?
+---@return Pty?
 local function get_focused_pty()
     local root = get_active_root()
     if not state.focused_id or not root then
@@ -785,7 +796,7 @@ end
 
 ---Deserialize a node tree, looking up PTYs by id
 ---@param saved? table
----@param pty_lookup fun(id: number): userdata?
+---@param pty_lookup fun(id: number): Pty?
 ---@return Node?
 local function deserialize_node(saved, pty_lookup)
     if not saved then
@@ -1040,6 +1051,10 @@ end
 
 -- Platform-dependent key prefix for shortcuts
 local key_prefix = prise.platform == "macos" and "󰘳 +k" or "Super+k"
+
+---Forward declaration for open_rename
+---@type fun()
+local open_rename
 
 ---Command palette commands
 ---@type Command[]
@@ -1359,7 +1374,7 @@ local function execute_selected()
     end
 end
 
-local function open_rename()
+open_rename = function()
     if not state.rename.input then
         state.rename.input = prise.create_text_input()
     end
@@ -2347,7 +2362,7 @@ function M.get_state(cwd_lookup)
 end
 
 ---@param saved? table
----@param pty_lookup fun(id: number): userdata?
+---@param pty_lookup fun(id: number): Pty?
 function M.set_state(saved, pty_lookup)
     if not saved then
         return

@@ -1,0 +1,12 @@
+{
+  "$schema": "https://raw.githubusercontent.com/LuaLS/vscode-lua/master/setting/schema.json",
+  "workspace": {
+    "library": [
+      "/Users/tim/repos/prise/src/lua/types"
+    ],
+    "checkThirdParty": false
+  },
+  "runtime": {
+    "version": "Lua 5.4"
+  }
+}
