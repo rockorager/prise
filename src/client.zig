@@ -2521,7 +2521,10 @@ pub const App = struct {
     fn sendDirect(self: *App, data: []const u8) !void {
         var index: usize = 0;
         while (index < data.len) {
-            const n = try posix.write(self.fd, data[index..]);
+            const n = posix.write(self.fd, data[index..]) catch |err| {
+                if (err == error.WouldBlock) continue;
+                return err;
+            };
             index += n;
         }
     }
