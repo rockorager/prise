@@ -271,4 +271,5 @@ Add to `.vscode/settings.json`:
 The following binaries are required for development:
 
 *   `stylua` (for Lua formatting)
+*   `lua-language-server` (for Lua type checking)
 *   [`zigdoc`](https://github.com/rockorager/zigdoc) (for documentation)

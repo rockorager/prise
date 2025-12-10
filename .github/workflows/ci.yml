@@ -27,6 +27,16 @@ jobs:
           version: latest
           args: --version
 
+      - name: Install lua-language-server (Ubuntu)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y lua-language-server
+
+      - name: Install lua-language-server (macOS)
+        if: runner.os == 'macOS'
+        run: brew install lua-language-server
+
       - name: Build
         run: zig build
 
