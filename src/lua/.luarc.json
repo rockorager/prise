@@ -14,12 +14,12 @@
     "useGitIgnore": true
   },
 
-  "typechecking": {
-    "enable": true,
-    "strictNilCheck": true,
-    "strictUnionCheck": true,
-    "strictGenericCheck": true,
-    "narrowUnion": true
+  "type": {
+    "weakNilCheck": false,
+    "weakUnionCheck": false,
+    "checkTableShape": true,
+    "inferParamType": false,
+    "castNumberToInteger": false
   },
 
   "diagnostics": {
@@ -64,7 +64,9 @@
       "redundant-return-value": "Error!",
       "redundant-value": "Error!",
       "deprecated": "Error!",
-      "incomplete-signature-doc": "Error!"
+      "incomplete-signature-doc": "Error!",
+      "missing-global-doc": "Error!",
+      "missing-local-export-doc": "Error!"
     },
 
     "neededFileStatus": {
@@ -92,7 +94,9 @@
       "redundant-return-value": "Any!",
       "redundant-value": "Any!",
       "deprecated": "Any!",
-      "incomplete-signature-doc": "Any!"
+      "incomplete-signature-doc": "Any!",
+      "missing-global-doc": "Any!",
+      "missing-local-export-doc": "Any!"
     },
 
     "unusedLocalExclude": [

@@ -1,6 +1,50 @@
+---Create a mock Pty object
+---@param id integer
+---@return Pty
+local function mock_pty(id)
+    return {
+        id = function()
+            return id
+        end,
+        title = function()
+            return "mock"
+        end,
+        cwd = function()
+            return nil
+        end,
+        size = function()
+            return { rows = 24, cols = 80, width_px = 0, height_px = 0 }
+        end,
+        send_key = function() end,
+        send_mouse = function() end,
+        send_paste = function() end,
+        set_focus = function() end,
+        close = function() end,
+        copy_selection = function() end,
+    }
+end
+
+---Create a mock Pane
+---@param id integer
+---@return Pane
+local function mock_pane(id)
+    return { type = "pane", id = id, pty = mock_pty(id) }
+end
+
+---Create a mock Split
+---@param id integer
+---@param direction "row"|"col"
+---@param children (Pane|Split)[]
+---@return Split
+local function mock_split(id, direction, children)
+    return { type = "split", split_id = id, direction = direction, children = children }
+end
+
 -- Mock prise module for testing
 package.loaded["prise"] = {
     tiling = function() end,
+    ---@param opts { pty: Pty }
+    ---@return table
     Terminal = function(opts)
         return { type = "terminal", pty = opts.pty }
     end,
@@ -105,41 +149,29 @@ local panes = t.collect_panes(nil)
 assert(#panes == 0, "collect_panes: nil returns empty")
 
 -- Test: collect_panes with single pane
-local single_pane = { type = "pane", id = 1 }
+local single_pane = mock_pane(1)
 panes = t.collect_panes(single_pane)
 assert(#panes == 1, "collect_panes: single pane count")
 assert(panes[1].id == 1, "collect_panes: single pane id")
 
 -- Test: collect_panes with split containing panes
-local split_node = {
-    type = "split",
-    direction = "row",
-    children = {
-        { type = "pane", id = 1 },
-        { type = "pane", id = 2 },
-    },
-}
+local split_node = mock_split(1, "row", {
+    mock_pane(1),
+    mock_pane(2),
+})
 panes = t.collect_panes(split_node)
 assert(#panes == 2, "collect_panes: split with 2 panes")
 assert(panes[1].id == 1, "collect_panes: first pane")
 assert(panes[2].id == 2, "collect_panes: second pane")
 
 -- Test: collect_panes with nested splits
-local nested = {
-    type = "split",
-    direction = "col",
-    children = {
-        { type = "pane", id = 1 },
-        {
-            type = "split",
-            direction = "row",
-            children = {
-                { type = "pane", id = 2 },
-                { type = "pane", id = 3 },
-            },
-        },
-    },
-}
+local nested = mock_split(1, "col", {
+    mock_pane(1),
+    mock_split(2, "row", {
+        mock_pane(2),
+        mock_pane(3),
+    }),
+})
 panes = t.collect_panes(nested)
 assert(#panes == 3, "collect_panes: nested splits")
 assert(panes[1].id == 1, "collect_panes: nested first")
@@ -153,7 +185,7 @@ local path = t.find_node_path(nil, 1)
 assert(path == nil, "find_node_path: nil returns nil")
 
 -- Test: find_node_path with single pane (found)
-local pane1 = { type = "pane", id = 1 }
+local pane1 = mock_pane(1)
 path = t.find_node_path(pane1, 1)
 assert(path ~= nil, "find_node_path: single pane found")
 assert(#path == 1, "find_node_path: path length 1")
@@ -164,14 +196,10 @@ path = t.find_node_path(pane1, 99)
 assert(path == nil, "find_node_path: single pane not found")
 
 -- Test: find_node_path in split
-local split_for_path = {
-    type = "split",
-    direction = "row",
-    children = {
-        { type = "pane", id = 1 },
-        { type = "pane", id = 2 },
-    },
-}
+local split_for_path = mock_split(1, "row", {
+    mock_pane(1),
+    mock_pane(2),
+})
 path = t.find_node_path(split_for_path, 2)
 assert(path ~= nil, "find_node_path: found in split")
 assert(#path == 2, "find_node_path: path through split")
@@ -179,21 +207,13 @@ assert(path[1].type == "split", "find_node_path: first is split")
 assert(path[2].id == 2, "find_node_path: second is target pane")
 
 -- Test: find_node_path in nested splits
-local nested_for_path = {
-    type = "split",
-    direction = "col",
-    children = {
-        { type = "pane", id = 1 },
-        {
-            type = "split",
-            direction = "row",
-            children = {
-                { type = "pane", id = 2 },
-                { type = "pane", id = 3 },
-            },
-        },
-    },
-}
+local nested_for_path = mock_split(1, "col", {
+    mock_pane(1),
+    mock_split(2, "row", {
+        mock_pane(2),
+        mock_pane(3),
+    }),
+})
 path = t.find_node_path(nested_for_path, 3)
 assert(path ~= nil, "find_node_path: found in nested")
 assert(#path == 3, "find_node_path: nested path length")
@@ -211,40 +231,28 @@ assert(path == nil, "find_node_path: not found in nested")
 assert(t.get_first_leaf(nil) == nil, "get_first_leaf: nil")
 
 -- Test: get_first_leaf with pane
-local leaf_pane = { type = "pane", id = 5 }
+local leaf_pane = mock_pane(5)
 local leaf = t.get_first_leaf(leaf_pane)
 assert(leaf ~= nil, "get_first_leaf: pane not nil")
 assert(leaf.id == 5, "get_first_leaf: pane returns self")
 
 -- Test: get_first_leaf with split
-local split_for_leaf = {
-    type = "split",
-    direction = "row",
-    children = {
-        { type = "pane", id = 10 },
-        { type = "pane", id = 20 },
-    },
-}
+local split_for_leaf = mock_split(1, "row", {
+    mock_pane(10),
+    mock_pane(20),
+})
 leaf = t.get_first_leaf(split_for_leaf)
 assert(leaf ~= nil, "get_first_leaf: split not nil")
 assert(leaf.id == 10, "get_first_leaf: returns first child")
 
 -- Test: get_first_leaf with nested splits
-local nested_for_leaf = {
-    type = "split",
-    direction = "col",
-    children = {
-        {
-            type = "split",
-            direction = "row",
-            children = {
-                { type = "pane", id = 100 },
-                { type = "pane", id = 200 },
-            },
-        },
-        { type = "pane", id = 300 },
-    },
-}
+local nested_for_leaf = mock_split(1, "col", {
+    mock_split(2, "row", {
+        mock_pane(100),
+        mock_pane(200),
+    }),
+    mock_pane(300),
+})
 leaf = t.get_first_leaf(nested_for_leaf)
 assert(leaf ~= nil, "get_first_leaf: nested not nil")
 assert(leaf.id == 100, "get_first_leaf: returns deepest first")
@@ -270,21 +278,13 @@ assert(leaf ~= nil, "get_last_leaf: nested not nil")
 assert(leaf.id == 300, "get_last_leaf: returns deepest last")
 
 -- Test: get_last_leaf with right-heavy nesting
-local right_nested = {
-    type = "split",
-    direction = "col",
-    children = {
-        { type = "pane", id = 1 },
-        {
-            type = "split",
-            direction = "row",
-            children = {
-                { type = "pane", id = 2 },
-                { type = "pane", id = 3 },
-            },
-        },
-    },
-}
+local right_nested = mock_split(1, "col", {
+    mock_pane(1),
+    mock_split(2, "row", {
+        mock_pane(2),
+        mock_pane(3),
+    }),
+})
 leaf = t.get_last_leaf(right_nested)
 assert(leaf ~= nil, "get_last_leaf: right-heavy nested should return leaf")
 assert(leaf.id == 3, "get_last_leaf: right-heavy nested")

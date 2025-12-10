@@ -15,6 +15,7 @@
 ---@field alt? boolean Alt modifier
 ---@field shift? boolean Shift modifier
 ---@field super? boolean Super/Cmd modifier
+---@field release? boolean Key release event
 
 ---Mouse data for send_mouse
 ---@class PtyMouseData

@@ -62,6 +62,52 @@ local utils = require("utils")
 ---@field shortcut? string
 ---@field visible? fun(): boolean
 
+---@class PtyAttachEvent
+---@field type "pty_attach"
+---@field data { pty: Pty }
+
+---@class PtyExitedEvent
+---@field type "pty_exited"
+---@field data { id: number }
+
+---@class KeyPressEvent
+---@field type "key_press"
+---@field data PtyKeyData
+
+---@class KeyReleaseEvent
+---@field type "key_release"
+---@field data PtyKeyData
+
+---@class PasteEvent
+---@field type "paste"
+---@field data { text: string }
+
+---@class MouseEvent
+---@field type "mouse"
+---@field data { action: string, button?: string, x: number, y: number, target?: number, target_x?: number, target_y?: number, mods?: table }
+
+---@class WinsizeEvent
+---@field type "winsize"
+---@field data { cols: number, rows: number }
+
+---@class FocusInEvent
+---@field type "focus_in"
+---@field data table
+
+---@class FocusOutEvent
+---@field type "focus_out"
+---@field data table
+
+---@class SplitResizeEvent
+---@field type "split_resize"
+---@field data { parent_id: number, child_index: integer, ratio: number }
+
+---@class CwdChangedEvent
+---@field type "cwd_changed"
+---@field data table
+
+---@alias Event PtyAttachEvent|PtyExitedEvent|KeyPressEvent|KeyReleaseEvent|PasteEvent|MouseEvent|WinsizeEvent|FocusInEvent|FocusOutEvent|SplitResizeEvent|CwdChangedEvent
+
 -- Powerline symbols
 local POWERLINE_SYMBOLS = {
     right_solid = "",
@@ -1432,7 +1478,7 @@ end
 
 -- --- Main Functions ---
 
----@param event { type: string, data: table }
+---@param event Event
 function M.update(event)
     if event.type == "pty_attach" then
         prise.log.info("Lua: pty_attach received")
@@ -1691,7 +1737,7 @@ function M.update(event)
                 handled = true
             elseif k >= "1" and k <= "9" then
                 -- Switch to tab N
-                local idx = tonumber(k)
+                local idx = math.tointeger(k)
                 if idx and idx <= #state.tabs then
                     set_active_tab_index(idx)
                 end
@@ -1776,9 +1822,9 @@ function M.update(event)
         if event.data.key == "c" then
             local is_copy = false
             if prise.platform == "macos" then
-                is_copy = event.data.super and not event.data.ctrl and not event.data.alt
+                is_copy = (event.data.super == true) and not event.data.ctrl and not event.data.alt
             else
-                is_copy = event.data.ctrl and event.data.shift and not event.data.super
+                is_copy = (event.data.ctrl == true) and (event.data.shift == true) and not event.data.super
             end
             if is_copy then
                 local pty = get_focused_pty()
