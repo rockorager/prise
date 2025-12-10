@@ -15,13 +15,7 @@ jobs:
         with:
           version: 0.15.2
 
-      - name: Install lua-language-server
-        run: |
-          LUALS_VERSION=3.13.5
-          curl -fsSL -o /tmp/luals.tar.gz "https://github.com/LuaLS/lua-language-server/releases/download/${LUALS_VERSION}/lua-language-server-${LUALS_VERSION}-linux-x64.tar.gz"
-          mkdir -p "$HOME/.local/luals"
-          tar -xzf /tmp/luals.tar.gz -C "$HOME/.local/luals"
-          echo "$HOME/.local/luals/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/setup-lua-ls
 
       - name: Build web documentation
         run: zig build web

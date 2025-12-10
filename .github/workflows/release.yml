@@ -34,18 +34,7 @@ jobs:
           version: latest
           args: --version
 
-      - name: Install lua-language-server
-        run: |
-          LUALS_VERSION=3.13.5
-          if [ "$RUNNER_OS" = "Linux" ]; then
-            LUALS_TARBALL="lua-language-server-${LUALS_VERSION}-linux-x64.tar.gz"
-          else
-            LUALS_TARBALL="lua-language-server-${LUALS_VERSION}-darwin-arm64.tar.gz"
-          fi
-          curl -fsSL -o /tmp/luals.tar.gz "https://github.com/LuaLS/lua-language-server/releases/download/${LUALS_VERSION}/${LUALS_TARBALL}"
-          mkdir -p "$HOME/.local/luals"
-          tar -xzf /tmp/luals.tar.gz -C "$HOME/.local/luals"
-          echo "$HOME/.local/luals/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/setup-lua-ls
 
       - name: Test
         run: zig build test
