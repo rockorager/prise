@@ -28,7 +28,11 @@ end
 ---@param id integer
 ---@return Pane
 local function mock_pane(id)
-    return { type = "pane", id = id, pty = mock_pty(id) }
+    ---@type Pane
+    ---@diagnostic disable-next-line: assign-type-mismatch, missing-fields
+    local pane = { type = "pane", id = id, pty = mock_pty(id) }
+    ---@diagnostic disable-next-line: return-type-mismatch
+    return pane
 end
 
 ---Create a mock Split
@@ -125,18 +129,22 @@ assert(t.matches_keybind({ key = "p" }, { key = "p", super = true }) == false, "
 -- === is_pane / is_split ===
 
 -- Test: is_pane with pane node
+---@diagnostic disable-next-line: missing-fields
 assert(t.is_pane({ type = "pane", id = 1 }) == true, "is_pane: pane node")
 
 -- Test: is_pane with split node
+---@diagnostic disable-next-line: missing-fields
 assert(t.is_pane({ type = "split" }) == false, "is_pane: split node")
 
 -- Test: is_pane with nil
 assert(not t.is_pane(nil), "is_pane: nil")
 
 -- Test: is_split with split node
+---@diagnostic disable-next-line: missing-fields
 assert(t.is_split({ type = "split", children = {} }) == true, "is_split: split node")
 
 -- Test: is_split with pane node
+---@diagnostic disable-next-line: missing-fields
 assert(t.is_split({ type = "pane" }) == false, "is_split: pane node")
 
 -- Test: is_split with nil

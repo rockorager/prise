@@ -1,3 +1,4 @@
+---@diagnostic disable: undefined-field, need-check-nil
 local prise = require("prise")
 local utils = require("utils")
 
@@ -294,13 +295,19 @@ end
 ---@param node? Node
 ---@return boolean
 local function is_pane(node)
-    return node and node.type == "pane"
+    if not node then
+        return false
+    end
+    return node.type == "pane"
 end
 
 ---@param node? Node
 ---@return boolean
 local function is_split(node)
-    return node and node.type == "split"
+    if not node then
+        return false
+    end
+    return node.type == "split"
 end
 
 ---Cancel all timers and detach from session
@@ -401,7 +408,10 @@ local function get_first_leaf(node)
         return nil
     end
     if is_pane(node) then
-        return node
+        if node.type == "pane" then
+            return node
+        end
+        return nil
     end
     if is_split(node) then
         return get_first_leaf(node.children[1])
@@ -416,7 +426,10 @@ local function get_last_leaf(node)
         return nil
     end
     if is_pane(node) then
-        return node
+        if node.type == "pane" then
+            return node
+        end
+        return nil
     end
     if is_split(node) then
         return get_last_leaf(node.children[#node.children])
@@ -721,7 +734,7 @@ local function remove_pane_by_id(id)
             prise.exit()
             return true
         else
-            local old_focused = state.focused_id
+            local _ = state.focused_id
             table.remove(state.tabs, tab_idx)
 
             -- Adjust active_tab if needed
@@ -837,6 +850,7 @@ end
 
 ---Serialize a node tree to a table with pty_ids instead of userdata
 ---@param node? Node
+---@param cwd_lookup fun(pty_id: number): string?
 ---@return table?
 local function serialize_node(node, cwd_lookup)
     if not node then
@@ -1060,7 +1074,10 @@ end
 ---@return Pane?
 local function get_preferred_leaf(node, forward)
     if is_pane(node) then
-        return node
+        if node.type == "pane" then
+            return node
+        end
+        return nil
     end
 
     if is_split(node) then
@@ -2058,6 +2075,7 @@ function M.update(event)
                 -- Switch to tab N
                 local idx = tonumber(k)
                 if idx and idx <= #state.tabs then
+                    ---@cast idx integer
                     set_active_tab_index(idx)
                 end
                 handled = true
@@ -2402,6 +2420,7 @@ end
 ---Collect all leaf panes in a subtree with their relative ratios
 ---@param node Node
 ---@param panes table[] Output array
+---@diagnostic disable-next-line: unused-function
 local function collect_leaf_panes_with_ratios(node, panes)
     if is_pane(node) then
         table.insert(panes, { id = node.id, ratio = node.ratio or 1.0 })
@@ -2853,6 +2872,8 @@ local function render_node(node, force_unfocused)
             return prise.Column(props)
         end
     end
+    -- Fallback for invalid node type
+    return prise.Text({ text = "Invalid node" })
 end
 
 ---Format a command palette item with name and right-aligned shortcut
@@ -3488,6 +3509,7 @@ function M.view()
     return main_ui
 end
 
+---@param cwd_lookup fun(pty_id: number): string?
 ---@return table
 function M.get_state(cwd_lookup)
     -- Serialize all tabs

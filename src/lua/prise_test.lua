@@ -40,6 +40,8 @@ local function mock_text_input()
         end,
         insert = function() end,
         delete_backward = function() end,
+        delete_word_backward = function() end,
+        kill_line = function() end,
         delete_forward = function() end,
         move_left = function() end,
         move_right = function() end,
@@ -52,6 +54,7 @@ local function mock_text_input()
 end
 
 -- Test: Terminal creates correct widget
+---@diagnostic disable-next-line: assign-type-mismatch
 local term = prise.Terminal({ pty = mock_pty(), ratio = 0.5, id = "t1", focus = true, show_cursor = false })
 assert(term.type == "terminal", "Terminal: type should be 'terminal'")
 assert(term.pty ~= nil, "Terminal: pty should be set")
@@ -63,7 +66,7 @@ assert(term.show_cursor == false, "Terminal: show_cursor should be set")
 -- Test: Text with string creates content array
 local text1 = prise.Text("hello")
 assert(text1.type == "text", "Text(string): type should be 'text'")
-assert(text1.content[1] == "hello", "Text(string): content should contain the string")
+assert(text1.content[1].text == "hello", "Text(string): content should contain the string")
 
 -- Test: Text with array of segments
 local text2 = prise.Text({ { text = "a" }, { text = "b" } })
@@ -78,9 +81,9 @@ assert(text3.content[1].text == "single", "Text(segment): should wrap in content
 assert(text3.content[1].style.fg == "red", "Text(segment): style should be preserved")
 
 -- Test: Text with TextOpts (has 'content' key)
-local text4 = prise.Text({ content = { "x", "y" }, show_cursor = true })
+local text4 = prise.Text({ content = { { text = "x" }, { text = "y" } }, show_cursor = true })
 assert(text4.type == "text", "Text(opts): type should be 'text'")
-assert(text4.content[1] == "x", "Text(opts): content should be set")
+assert(text4.content[1].text == "x", "Text(opts): content should be set")
 assert(text4.show_cursor == true, "Text(opts): show_cursor should be set")
 
 -- Test: Text with empty TextOpts
@@ -166,6 +169,7 @@ assert(pos2.child.type == "box", "Positioned(array): should use first element as
 assert(pos2.x == 5, "Positioned(array): x should be set")
 
 -- Test: TextInput
+---@diagnostic disable-next-line: assign-type-mismatch
 local input = prise.TextInput({ input = mock_text_input(), style = { fg = "blue" }, focus = true })
 assert(input.type == "text_input", "TextInput: type should be 'text_input'")
 assert(input.input ~= nil, "TextInput: input should be set")

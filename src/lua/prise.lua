@@ -10,6 +10,7 @@
 ---@field style? table
 
 ---@class TextOpts
+---@field text? string
 ---@field content? TextSegment[]
 ---@field show_cursor? boolean
 
@@ -113,12 +114,11 @@ function M.Text(opts)
     if type(opts) == "string" then
         return {
             type = "text",
-            content = { opts },
+            content = { { text = opts } },
         }
     end
 
-    -- If it has numeric keys, treat it as the content array directly
-    if opts[1] then
+    if type(opts) == "table" and opts[1] ~= nil then
         return {
             type = "text",
             content = opts,
@@ -146,15 +146,17 @@ end
 function M.Column(opts)
     -- If opts is an array (has numeric keys), it's just the children
     if opts[1] then
+        ---@cast opts table[]
         return {
             type = "column",
             children = opts,
         }
     end
 
+    ---@cast opts LayoutOpts
     return {
         type = "column",
-        children = opts.children or opts,
+        children = opts.children or {},
         ratio = opts.ratio,
         id = opts.id,
         cross_axis_align = opts.cross_axis_align,
@@ -169,15 +171,17 @@ end
 function M.Row(opts)
     -- If opts is an array (has numeric keys), it's just the children
     if opts[1] then
+        ---@cast opts table[]
         return {
             type = "row",
             children = opts,
         }
     end
 
+    ---@cast opts LayoutOpts
     return {
         type = "row",
-        children = opts.children or opts,
+        children = opts.children or {},
         ratio = opts.ratio,
         id = opts.id,
         cross_axis_align = opts.cross_axis_align,
