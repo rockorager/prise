@@ -120,8 +120,9 @@ const Pty = struct {
     render_timer: ?io.Task = null,
     render_state: ghostty_vt.RenderState,
 
-    // Selection state: stores click position for drag selection
-    selection_start: ?struct { col: u16, row: u16 } = null,
+    // Selection state: stores click position for drag selection as a Pin
+    // to survive viewport scrolling during drag operations
+    selection_start: ?ghostty_vt.PageList.Pin = null,
     // Click counting for double/triple click
     left_click_count: u8 = 0,
     left_click_time: i64 = 0, // milliseconds timestamp
@@ -1443,7 +1444,6 @@ const Client = struct {
                     pty_instance.left_click_count = 1;
                 }
                 pty_instance.left_click_time = now;
-                pty_instance.selection_start = .{ .col = col, .row = row };
 
                 pty_instance.terminal_mutex.lock();
                 defer pty_instance.terminal_mutex.unlock();
@@ -1453,6 +1453,9 @@ const Client = struct {
                     .x = col,
                     .y = row,
                 } }) orelse return;
+
+                // Store the pin so it survives viewport scrolling during drag
+                pty_instance.selection_start = pin;
 
                 switch (pty_instance.left_click_count) {
                     1 => screen.select(null) catch {},
@@ -1496,10 +1499,8 @@ const Client = struct {
                         };
                     }
 
-                    const start_pin = screen.pages.pin(.{ .viewport = .{
-                        .x = start.col,
-                        .y = start.row,
-                    } }) orelse return;
+                    // start is already a Pin (stored during press event)
+                    const start_pin = start;
                     const end_pin = screen.pages.pin(.{ .viewport = .{
                         .x = col,
                         .y = row,
