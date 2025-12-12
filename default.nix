@@ -13,4 +13,4 @@
   {
     src = ./.;
   }
-).defaultNix.default
+).shellNix.default

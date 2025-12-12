@@ -1,5 +1,5 @@
 {
-  description = "prise - terminal multiplexer";
+  description = "prise development environment";
 
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
@@ -17,7 +17,6 @@
 
   outputs =
     {
-      self,
       nixpkgs,
       zig-overlay,
       ...
@@ -44,44 +43,6 @@
         );
     in
     {
-      packages = forAllSystems (
-        { pkgs }:
-        rec {
-          default = prise;
-          prise = pkgs.stdenvNoCC.mkDerivation {
-            name = "prise";
-            version = "0.1.0-dev";
-            src = ./.;
-
-            nativeBuildInputs = [
-              pkgs.zigpkgs."0.15.2"
-            ];
-
-            buildInputs = pkgs.lib.optionals pkgs.stdenv.isDarwin [
-              pkgs.darwin.apple_sdk.frameworks.AppKit
-            ];
-
-            dontConfigure = true;
-
-            preBuild = ''
-              export HOME=$TMPDIR
-            '';
-
-            buildPhase = ''
-              runHook preBuild
-              zig build --prefix $out -Doptimize=ReleaseSafe
-              runHook postBuild
-            '';
-
-            dontInstall = true;
-
-            passthru = {
-              exePath = "/bin/prise";
-            };
-          };
-        }
-      );
-
       devShells = forAllSystems (
         { pkgs }:
         let
@@ -144,16 +105,6 @@
               echo "  zig build fmt    - format code"
               echo "  zig build run    - run prise"
             '';
-          };
-        }
-      );
-
-      apps = forAllSystems (
-        { pkgs }:
-        {
-          default = {
-            type = "app";
-            program = "${self.packages.${pkgs.system}.prise}/bin/prise";
           };
         }
       );
