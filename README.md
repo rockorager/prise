@@ -24,7 +24,7 @@ brew services start prise
 To install the binary and service files:
 
 ```bash
-zig build install --prefix ~/.local
+zig build -Doptimize=ReleaseSafe -Dlua-check=false install --prefix ~/.local
 ```
 
 To enable and start the prise server as a background service:
