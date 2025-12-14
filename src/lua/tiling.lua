@@ -2162,9 +2162,9 @@ function M.update(event)
         local pane_index = child_index
         if config.borders.mode == "separator" and should_show_borders() then
             if child_index % 2 == 0 then
-                pane_index = child_index / 2
+                pane_index = child_index // 2
             else
-                pane_index = (child_index - 1) / 2
+                pane_index = (child_index - 1) // 2
             end
         end
 
