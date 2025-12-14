@@ -163,6 +163,7 @@ local ui = require("prise").tiling()
 ui.setup({
     borders = {
         enabled = true,
+        mode = "box",                   -- "box" for full borders, "separator" for tmux-style
         style = "rounded",              -- "single", "double", "rounded", or "none"
         focused_color = "#89b4fa",      -- Blue for active pane (default)
         unfocused_color = "#585b70",    -- Gray for inactive panes (default)
@@ -171,6 +172,10 @@ ui.setup({
 
 return ui
 ```
+
+Available border modes:
+- `"box"` - Full borders around each pane (default)
+- `"separator"` - Tmux-style borders between panes only
 
 Available border styles:
 - `"single"` - Single-line borders: `┌─┐│└┘` (default)
