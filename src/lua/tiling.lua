@@ -160,6 +160,7 @@ local POWERLINE_SYMBOLS = {
 ---@class PriseKeybinds
 ---@field leader? PriseKeybind Key to enter command mode (default: super+k)
 ---@field palette? PriseKeybind Key to open command palette (default: super+p)
+---@field use_arrow_keys? boolean Allow arrow keys for pane navigation after leader (default: true)
 
 ---@class PriseBordersConfig
 ---@field enabled? boolean Show pane borders (default: false)
@@ -221,6 +222,7 @@ local config = {
     keybinds = {
         leader = { key = "k", super = true },
         palette = { key = "p", super = true },
+        use_arrow_keys = true,
     },
     macos_option_as_alt = "false",
 }
@@ -1700,16 +1702,17 @@ function M.update(event)
                 return
             end
 
-            if k == "h" then
+            local arrow_enabled = config.keybinds.use_arrow_keys ~= false
+            if k == "h" or (arrow_enabled and k == "ArrowLeft") then
                 move_focus("left")
                 handled = true
-            elseif k == "l" then
+            elseif k == "l" or (arrow_enabled and k == "ArrowRight") then
                 move_focus("right")
                 handled = true
-            elseif k == "j" then
+            elseif k == "j" or (arrow_enabled and k == "ArrowDown") then
                 move_focus("down")
                 handled = true
-            elseif k == "k" then
+            elseif k == "k" or (arrow_enabled and k == "ArrowUp") then
                 move_focus("up")
                 handled = true
             elseif k == "H" then
