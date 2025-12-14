@@ -55,6 +55,8 @@ pub const SplitHandle = struct {
     end: u16,
     child_current_size: u16,
     total_size: u16,
+    separator_space: u16 = 0, // Total space used by separators in this container
+    container_start: u16 = 0, // Start position of the container (for ratio calculation)
 
     pub const Axis = enum { horizontal, vertical };
 
@@ -70,15 +72,32 @@ pub const SplitHandle = struct {
     }
 
     pub fn calculateNewRatio(self: SplitHandle, mouse_pos: f64) f32 {
-        const boundary: f64 = @floatFromInt(self.boundary);
-        const child_size: f64 = @floatFromInt(self.child_current_size);
         const total: f64 = @floatFromInt(self.total_size);
-        if (total == 0) return 0.5;
+        const sep_space: f64 = @floatFromInt(self.separator_space);
+        const container_start: f64 = @floatFromInt(self.container_start);
+        
+        // Available space for panes (total minus separator space)
+        const pane_space = total - sep_space;
+        if (pane_space <= 0) return 0.5;
 
-        // Calculate new ratio based on mouse position relative to the split start
-        const split_start = boundary - child_size;
-        const relative_pos = mouse_pos - split_start;
+        // Calculate new ratio based on mouse position relative to container start
+        const relative_pos = mouse_pos - container_start;
+        
+        // Subtract separator space that comes before the mouse position
+        // For now, approximate by assuming separators are evenly distributed
+        // This gives us the position within the pane-only space
         var ratio = relative_pos / total;
+        
+        // Adjust for separator space - the ratio should be relative to pane space only
+        // If separator_space > 0, we need to scale the ratio
+        if (sep_space > 0) {
+            // Estimate how many separators are before the mouse position
+            // Each separator takes 1 cell, positioned between panes
+            const sep_before = (relative_pos / total) * sep_space;
+            const pane_pos = relative_pos - sep_before;
+            ratio = pane_pos / pane_space;
+        }
+        
         if (ratio < 0.1) ratio = 0.1;
         if (ratio > 0.9) ratio = 0.9;
         return @floatCast(ratio);
@@ -141,6 +160,7 @@ pub const Widget = struct {
                 p.child.deinit(allocator);
                 allocator.destroy(p.child);
             },
+            .separator => {},
         }
     }
 
@@ -165,6 +185,18 @@ pub const Widget = struct {
             .text => |*text| layoutTextImpl(text, constraints),
             .stack => |*stack| layoutStackImpl(stack, constraints),
             .positioned => |*pos| layoutPositionedImpl(pos, constraints),
+            .separator => |sep| switch (sep.axis) {
+                // Vertical separator: 1 cell wide, fills available height
+                .vertical => .{
+                    .width = 1,
+                    .height = constraints.max_height orelse 1,
+                },
+                // Horizontal separator: 1 cell tall, fills available width
+                .horizontal => .{
+                    .width = constraints.max_width orelse 1,
+                    .height = 1,
+                },
+            },
         };
         self.width = size.width;
         self.height = size.height;
@@ -201,6 +233,7 @@ pub const Widget = struct {
             .positioned => |*pos| {
                 try pos.child.paint();
             },
+            .separator => {},
         }
     }
 
@@ -428,6 +461,7 @@ pub const Widget = struct {
             .positioned => |pos| {
                 try pos.child.collectHitRegionsRecursive(allocator, regions, abs_x, abs_y);
             },
+            .separator => {},
         }
     }
 
@@ -454,6 +488,12 @@ pub const Widget = struct {
                 try b.child.collectSplitHandlesRecursive(allocator, handles, abs_x, abs_y);
             },
             .row => |row| {
+                // Count separator space (separators have width 1 in a row)
+                var sep_space: u16 = 0;
+                for (row.children) |*c| {
+                    if (c.kind == .separator) sep_space += c.width;
+                }
+
                 // Horizontal split handles (between children in a row)
                 for (row.children, 0..) |*child, i| {
                     // Recurse first
@@ -470,11 +510,19 @@ pub const Widget = struct {
                             .end = abs_y + self.height,
                             .child_current_size = child.width,
                             .total_size = self.width,
+                            .separator_space = sep_space,
+                            .container_start = abs_x,
                         });
                     }
                 }
             },
             .column => |col| {
+                // Count separator space (separators have height 1 in a column)
+                var sep_space: u16 = 0;
+                for (col.children) |*c| {
+                    if (c.kind == .separator) sep_space += c.height;
+                }
+
                 // Vertical split handles (between children in a column)
                 for (col.children, 0..) |*child, i| {
                     // Recurse first
@@ -491,6 +539,8 @@ pub const Widget = struct {
                             .end = abs_x + self.width,
                             .child_current_size = child.height,
                             .total_size = self.height,
+                            .separator_space = sep_space,
+                            .container_start = abs_y,
                         });
                     }
                 }
@@ -506,6 +556,7 @@ pub const Widget = struct {
             .padding => |p| {
                 try p.child.collectSplitHandlesRecursive(allocator, handles, abs_x, abs_y);
             },
+            .separator => {},
         }
     }
 
@@ -604,6 +655,7 @@ pub const WidgetKind = union(enum) {
     row: Row,
     stack: Stack,
     positioned: Positioned,
+    separator: Separator,
 };
 
 pub const CrossAxisAlignment = enum {
@@ -692,6 +744,30 @@ pub const Box = struct {
             .single => .{ .tl = "┌", .tr = "┐", .bl = "└", .br = "┘", .h = "─", .v = "│" },
             .double => .{ .tl = "╔", .tr = "╗", .bl = "╚", .br = "╝", .h = "═", .v = "║" },
             .rounded => .{ .tl = "╭", .tr = "╮", .bl = "╰", .br = "╯", .h = "─", .v = "│" },
+        };
+    }
+};
+
+pub const Separator = struct {
+    axis: Axis,
+    style: vaxis.Style = .{},
+    border: Box.Border = .single,
+
+    pub const Axis = enum { horizontal, vertical };
+
+    /// Returns the line character based on border style
+    pub fn lineChar(self: Separator) []const u8 {
+        return switch (self.axis) {
+            .horizontal => switch (self.border) {
+                .none => " ",
+                .single, .rounded => "─",
+                .double => "═",
+            },
+            .vertical => switch (self.border) {
+                .none => " ",
+                .single, .rounded => "│",
+                .double => "║",
+            },
         };
     }
 };
@@ -1372,6 +1448,42 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
             .y = y,
             .anchor = anchor,
         } } };
+    } else if (std.mem.eql(u8, widget_type, "separator")) {
+        // Parse axis (required)
+        var axis: Separator.Axis = .vertical;
+        _ = lua.getField(index, "axis");
+        if (lua.typeOf(-1) == .string) {
+            const a = lua.toString(-1) catch "";
+            if (std.mem.eql(u8, a, "horizontal")) axis = .horizontal;
+            if (std.mem.eql(u8, a, "vertical")) axis = .vertical;
+        }
+        lua.pop(1);
+
+        // Parse border style
+        var border: Box.Border = .single;
+        _ = lua.getField(index, "border");
+        if (lua.typeOf(-1) == .string) {
+            const b = lua.toString(-1) catch "";
+            if (std.mem.eql(u8, b, "none")) border = .none;
+            if (std.mem.eql(u8, b, "single")) border = .single;
+            if (std.mem.eql(u8, b, "double")) border = .double;
+            if (std.mem.eql(u8, b, "rounded")) border = .rounded;
+        }
+        lua.pop(1);
+
+        // Parse style
+        var style = vaxis.Style{};
+        _ = lua.getField(index, "style");
+        if (lua.typeOf(-1) == .table) {
+            style = parseStyle(lua, -1) catch .{};
+        }
+        lua.pop(1);
+
+        return .{ .ratio = ratio, .id = id, .focus = focus, .kind = .{ .separator = .{
+            .axis = axis,
+            .border = border,
+            .style = style,
+        } } };
     }
 
     return error.UnknownWidgetType;
@@ -2031,12 +2143,12 @@ fn layoutColumnImpl(col: *Column, constraints: BoxConstraints) Size {
     const total_height = constraints.max_height orelse 0;
     var width: u16 = 0;
 
-    // Pass 1: Measure intrinsic children (text) and count proportional children
+    // Pass 1: Measure intrinsic children (text, separator) and count proportional children
     var intrinsic_height: u16 = 0;
     var nil_count: u16 = 0;
 
     for (col.children) |*child| {
-        const is_intrinsic = child.ratio == null and (child.kind == .text or child.kind == .text_input or child.kind == .list);
+        const is_intrinsic = child.ratio == null and (child.kind == .text or child.kind == .text_input or child.kind == .list or child.kind == .separator);
         if (is_intrinsic) {
             const remaining = if (total_height > intrinsic_height) total_height - intrinsic_height else 0;
             const child_constraints: BoxConstraints = .{
@@ -2083,7 +2195,7 @@ fn layoutColumnImpl(col: *Column, constraints: BoxConstraints) Size {
         var remaining = remaining_for_nil;
         var count = nil_count;
         for (col.children) |*child| {
-            const is_intrinsic = child.kind == .text or child.kind == .text_input or child.kind == .list;
+            const is_intrinsic = child.kind == .text or child.kind == .text_input or child.kind == .list or child.kind == .separator;
             if (child.ratio == null and !is_intrinsic) {
                 const share = remaining / count;
                 remaining -= share;
@@ -2140,12 +2252,12 @@ fn layoutRowImpl(row: *Row, constraints: BoxConstraints) Size {
     const total_width = constraints.max_width orelse 0;
     var height: u16 = 0;
 
-    // Pass 1: Measure intrinsic children (text) and count proportional children
+    // Pass 1: Measure intrinsic children (text, separator) and count proportional children
     var intrinsic_width: u16 = 0;
     var nil_count: u16 = 0;
 
     for (row.children) |*child| {
-        const is_intrinsic = child.ratio == null and child.kind == .text;
+        const is_intrinsic = child.ratio == null and (child.kind == .text or child.kind == .separator);
         if (is_intrinsic) {
             const remaining = if (total_width > intrinsic_width) total_width - intrinsic_width else 0;
             const child_constraints: BoxConstraints = .{
@@ -2192,7 +2304,7 @@ fn layoutRowImpl(row: *Row, constraints: BoxConstraints) Size {
         var remaining = remaining_for_nil;
         var count = nil_count;
         for (row.children) |*child| {
-            const is_intrinsic = child.kind == .text;
+            const is_intrinsic = child.kind == .text or child.kind == .separator;
             if (child.ratio == null and !is_intrinsic) {
                 const share = remaining / count;
                 remaining -= share;
