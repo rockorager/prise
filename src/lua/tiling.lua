@@ -161,7 +161,8 @@ local POWERLINE_SYMBOLS = {
 ---@class PriseBordersConfig
 ---@field enabled? boolean Show pane borders (default: false)
 ---@field show_single_pane? boolean Show border when only one pane exists (default: false)
----@field style? "none"|"single"|"double"|"rounded" Border style (default: "single")
+---@field mode? "box"|"separator" Border mode: "box" for full borders, "separator" for tmux-style (default: "box")
+---@field style? "none"|"single"|"double"|"rounded" Border line style (default: "single")
 ---@field focused_color? string Hex color for focused pane border (default: "#89b4fa")
 ---@field unfocused_color? string Hex color for unfocused borders (default: "#585b70")
 
@@ -207,6 +208,7 @@ local config = {
     borders = {
         enabled = false,
         show_single_pane = false,
+        mode = "box", -- "box" for full borders, "separator" for tmux-style
         style = "single",
         focused_color = "#89b4fa", -- Blue (matches default theme.accent)
         unfocused_color = "#585b70", -- Gray (matches default theme.bg4)
@@ -930,6 +932,54 @@ local function should_show_borders()
     end
     local root = get_active_root()
     return count_panes(root) > 1
+end
+
+---Check if a node subtree contains the focused pane
+---@param node Node
+---@return boolean
+local function contains_focused(node)
+    if not node or not state.focused_id then
+        return false
+    end
+    if is_pane(node) then
+        return node.id == state.focused_id
+    elseif is_split(node) then
+        for _, child in ipairs(node.children) do
+            if contains_focused(child) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+---Get index of focused pane (1-based) and total count in active tab
+---@return number index
+---@return number total
+local function get_pane_position()
+    local root = get_active_root()
+    if not root or not state.focused_id then
+        return 1, 1
+    end
+
+    local index = 0
+    local found_index = 1
+
+    local function walk(node)
+        if is_pane(node) then
+            index = index + 1
+            if node.id == state.focused_id then
+                found_index = index
+            end
+        elseif is_split(node) then
+            for _, child in ipairs(node.children) do
+                walk(child)
+            end
+        end
+    end
+
+    walk(root)
+    return found_index, index
 end
 
 ---Serialize a node tree to a table with pty_ids instead of userdata
@@ -2100,6 +2150,24 @@ function M.update(event)
         local child_index = d.child_index
         local new_ratio = d.ratio
 
+        -- In separator mode, widget children include separators interleaved with panes.
+        -- Widget structure: [Pane0, Sep, Pane1, Sep, Pane2, ...]
+        -- Lua state structure: [Pane0, Pane1, Pane2, ...]
+        -- Map widget child_index to lua pane_index:
+        -- - Even widget indices (0, 2, 4, ...) are panes
+        -- - Odd widget indices (1, 3, 5, ...) are separators
+        -- For a handle at the boundary after widget child N:
+        -- - If N is even (a pane), pane_index = N / 2
+        -- - If N is odd (a separator), pane_index = (N - 1) / 2 (the pane before the separator)
+        local pane_index = child_index
+        if config.borders.mode == "separator" and should_show_borders() then
+            if child_index % 2 == 0 then
+                pane_index = child_index / 2
+            else
+                pane_index = (child_index - 1) / 2
+            end
+        end
+
         -- Find the split by id and update the child's ratio
         local function update_split_ratio(node)
             if not node then
@@ -2107,9 +2175,9 @@ function M.update(event)
             end
             if is_split(node) then
                 if node.split_id == split_id then
-                    -- Found it - update the first child's ratio
-                    if node.children[child_index + 1] then
-                        node.children[child_index + 1].ratio = new_ratio
+                    -- Found it - update the pane's ratio
+                    if node.children[pane_index + 1] then
+                        node.children[pane_index + 1].ratio = new_ratio
                     end
                     return true
                 end
@@ -2151,8 +2219,8 @@ local function render_node(node, force_unfocused)
             focus = is_focused,
         })
 
-        -- Wrap in Box if borders should be shown
-        if should_show_borders() then
+        -- Wrap in Box if borders should be shown (only in box mode)
+        if should_show_borders() and config.borders.mode == "box" then
             local border_color = is_focused and config.borders.focused_color or config.borders.unfocused_color
 
             return prise.Box({
@@ -2166,8 +2234,36 @@ local function render_node(node, force_unfocused)
         end
     elseif is_split(node) then
         local children_widgets = {}
-        for _, child in ipairs(node.children) do
-            table.insert(children_widgets, render_node(child, force_unfocused))
+
+        -- In separator mode, insert separators between children
+        if should_show_borders() and config.borders.mode == "separator" then
+            for i, child in ipairs(node.children) do
+                -- Add separator before this child (except for first)
+                if i > 1 then
+                    -- Determine separator color based on adjacency to focused pane
+                    local prev_child = node.children[i - 1]
+                    local prev_focused = contains_focused(prev_child)
+                    local curr_focused = contains_focused(child)
+                    local sep_color = (prev_focused or curr_focused) and config.borders.focused_color
+                        or config.borders.unfocused_color
+
+                    local sep_axis = node.direction == "row" and "vertical" or "horizontal"
+                    table.insert(
+                        children_widgets,
+                        prise.Separator({
+                            axis = sep_axis,
+                            style = { fg = sep_color },
+                            border = config.borders.style,
+                        })
+                    )
+                end
+                table.insert(children_widgets, render_node(child, force_unfocused))
+            end
+        else
+            -- Box mode or no borders: just render children directly
+            for _, child in ipairs(node.children) do
+                table.insert(children_widgets, render_node(child, force_unfocused))
+            end
         end
 
         local props = {
