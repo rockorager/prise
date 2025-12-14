@@ -2817,3 +2817,88 @@ test "render Text - wrap char breaks mid-word" {
     ;
     try tui_test.expectAsciiEqual(expected, ascii);
 }
+
+test "render Text - multiple spans concatenate on single line" {
+    const allocator = std.testing.allocator;
+
+    var screen = try tui_test.createScreen(allocator, 12, 1);
+    defer screen.deinit(allocator);
+    const win = tui_test.windowFromScreen(&screen);
+
+    var spans = [_]Text.Span{
+        .{ .text = "Hello ", .style = .{} },
+        .{ .text = "World", .style = .{} },
+    };
+
+    var w: Widget = .{
+        .kind = .{ .text = .{ .spans = &spans, .wrap = .none } },
+    };
+    _ = w.layout(boundsConstraints(12, 1));
+
+    try w.renderTo(win, allocator);
+
+    const ascii = try tui_test.screenToAscii(allocator, &screen, 12, 1);
+    defer allocator.free(ascii);
+
+    try tui_test.expectAsciiEqual("Hello World ", ascii);
+}
+
+test "render Text - multiple spans with word wrap" {
+    const allocator = std.testing.allocator;
+
+    var screen = try tui_test.createScreen(allocator, 8, 2);
+    defer screen.deinit(allocator);
+    const win = tui_test.windowFromScreen(&screen);
+
+    var spans = [_]Text.Span{
+        .{ .text = "One ", .style = .{} },
+        .{ .text = "Two ", .style = .{} },
+        .{ .text = "Three", .style = .{} },
+    };
+
+    var w: Widget = .{
+        .kind = .{ .text = .{ .spans = &spans, .wrap = .word } },
+    };
+    _ = w.layout(boundsConstraints(8, 2));
+
+    try w.renderTo(win, allocator);
+
+    const ascii = try tui_test.screenToAscii(allocator, &screen, 8, 2);
+    defer allocator.free(ascii);
+
+    const expected =
+        \\One Two 
+        \\Three   
+    ;
+    try tui_test.expectAsciiEqual(expected, ascii);
+}
+
+test "render Text - span with leading space consumed by word wrap" {
+    const allocator = std.testing.allocator;
+
+    var screen = try tui_test.createScreen(allocator, 5, 2);
+    defer screen.deinit(allocator);
+    const win = tui_test.windowFromScreen(&screen);
+
+    var spans = [_]Text.Span{
+        .{ .text = "One", .style = .{} },
+        .{ .text = " Two", .style = .{} },
+    };
+
+    var w: Widget = .{
+        .kind = .{ .text = .{ .spans = &spans, .wrap = .word } },
+    };
+    _ = w.layout(boundsConstraints(5, 2));
+
+    try w.renderTo(win, allocator);
+
+    const ascii = try tui_test.screenToAscii(allocator, &screen, 5, 2);
+    defer allocator.free(ascii);
+
+    // Word wrap consumes trailing/leading spaces at line breaks
+    const expected =
+        \\One  
+        \\Two  
+    ;
+    try tui_test.expectAsciiEqual(expected, ascii);
+}
