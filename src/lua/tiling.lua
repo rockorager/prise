@@ -147,8 +147,21 @@ local POWERLINE_SYMBOLS = {
 ---@field green string
 ---@field yellow string
 
+---@class StatusSegmentStyle
+---@field fg? string Foreground color (hex string)
+---@field bg? string Background color (hex string)
+---@field bold? boolean Bold text
+---@field italic? boolean Italic text
+
+---@class StatusSegment
+---@field command string Script or binary to execute
+---@field cache_time? number Cache duration in seconds (default: 5)
+---@field style? StatusSegmentStyle Styling for the segment
+---@field separator_style? StatusSegmentStyle Styling for the powerline separator before this segment
+
 ---@class PriseStatusBarConfig
 ---@field enabled? boolean Show the status bar (default: true)
+---@field custom_segments? StatusSegment[] Custom segments to display on the right side
 
 ---@class PriseTabBarConfig
 ---@field show_single_tab? boolean Show tab bar even with one tab (default: false)
@@ -217,6 +230,13 @@ local config = {
     },
     status_bar = {
         enabled = true,
+        custom_segments = {
+            {
+                command = "git rev-parse --abbrev-ref HEAD 2>/dev/null || echo ''",
+                cache_time = 2,
+                style = { bg = "#313244", fg = "#cdd6f4" },
+            },
+        },
     },
     tab_bar = {
         show_single_tab = false,
@@ -277,10 +297,10 @@ local state = {
     -- Screen dimensions
     screen_cols = 80,
     screen_rows = 24,
-    -- Cached git branch (updated on cwd_changed)
-    cached_git_branch = nil,
     -- True when detaching (prevents new timers from being scheduled)
     detaching = false,
+    -- Custom segment cache
+    custom_segment_cache = {},
 }
 
 local M = {}
@@ -515,23 +535,6 @@ local function get_last_leaf(node)
     return nil
 end
 
----Update the cached git branch for the focused pane
-local function update_cached_git_branch()
-    local root = get_active_root()
-    if state.focused_id and root then
-        local path = find_node_path(root, state.focused_id)
-        if path then
-            local pane = path[#path]
-            local cwd = pane.pty:cwd()
-            if cwd then
-                state.cached_git_branch = prise.get_git_branch(cwd)
-                return
-            end
-        end
-    end
-    state.cached_git_branch = nil
-end
-
 ---Recursively insert a new pane relative to target_id
 ---@param node Node
 ---@param target_id number
@@ -727,7 +730,6 @@ local function set_active_tab_index(new_index)
 
     state.focused_id = new_focus_id
     update_pty_focus(old_focused, new_focus_id)
-    update_cached_git_branch()
     prise.request_frame()
 end
 
@@ -788,11 +790,9 @@ local function close_tab(idx)
         end
         state.focused_id = new_focus_id
         update_pty_focus(old_focused, new_focus_id)
-        update_cached_git_branch()
     else
         -- No tabs left
         state.focused_id = nil
-        state.cached_git_branch = nil
     end
 
     prise.request_frame()
@@ -854,7 +854,6 @@ local function remove_pane_by_id(id)
                 end
                 state.focused_id = new_focus_id
                 update_pty_focus(old_focused, new_focus_id)
-                update_cached_git_branch()
             end
             prise.request_frame()
             return false
@@ -872,7 +871,6 @@ local function remove_pane_by_id(id)
                 end
             end
             update_pty_focus(old_id, state.focused_id)
-            update_cached_git_branch()
         end
         prise.request_frame()
         return false
@@ -1168,7 +1166,6 @@ local function move_focus(direction)
             local old_id = state.focused_id
             state.focused_id = target_leaf.id
             update_pty_focus(old_id, state.focused_id)
-            update_cached_git_branch()
             prise.request_frame()
         end
     end
@@ -2102,7 +2099,6 @@ function M.update(event)
         end
     elseif event.type == "cwd_changed" then
         -- CWD changed for a PTY - update cached git branch
-        update_cached_git_branch()
         prise.request_frame()
         prise.save() -- Auto-save on cwd change
     end
@@ -2472,15 +2468,45 @@ local function build_tab_bar()
     return prise.Text(segments)
 end
 
+---Execute a custom segment command with caching
+---@param segment_idx number Index of the segment in config
+---@param segment StatusSegment Segment configuration
+---@return string
+local function execute_custom_segment(segment_idx, segment)
+    local cache = state.custom_segment_cache[segment_idx]
+    local now = os.time()
+    local cache_time = segment.cache_time or 5
+
+    -- Check if cache is valid
+    if cache and (now - cache.last_update) < cache_time then
+        return cache.value
+    end
+
+    -- Execute command
+    local handle = io.popen(segment.command .. " 2>/dev/null")
+    local output = ""
+    if handle then
+        output = handle:read("*a")
+        handle:close()
+        -- Trim whitespace
+        output = output:gsub("^%s+", ""):gsub("%s+$", "")
+    end
+
+    -- Update cache
+    state.custom_segment_cache[segment_idx] = {
+        value = output,
+        last_update = now,
+    }
+
+    return output
+end
+
 ---Build the powerline-style status bar
 ---@return table
 local function build_status_bar()
     local mode_color = state.pending_command and THEME.mode_command or THEME.mode_normal
     local session_name = (prise.get_session_name() or "prise"):upper()
     local mode_text = state.pending_command and " CMD " or (" " .. session_name .. " ")
-
-    -- Use cached git branch (updated on cwd_changed and focus change)
-    local git_branch = state.cached_git_branch
 
     -- Get current time
     local time_str = prise.get_time()
@@ -2496,21 +2522,35 @@ local function build_status_bar()
     -- Track the last background color for proper powerline transitions
     local last_bg = mode_color
 
-    -- Git branch
-    if git_branch then
-        local branch_text = " \u{F062C} " .. git_branch .. " "
-        table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = last_bg, bg = THEME.bg2 } })
-        table.insert(segments, { text = branch_text, style = { bg = THEME.bg2, fg = THEME.fg_bright } })
-        left_width = left_width + 1 + prise.gwidth(branch_text)
-        last_bg = THEME.bg2
-    end
-
     -- Zoom indicator
     if state.zoomed_pane_id then
         table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = last_bg, bg = THEME.yellow } })
         table.insert(segments, { text = " ZOOM ", style = { bg = THEME.yellow, fg = THEME.fg_dark, bold = true } })
         left_width = left_width + 1 + 6
         last_bg = THEME.yellow
+    end
+
+    -- Add custom segments if configured
+    if config.status_bar.custom_segments then
+        for i, segment in ipairs(config.status_bar.custom_segments) do
+            local output = execute_custom_segment(i, segment)
+            if output and #output > 0 then
+                -- Default styling
+                local seg_style = segment.style or { bg = THEME.bg4, fg = THEME.fg_bright }
+                local sep_style = segment.separator_style or { fg = last_bg, bg = seg_style.bg }
+
+                -- Add separator
+                table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = sep_style })
+                left_width = left_width + 1
+                -- Add segment content
+                local seg_text = " " .. output .. " "
+                table.insert(segments, { text = seg_text, style = seg_style })
+                left_width = left_width + prise.gwidth(seg_text)
+
+                -- Update last_bg for next segment
+                last_bg = seg_style.bg
+            end
+        end
     end
 
     -- End left side
