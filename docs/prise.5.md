@@ -97,6 +97,9 @@ The **borders** table configures pane borders for visual separation.
 **show_single_pane**
 :   Show border when only one pane exists. Default: **false**
 
+**mode**
+:   Border rendering mode. Options: **"box"**, **"separator"**. Default: **"box"**
+
 **style**
 :   Border drawing style. Options: **"none"**, **"single"**, **"double"**, **"rounded"**. Default: **"single"**
 
@@ -105,6 +108,11 @@ The **borders** table configures pane borders for visual separation.
 
 **unfocused_color**
 :   Hex color code for unfocused pane borders. Default: **#585b70**
+
+Available border modes:
+
+- **"box"** - Full borders around each pane (default)
+- **"separator"** - Tmux-style borders drawn only between panes
 
 Available border styles:
 
@@ -119,10 +127,11 @@ Example:
 ui.setup({
     borders = {
         enabled = true,
-        show_single_pane = false,          -- Hide border for single pane
-        style = "double",
-        focused_color = "#f38ba8",  -- Pink
-        unfocused_color = "#313244", -- Dark gray
+        mode = "box",                       -- or "separator" for tmux-style
+        show_single_pane = false,           -- Hide border for single pane
+        style = "rounded",
+        focused_color = "#f38ba8",          -- Pink
+        unfocused_color = "#313244",        -- Dark gray
     },
 })
 ```
