@@ -626,6 +626,8 @@ pub const Widget = struct {
             .text => {},
             .text_input => {},
             .list => {},
+            .divider => {},
+            .segmented_divider => {},
             .box => |b| {
                 try b.child.collectSurfaceResizesRecursive(allocator, resizes);
             },

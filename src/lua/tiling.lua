@@ -734,7 +734,7 @@ local function remove_pane_by_id(id)
             prise.exit()
             return true
         else
-            local _ = state.focused_id
+            local old_focused = state.focused_id
             table.remove(state.tabs, tab_idx)
 
             -- Adjust active_tab if needed
@@ -784,68 +784,6 @@ local function remove_pane_by_id(id)
         prise.request_frame()
         return false
     end
-end
-
----Count all panes in the tree
----@param node? Node
----@return number
-local function count_panes(node)
-    if not node then
-        return 0
-    end
-    if is_pane(node) then
-        return 1
-    end
-    if is_split(node) then
-        local count = 0
-        for _, child in ipairs(node.children) do
-            count = count + count_panes(child)
-        end
-        return count
-    end
-    return 0
-end
-
----Determine if borders should be shown for the active tab
----@return boolean
-local function should_show_borders()
-    if not config.borders.enabled then
-        return false
-    end
-    if config.borders.show_single_pane then
-        return true
-    end
-    local root = get_active_root()
-    return count_panes(root) > 1
-end
-
----Get index of focused pane (1-based) and total count in active tab
----@return number index
----@return number total
-local function get_pane_position()
-    local root = get_active_root()
-    if not root or not state.focused_id then
-        return 1, 1
-    end
-
-    local index = 0
-    local found_index = 1
-
-    local function walk(node)
-        if is_pane(node) then
-            index = index + 1
-            if node.id == state.focused_id then
-                found_index = index
-            end
-        elseif is_split(node) then
-            for _, child in ipairs(node.children) do
-                walk(child)
-            end
-        end
-    end
-
-    walk(root)
-    return found_index, index
 end
 
 ---Serialize a node tree to a table with pty_ids instead of userdata
