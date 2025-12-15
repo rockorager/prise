@@ -2227,6 +2227,14 @@ pub const App = struct {
                                     task.cancel(l) catch {};
                                     app.autosave_timer = null;
                                 }
+                                if (app.pipe_read_task) |*task| {
+                                    task.cancel(l) catch {};
+                                    app.pipe_read_task = null;
+                                }
+                                if (app.send_task) |*task| {
+                                    task.cancel(l) catch {};
+                                    app.send_task = null;
+                                }
 
                                 log.info("Closing connection", .{});
                                 if (app.connected) {

@@ -279,6 +279,8 @@ local state = {
     screen_rows = 24,
     -- Cached git branch (updated on cwd_changed)
     cached_git_branch = nil,
+    -- True when detaching (prevents new timers from being scheduled)
+    detaching = false,
 }
 
 local M = {}
@@ -385,6 +387,20 @@ end
 ---@return boolean
 local function is_split(node)
     return node ~= nil and node.type == "split"
+end
+
+---Cancel all timers and detach from session
+local function detach_session()
+    state.detaching = true
+    if state.clock_timer then
+        state.clock_timer:cancel()
+        state.clock_timer = nil
+    end
+    if state.timer then
+        state.timer:cancel()
+        state.timer = nil
+    end
+    prise.detach(prise.get_session_name())
 end
 
 ---Get the currently active tab
@@ -1333,7 +1349,7 @@ local commands = {
         name = "Detach Session",
         shortcut = key_prefix .. " d",
         action = function()
-            prise.detach(prise.get_session_name())
+            detach_session()
         end,
     },
     {
@@ -1346,7 +1362,7 @@ local commands = {
         name = "Quit",
         shortcut = key_prefix .. " q",
         action = function()
-            prise.detach(prise.get_session_name())
+            detach_session()
         end,
     },
     {
@@ -1755,7 +1771,7 @@ function M.update(event)
                 handled = true
             elseif k == "d" then
                 -- Detach from session
-                prise.detach(prise.get_session_name())
+                detach_session()
                 handled = true
             elseif k == "t" then
                 -- New tab
@@ -1813,7 +1829,7 @@ function M.update(event)
                 end
             elseif k == "q" then
                 -- Quit
-                prise.detach(prise.get_session_name())
+                detach_session()
                 handled = true
             elseif k == "z" then
                 -- Toggle zoom
@@ -2523,13 +2539,15 @@ end
 
 ---Schedule a clock timer to refresh the display every minute
 local function schedule_clock_timer()
-    if state.clock_timer then
+    if state.clock_timer or state.detaching then
         return
     end
     state.clock_timer = prise.set_timeout(60000, function()
         state.clock_timer = nil
-        prise.request_frame()
-        schedule_clock_timer()
+        if not state.detaching then
+            prise.request_frame()
+            schedule_clock_timer()
+        end
     end)
 end
 
