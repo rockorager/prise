@@ -1,6 +1,7 @@
 //! UI layout and widget tree management.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 const vaxis = @import("vaxis");
 const ziglua = @import("zlua");
@@ -122,8 +123,9 @@ pub const UI = struct {
         lua.setField(-2, "prise");
 
         // Only register embedded tiling UI if not found on disk
+        // In debug builds, always use embedded to simplify development
         // (preload takes precedence over path, so we check explicitly)
-        const tiling_on_disk = blk: {
+        const tiling_on_disk = if (builtin.mode == .Debug) false else blk: {
             const user_path = try std.fs.path.join(allocator, &.{ home, ".local", "share", "prise", "lua", "prise_tiling_ui.lua" });
             defer allocator.free(user_path);
             const paths = [_][]const u8{

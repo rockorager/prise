@@ -2287,11 +2287,14 @@ local function build_tab_bar()
     local x_pos = 0
     state.tab_regions = {}
 
+    local min_tab_width = 8
     for i, tab in ipairs(state.tabs) do
         local is_active = (i == state.active_tab)
         local is_hovered = (i == state.hovered_tab)
-        local label = " " .. (tab.title or tostring(i)) .. " "
-        local label_width = #label
+        local title_text = tab.title or tostring(i)
+        local padding_needed = math.max(0, min_tab_width - #title_text - 2)
+        local label = " " .. title_text .. string.rep(" ", padding_needed + 1)
+        local label_width = math.max(min_tab_width, #title_text + 2)
 
         -- Record hit region for this tab
         table.insert(state.tab_regions, {
