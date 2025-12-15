@@ -759,6 +759,7 @@ test {
     _ = @import("key_string.zig");
     _ = @import("action.zig");
     _ = @import("keybind_compiler.zig");
+    _ = @import("keybind_matcher.zig");
 
     if (builtin.os.tag.isDarwin() or builtin.os.tag.isBSD()) {
         _ = @import("io/kqueue.zig");
