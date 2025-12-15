@@ -230,6 +230,13 @@ local config = {
     },
     status_bar = {
         enabled = true,
+        custom_segments = {
+            {
+                command = "git rev-parse --abbrev-ref HEAD 2>/dev/null || echo ''",
+                cache_time = 2,
+                style = { bg = "#313244", fg = "#cdd6f4" },
+            },
+        },
     },
     tab_bar = {
         show_single_tab = false,
@@ -290,8 +297,6 @@ local state = {
     -- Screen dimensions
     screen_cols = 80,
     screen_rows = 24,
-    -- Cached git branch (updated on cwd_changed)
-    cached_git_branch = nil,
     -- True when detaching (prevents new timers from being scheduled)
     detaching = false,
     -- Custom segment cache
@@ -530,23 +535,6 @@ local function get_last_leaf(node)
     return nil
 end
 
----Update the cached git branch for the focused pane
-local function update_cached_git_branch()
-    local root = get_active_root()
-    if state.focused_id and root then
-        local path = find_node_path(root, state.focused_id)
-        if path then
-            local pane = path[#path]
-            local cwd = pane.pty:cwd()
-            if cwd then
-                state.cached_git_branch = prise.get_git_branch(cwd)
-                return
-            end
-        end
-    end
-    state.cached_git_branch = nil
-end
-
 ---Recursively insert a new pane relative to target_id
 ---@param node Node
 ---@param target_id number
@@ -742,7 +730,6 @@ local function set_active_tab_index(new_index)
 
     state.focused_id = new_focus_id
     update_pty_focus(old_focused, new_focus_id)
-    update_cached_git_branch()
     prise.request_frame()
 end
 
@@ -803,11 +790,9 @@ local function close_tab(idx)
         end
         state.focused_id = new_focus_id
         update_pty_focus(old_focused, new_focus_id)
-        update_cached_git_branch()
     else
         -- No tabs left
         state.focused_id = nil
-        state.cached_git_branch = nil
     end
 
     prise.request_frame()
@@ -869,7 +854,6 @@ local function remove_pane_by_id(id)
                 end
                 state.focused_id = new_focus_id
                 update_pty_focus(old_focused, new_focus_id)
-                update_cached_git_branch()
             end
             prise.request_frame()
             return false
@@ -887,7 +871,6 @@ local function remove_pane_by_id(id)
                 end
             end
             update_pty_focus(old_id, state.focused_id)
-            update_cached_git_branch()
         end
         prise.request_frame()
         return false
@@ -1183,7 +1166,6 @@ local function move_focus(direction)
             local old_id = state.focused_id
             state.focused_id = target_leaf.id
             update_pty_focus(old_id, state.focused_id)
-            update_cached_git_branch()
             prise.request_frame()
         end
     end
@@ -2117,7 +2099,6 @@ function M.update(event)
         end
     elseif event.type == "cwd_changed" then
         -- CWD changed for a PTY - update cached git branch
-        update_cached_git_branch()
         prise.request_frame()
         prise.save() -- Auto-save on cwd change
     end
@@ -2527,9 +2508,6 @@ local function build_status_bar()
     local session_name = (prise.get_session_name() or "prise"):upper()
     local mode_text = state.pending_command and " CMD " or (" " .. session_name .. " ")
 
-    -- Use cached git branch (updated on cwd_changed and focus change)
-    local git_branch = state.cached_git_branch
-
     -- Get current time
     local time_str = prise.get_time()
 
@@ -2543,15 +2521,6 @@ local function build_status_bar()
 
     -- Track the last background color for proper powerline transitions
     local last_bg = mode_color
-
-    -- Git branch
-    if git_branch then
-        local branch_text = " \u{F062C} " .. git_branch .. " "
-        table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = last_bg, bg = THEME.bg2 } })
-        table.insert(segments, { text = branch_text, style = { bg = THEME.bg2, fg = THEME.fg_bright } })
-        left_width = left_width + 1 + prise.gwidth(branch_text)
-        last_bg = THEME.bg2
-    end
 
     -- Zoom indicator
     if state.zoomed_pane_id then
