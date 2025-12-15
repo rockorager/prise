@@ -915,6 +915,14 @@ pub const App = struct {
             }
         }.renameCb);
 
+        // Register switch_session callback
+        self.ui.setSwitchSessionCallback(self, struct {
+            fn switchCb(ctx: *anyopaque, target_session: []const u8) anyerror!void {
+                const app_ptr: *App = @ptrCast(@alignCast(ctx));
+                try app_ptr.switchToSession(target_session);
+            }
+        }.switchCb);
+
         // Manually trigger initial resize to connect
         const ws = try vaxis.Tty.getWinsize(self.tty.fd);
         try self.handleVaxisEvent(.{ .winsize = ws });
@@ -2456,6 +2464,42 @@ pub const App = struct {
         };
 
         return error.SessionAlreadyExists;
+    }
+
+    pub fn switchToSession(self: *App, target_session: []const u8) !void {
+        // Don't switch if already on the target session
+        if (self.current_session_name) |current| {
+            if (std.mem.eql(u8, current, target_session)) {
+                log.info("Already on session '{s}', not switching", .{target_session});
+                return;
+            }
+        }
+
+        // Save current session first
+        if (self.current_session_name) |name| {
+            log.info("Saving current session '{s}' before switch", .{name});
+            try self.saveSession(name);
+        }
+
+        // Restore terminal state before exec
+        const writer = self.tty.writer();
+        self.vx.deinit(self.allocator, writer);
+
+        // Build arguments for exec
+        const target_z = try self.allocator.dupeZ(u8, target_session);
+        const args = [_]?[*:0]const u8{
+            "prise",
+            "session",
+            "attach",
+            target_z,
+            null,
+        };
+
+        log.info("Exec'ing prise session attach '{s}'", .{target_session});
+
+        // Use execvpeZ with current environment
+        const err = posix.execvpeZ("prise", @ptrCast(&args), @ptrCast(std.c.environ));
+        log.err("Failed to exec prise: {}", .{err});
     }
 
     pub fn deleteCurrentSession(self: *App) void {

@@ -107,6 +107,14 @@ function prise.get_session_name() end
 ---@param new_name string
 function prise.rename_session(new_name) end
 
+---List all available sessions
+---@return string[]
+function prise.list_sessions() end
+
+---Switch to a different session
+---@param target_session string The session name to switch to
+function prise.switch_session(target_session) end
+
 ---Create a new TextInput handle
 ---@return TextInput
 function prise.create_text_input() end
