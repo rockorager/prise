@@ -72,6 +72,16 @@ function prise.Box(opts) end
 ---@return table Padding widget
 function prise.Padding(opts) end
 
+---Create a divider widget (horizontal or vertical line)
+---@param opts DividerOpts
+---@return table Divider widget
+function prise.Divider(opts) end
+
+---Create a segmented divider widget with multiple styled sections
+---@param opts SegmentedDividerOpts
+---@return table SegmentedDivider widget
+function prise.SegmentedDivider(opts) end
+
 ---Set a timeout to call a function after a delay
 ---@param ms integer Milliseconds to wait
 ---@param callback fun() Function to call

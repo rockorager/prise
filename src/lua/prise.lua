@@ -263,4 +263,43 @@ function M.Padding(opts)
     }
 end
 
+---@class DividerOpts
+---@field direction "horizontal"|"vertical"
+---@field style? table
+---@field focus? boolean
+
+---Create a divider widget (horizontal or vertical line)
+---@param opts DividerOpts
+---@return table Divider widget
+function M.Divider(opts)
+    return {
+        type = "divider",
+        direction = opts.direction,
+        style = opts.style,
+        focus = opts.focus,
+    }
+end
+
+---@class DividerSegment
+---@field ratio_start number Start position as ratio (0.0-1.0)
+---@field ratio_end number End position as ratio (0.0-1.0)
+---@field style? table
+
+---@class SegmentedDividerOpts
+---@field direction "horizontal"|"vertical"
+---@field segments DividerSegment[]
+---@field default_style? table
+
+---Create a segmented divider widget with multiple styled sections
+---@param opts SegmentedDividerOpts
+---@return table SegmentedDivider widget
+function M.SegmentedDivider(opts)
+    return {
+        type = "segmented_divider",
+        direction = opts.direction,
+        segments = opts.segments or {},
+        default_style = opts.default_style,
+    }
+end
+
 return M
