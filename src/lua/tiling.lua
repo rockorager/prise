@@ -153,16 +153,7 @@ local POWERLINE_SYMBOLS = {
 ---@class PriseTabBarConfig
 ---@field show_single_tab? boolean Show tab bar even with one tab (default: false)
 
----@class PriseKeybind
----@field key string The key (e.g., "k", "p", "Enter")
----@field ctrl? boolean Require ctrl modifier
----@field alt? boolean Require alt modifier
----@field shift? boolean Require shift modifier
----@field super? boolean Require super/cmd modifier
 
----@class PriseKeybinds
----@field leader? PriseKeybind Key to enter command mode (default: super+k)
----@field palette? PriseKeybind Key to open command palette (default: super+p)
 
 ---@class PriseBordersConfig
 ---@field enabled? boolean Show pane borders (default: false)
@@ -224,9 +215,25 @@ local config = {
     keybinds = {
         leader = { key = "k", super = true },
         palette = { key = "p", super = true },
+        direct = {
+            -- default focus keybinds: ctrl + hjkl
+            { key = "h", ctrl = true, action = "focus_left" },
+            { key = "j", ctrl = true, action = "focus_down" },
+            { key = "k", ctrl = true, action = "focus_up" },
+            { key = "l", ctrl = true, action = "focus_right" },
+            -- default resize keybinds: alt + hjkl
+            { key = "h", alt = true, action = "resize_left" },
+            { key = "j", alt = true, action = "resize_down" },
+            { key = "k", alt = true, action = "resize_up" },
+            { key = "l", alt = true, action = "resize_right" },
+        },
     },
     macos_option_as_alt = "false",
 }
+
+-- Parsed direct keybinds (filled by M.setup)
+---@type PriseDirectKeybind[]
+local direct_keybinds = {}
 
 local merge_config = utils.merge_config
 
@@ -288,8 +295,20 @@ local M = {}
 ---Configure the default UI
 ---@param opts? PriseConfigOptions Configuration options to merge
 function M.setup(opts)
+    -- check if user explicitly provided direct keybinds before merge
+    local user_provided_direct = opts and opts.keybinds and opts.keybinds.direct ~= nil
+    local user_direct = user_provided_direct and opts and opts.keybinds and opts.keybinds.direct or nil
+
     if opts then
         merge_config(config, opts)
+    end
+
+    -- parse direct keybinds
+    -- if user explicitly provided direct (even if empty), use that instead of defaults
+    if user_provided_direct and user_direct then
+        direct_keybinds = user_direct
+    else
+        direct_keybinds = config.keybinds.direct or {}
     end
 end
 
@@ -324,6 +343,25 @@ local function matches_keybind(event_data, bind)
         return false
     end
     return true
+end
+
+---Match a key event against direct keybinds
+---@param event_data table The event.data from a key_press event
+---@return string|nil action_name The matched action name
+---@return table|nil params The action parameters
+local function match_direct_keybind(event_data)
+    for _, bind in ipairs(direct_keybinds) do
+        if
+            event_data.key == bind.key
+            and (bind.ctrl or false) == (event_data.ctrl or false)
+            and (bind.alt or false) == (event_data.alt or false)
+            and (bind.shift or false) == (event_data.shift or false)
+            and (bind.super or false) == (event_data.super or false)
+        then
+            return bind.action, bind.params
+        end
+    end
+    return nil, nil
 end
 
 -- --- Helpers ---
@@ -1216,181 +1254,265 @@ local key_prefix = prise.platform == "macos" and "󰘳 +k" or "Super+k"
 ---@type fun()
 local open_rename
 
+---Action registry - exposes all internal actions for direct keybinding
+---@type table<string, fun(params?: table)>
+local actions = {}
+
+-- focus actions
+actions.focus_left = function()
+    move_focus("left")
+end
+
+actions.focus_right = function()
+    move_focus("right")
+end
+
+actions.focus_up = function()
+    move_focus("up")
+end
+
+actions.focus_down = function()
+    move_focus("down")
+end
+
+-- resize actions
+actions.resize_left = function(params)
+    local step = (params and params.step) or RESIZE_STEP
+    resize_pane("width", -step)
+end
+
+actions.resize_right = function(params)
+    local step = (params and params.step) or RESIZE_STEP
+    resize_pane("width", step)
+end
+
+actions.resize_up = function(params)
+    local step = (params and params.step) or RESIZE_STEP
+    resize_pane("height", -step)
+end
+
+actions.resize_down = function(params)
+    local step = (params and params.step) or RESIZE_STEP
+    resize_pane("height", step)
+end
+
+-- split actions
+actions.split_horizontal = function()
+    local pty = get_focused_pty()
+    state.pending_split = { direction = "row" }
+    prise.spawn({ cwd = pty and pty:cwd() })
+end
+
+actions.split_vertical = function()
+    local pty = get_focused_pty()
+    state.pending_split = { direction = "col" }
+    prise.spawn({ cwd = pty and pty:cwd() })
+end
+
+actions.split_auto = function()
+    local pty = get_focused_pty()
+    state.pending_split = { direction = get_auto_split_direction() }
+    prise.spawn({ cwd = pty and pty:cwd() })
+end
+
+-- tab actions
+actions.new_tab = function()
+    local pty = get_focused_pty()
+    state.pending_new_tab = true
+    prise.spawn({ cwd = pty and pty:cwd() })
+end
+
+actions.close_tab = function()
+    close_current_tab()
+end
+
+actions.next_tab = function()
+    if #state.tabs > 1 then
+        local next_idx = state.active_tab % #state.tabs + 1
+        set_active_tab_index(next_idx)
+    end
+end
+
+actions.previous_tab = function()
+    if #state.tabs > 1 then
+        local prev_idx = (state.active_tab - 2 + #state.tabs) % #state.tabs + 1
+        set_active_tab_index(prev_idx)
+    end
+end
+
+actions.rename_tab = function()
+    open_rename_tab()
+end
+
+actions.switch_tab = function(params)
+    local index = params and params.index
+    if index and index >= 1 and index <= #state.tabs then
+        set_active_tab_index(index)
+    end
+end
+
+-- pane actions
+actions.close_pane = function()
+    local root = get_active_root()
+    local path = state.focused_id and find_node_path(root, state.focused_id)
+    if path then
+        local pane = path[#path]
+        pane.pty:close()
+        local was_last = remove_pane_by_id(pane.id)
+        if not was_last then
+            prise.save()
+        end
+    end
+end
+
+actions.toggle_zoom = function()
+    if state.zoomed_pane_id then
+        state.zoomed_pane_id = nil
+    elseif state.focused_id then
+        state.zoomed_pane_id = state.focused_id
+    end
+    prise.request_frame()
+end
+
+-- session actions
+actions.detach = function()
+    detach_session()
+end
+
+actions.rename_session = function()
+    open_rename()
+end
+
+actions.quit = function()
+    detach_session()
+end
+
+---Execute an action by name with optional parameters
+---@param name string action name
+---@param params? table optional parameters
+---@return boolean success
+function M.execute_action(name, params)
+    local action = actions[name]
+    if action then
+        action(params)
+        return true
+    end
+    return false
+end
+
 ---Command palette commands
 ---@type Command[]
 local commands = {
     {
         name = "Split Horizontal",
         shortcut = key_prefix .. " v",
-        action = function()
-            local pty = get_focused_pty()
-            state.pending_split = { direction = "row" }
-            prise.spawn({ cwd = pty and pty:cwd() })
-        end,
+        action = actions.split_horizontal,
     },
     {
         name = "Split Vertical",
         shortcut = key_prefix .. " s",
-        action = function()
-            local pty = get_focused_pty()
-            state.pending_split = { direction = "col" }
-            prise.spawn({ cwd = pty and pty:cwd() })
-        end,
+        action = actions.split_vertical,
     },
     {
         name = "Split Auto",
         shortcut = key_prefix .. " Enter",
-        action = function()
-            local pty = get_focused_pty()
-            state.pending_split = { direction = get_auto_split_direction() }
-            prise.spawn({ cwd = pty and pty:cwd() })
-        end,
+        action = actions.split_auto,
     },
     {
         name = "Focus Left",
         shortcut = key_prefix .. " h",
-        action = function()
-            move_focus("left")
-        end,
+        action = actions.focus_left,
     },
     {
         name = "Focus Right",
         shortcut = key_prefix .. " l",
-        action = function()
-            move_focus("right")
-        end,
+        action = actions.focus_right,
     },
     {
         name = "Focus Up",
         shortcut = key_prefix .. " k",
-        action = function()
-            move_focus("up")
-        end,
+        action = actions.focus_up,
     },
     {
         name = "Focus Down",
         shortcut = key_prefix .. " j",
-        action = function()
-            move_focus("down")
-        end,
+        action = actions.focus_down,
     },
     {
         name = "Close Pane",
         shortcut = key_prefix .. " w",
-        action = function()
-            local root = get_active_root()
-            local path = state.focused_id and find_node_path(root, state.focused_id)
-            if path then
-                local pane = path[#path]
-                pane.pty:close()
-                local was_last = remove_pane_by_id(pane.id)
-                if not was_last then
-                    prise.save()
-                end
-            end
-        end,
+        action = actions.close_pane,
     },
     {
         name = "Toggle Zoom",
         shortcut = key_prefix .. " z",
-        action = function()
-            if state.zoomed_pane_id then
-                state.zoomed_pane_id = nil
-            elseif state.focused_id then
-                state.zoomed_pane_id = state.focused_id
-            end
-            prise.request_frame()
-        end,
+        action = actions.toggle_zoom,
     },
     {
         name = "New Tab",
         shortcut = key_prefix .. " t",
-        action = function()
-            local pty = get_focused_pty()
-            state.pending_new_tab = true
-            prise.spawn({ cwd = pty and pty:cwd() })
-        end,
+        action = actions.new_tab,
     },
     {
         name = "Close Tab",
         shortcut = key_prefix .. " c",
-        action = function()
-            close_current_tab()
-        end,
+        action = actions.close_tab,
     },
     {
         name = "Rename Tab",
         shortcut = key_prefix .. " r",
-        action = function()
-            open_rename_tab()
-        end,
+        action = actions.rename_tab,
     },
     {
         name = "Next Tab",
         shortcut = key_prefix .. " n",
-        action = function()
-            if #state.tabs > 1 then
-                local next_idx = state.active_tab % #state.tabs + 1
-                set_active_tab_index(next_idx)
-            end
-        end,
+        action = actions.next_tab,
     },
     {
         name = "Previous Tab",
         shortcut = key_prefix .. " p",
-        action = function()
-            if #state.tabs > 1 then
-                local prev_idx = (state.active_tab - 2 + #state.tabs) % #state.tabs + 1
-                set_active_tab_index(prev_idx)
-            end
-        end,
+        action = actions.previous_tab,
     },
     {
         name = "Detach Session",
         shortcut = key_prefix .. " d",
-        action = function()
-            detach_session()
-        end,
+        action = actions.detach,
     },
     {
         name = "Rename Session",
-        action = function()
-            open_rename()
-        end,
+        action = actions.rename_session,
     },
     {
         name = "Quit",
         shortcut = key_prefix .. " q",
-        action = function()
-            detach_session()
-        end,
+        action = actions.quit,
     },
     {
         name = "Resize Left",
         shortcut = key_prefix .. " H",
         action = function()
-            resize_pane("width", -RESIZE_STEP)
+            actions.resize_left()
         end,
     },
     {
         name = "Resize Right",
         shortcut = key_prefix .. " L",
         action = function()
-            resize_pane("width", RESIZE_STEP)
+            actions.resize_right()
         end,
     },
     {
         name = "Resize Up",
         shortcut = key_prefix .. " K",
         action = function()
-            resize_pane("height", -RESIZE_STEP)
+            actions.resize_up()
         end,
     },
     {
         name = "Resize Down",
         shortcut = key_prefix .. " J",
         action = function()
-            resize_pane("height", RESIZE_STEP)
+            actions.resize_down()
         end,
     },
     {
@@ -1872,7 +1994,7 @@ function M.update(event)
             return
         end
 
-        -- Enter command mode (leader key)
+        -- Enter command mode (leader key) - PRIORITY 1
         if matches_keybind(event.data, config.keybinds.leader) then
             state.pending_command = true
             prise.request_frame()
@@ -1883,6 +2005,13 @@ function M.update(event)
                     prise.request_frame()
                 end
             end)
+            return
+        end
+
+        -- Check direct keybinds (bypass prefix) - PRIORITY 2
+        local action_name, action_params = match_direct_keybind(event.data)
+        if action_name then
+            M.execute_action(action_name, action_params)
             return
         end
 
@@ -2725,6 +2854,7 @@ end
 -- Export internal functions for testing
 M._test = {
     matches_keybind = matches_keybind,
+    match_direct_keybind = match_direct_keybind,
     is_pane = is_pane,
     is_split = is_split,
     collect_panes = collect_panes,
@@ -2732,6 +2862,7 @@ M._test = {
     get_first_leaf = get_first_leaf,
     get_last_leaf = get_last_leaf,
     format_palette_item = format_palette_item,
+    actions = actions,
 }
 
 return M

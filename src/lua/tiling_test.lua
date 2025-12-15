@@ -306,3 +306,118 @@ assert(#item == 20, "format_palette_item: correct width")
 item = t.format_palette_item("Very Long Command Name", "C-x", 10)
 -- Width is too small, should use minimum padding of 2
 assert(item == "Very Long Command Name  C-x", "format_palette_item: minimum padding")
+
+-- === action registry ===
+
+-- Test: execute_action with valid action
+assert(t.actions.focus_left ~= nil, "action registry: focus_left exists")
+assert(t.actions.focus_right ~= nil, "action registry: focus_right exists")
+assert(t.actions.focus_up ~= nil, "action registry: focus_up exists")
+assert(t.actions.focus_down ~= nil, "action registry: focus_down exists")
+
+-- Test: resize actions exist
+assert(t.actions.resize_left ~= nil, "action registry: resize_left exists")
+assert(t.actions.resize_right ~= nil, "action registry: resize_right exists")
+assert(t.actions.resize_up ~= nil, "action registry: resize_up exists")
+assert(t.actions.resize_down ~= nil, "action registry: resize_down exists")
+
+-- Test: split actions exist
+assert(t.actions.split_horizontal ~= nil, "action registry: split_horizontal exists")
+assert(t.actions.split_vertical ~= nil, "action registry: split_vertical exists")
+assert(t.actions.split_auto ~= nil, "action registry: split_auto exists")
+
+-- Test: tab actions exist
+assert(t.actions.new_tab ~= nil, "action registry: new_tab exists")
+assert(t.actions.close_tab ~= nil, "action registry: close_tab exists")
+assert(t.actions.next_tab ~= nil, "action registry: next_tab exists")
+assert(t.actions.previous_tab ~= nil, "action registry: previous_tab exists")
+assert(t.actions.rename_tab ~= nil, "action registry: rename_tab exists")
+assert(t.actions.switch_tab ~= nil, "action registry: switch_tab exists")
+
+-- Test: pane actions exist
+assert(t.actions.close_pane ~= nil, "action registry: close_pane exists")
+assert(t.actions.toggle_zoom ~= nil, "action registry: toggle_zoom exists")
+
+-- Test: session actions exist
+assert(t.actions.detach ~= nil, "action registry: detach exists")
+assert(t.actions.rename_session ~= nil, "action registry: rename_session exists")
+assert(t.actions.quit ~= nil, "action registry: quit exists")
+
+-- Test: execute_action returns true for valid action
+local success = tiling.execute_action("focus_left")
+assert(success == true, "execute_action: returns true for valid action")
+
+-- Test: execute_action returns false for invalid action
+success = tiling.execute_action("nonexistent_action")
+assert(success == false, "execute_action: returns false for invalid action")
+
+-- === match_direct_keybind ===
+
+-- Setup test keybinds
+tiling.setup({
+    keybinds = {
+        direct = {
+            { key = "h", ctrl = true, action = "focus_left" },
+            { key = "l", ctrl = true, action = "focus_right" },
+            { key = "j", alt = true, action = "resize_down", params = { step = 0.1 } },
+            { key = "k", alt = true, action = "resize_up" },
+            { key = "t", super = true, action = "new_tab" },
+        },
+    },
+})
+
+-- Test: match ctrl+h
+local action_name, action_params = t.match_direct_keybind({ key = "h", ctrl = true })
+assert(action_name == "focus_left", "match_direct_keybind: ctrl+h matches focus_left")
+assert(action_params == nil, "match_direct_keybind: ctrl+h has no params")
+
+-- Test: match ctrl+l
+action_name, action_params = t.match_direct_keybind({ key = "l", ctrl = true })
+assert(action_name == "focus_right", "match_direct_keybind: ctrl+l matches focus_right")
+
+-- Test: match alt+j with params
+action_name, action_params = t.match_direct_keybind({ key = "j", alt = true })
+assert(action_name == "resize_down", "match_direct_keybind: alt+j matches resize_down")
+assert(action_params ~= nil, "match_direct_keybind: alt+j has params")
+assert(action_params.step == 0.1, "match_direct_keybind: alt+j params correct")
+
+-- Test: match super+t
+action_name, action_params = t.match_direct_keybind({ key = "t", super = true })
+assert(action_name == "new_tab", "match_direct_keybind: super+t matches new_tab")
+
+-- Test: no match for unbound key
+action_name, action_params = t.match_direct_keybind({ key = "x", ctrl = true })
+assert(action_name == nil, "match_direct_keybind: unbound key returns nil")
+assert(action_params == nil, "match_direct_keybind: unbound key has no params")
+
+-- Test: modifier mismatch
+action_name, action_params = t.match_direct_keybind({ key = "h", alt = true })
+assert(action_name == nil, "match_direct_keybind: modifier mismatch returns nil")
+
+-- Test: key without modifiers when modifier required
+action_name, action_params = t.match_direct_keybind({ key = "h" })
+assert(action_name == nil, "match_direct_keybind: missing required modifier returns nil")
+
+-- Test: extra modifier
+action_name, action_params = t.match_direct_keybind({ key = "h", ctrl = true, shift = true })
+assert(action_name == nil, "match_direct_keybind: extra modifier returns nil")
+
+-- === configuration backward compatibility ===
+
+-- Test: setup without direct keybinds works
+tiling.setup({
+    keybinds = {
+        leader = { key = "k", super = true },
+        palette = { key = "p", super = true },
+    },
+})
+-- Should not crash, defaults will be used
+
+-- Test: setup with empty direct array works
+tiling.setup({
+    keybinds = {
+        direct = {},
+    },
+})
+action_name = t.match_direct_keybind({ key = "h", ctrl = true })
+assert(action_name == nil, "configuration: empty direct array means no matches")
