@@ -303,7 +303,13 @@ pub const ClientLogic = struct {
 
     fn handleCopySelectionResult(result: msgpack.Value) ServerAction {
         if (result == .string) {
+            log.info("handleCopySelectionResult: received selection text ({} bytes)", .{result.string.len});
             return .{ .copy_to_clipboard = result.string };
+        }
+        if (result == .nil) {
+            log.warn("handleCopySelectionResult: no selection (nil result)", .{});
+        } else {
+            log.warn("handleCopySelectionResult: unexpected result type: {s}", .{@tagName(result)});
         }
         return .none;
     }
@@ -2411,9 +2417,62 @@ pub const App = struct {
     }
 
     fn copyToClipboard(self: *App, text: []const u8) void {
+        if (text.len == 0) {
+            log.warn("copyToClipboard: empty text, nothing to copy", .{});
+            return;
+        }
+
+        log.info("copyToClipboard: copying {} bytes to clipboard", .{text.len});
+
+        // Try native clipboard utilities first (more reliable than OSC 52)
+        self.copyToClipboardNative(text) catch |err| {
+            log.warn("Native clipboard copy failed: {}, trying OSC 52", .{err});
+            self.copyToClipboardOSC52(text);
+        };
+    }
+
+    fn copyToClipboardNative(self: *App, text: []const u8) !void {
+        const builtin = @import("builtin");
+        const clipboard_cmd = switch (builtin.os.tag) {
+            .macos => "pbcopy",
+            .linux => blk: {
+                // Try to detect which clipboard utility is available
+                // Prefer wl-copy (Wayland) or xclip (X11)
+                const wayland = std.process.hasEnvVar(self.allocator, "WAYLAND_DISPLAY") catch false;
+                break :blk if (wayland) "wl-copy" else "xclip";
+            },
+            else => return error.UnsupportedPlatform,
+        };
+
+        const args = if (std.mem.eql(u8, clipboard_cmd, "xclip"))
+            &[_][]const u8{ clipboard_cmd, "-selection", "clipboard" }
+        else
+            &[_][]const u8{clipboard_cmd};
+
+        var child = std.process.Child.init(args, self.allocator);
+        child.stdin_behavior = .Pipe;
+
+        try child.spawn();
+
+        try child.stdin.?.writeAll(text);
+        child.stdin.?.close();
+        child.stdin = null;
+
+        const result = try child.wait();
+        if (result != .Exited or result.Exited != 0) {
+            return error.ClipboardCopyFailed;
+        }
+
+        log.info("Successfully copied to clipboard using {s}", .{clipboard_cmd});
+    }
+
+    fn copyToClipboardOSC52(self: *App, text: []const u8) void {
         const encoder = std.base64.standard.Encoder;
         const encoded_len = encoder.calcSize(text.len);
-        const encoded = self.allocator.alloc(u8, encoded_len) catch return;
+        const encoded = self.allocator.alloc(u8, encoded_len) catch |err| {
+            log.err("Failed to allocate memory for OSC 52 encoding: {}", .{err});
+            return;
+        };
         defer self.allocator.free(encoded);
         _ = encoder.encode(encoded, text);
 
