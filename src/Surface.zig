@@ -590,10 +590,8 @@ const fallback_palette: [16]vaxis.Cell.Color = .{
     .{ .rgb = .{ 0xff, 0xff, 0xff } }, // Bright White
 };
 
-const DIM_UNFOCUSED: f32 = 0.05;
-
-pub fn render(self: *const Surface, win: vaxis.Window, focused: bool) void {
-    const dim_factor: f32 = if (focused) 0.0 else DIM_UNFOCUSED;
+pub fn render(self: *const Surface, win: vaxis.Window, focused: bool, colors: ?*const TerminalColors, dim_factor: f32) void {
+    _ = colors; // Colors are stored in self.colors
 
     for (0..self.rows) |row| {
         for (0..self.cols) |col| {
@@ -620,6 +618,9 @@ pub fn render(self: *const Surface, win: vaxis.Window, focused: bool) void {
 }
 
 fn applyDimming(self: *const Surface, cell: *vaxis.Cell, dim_factor: f32) bool {
+    // Skip dimming for default backgrounds to preserve transparency
+    if (cell.style.bg == .default) return false;
+
     const bg_rgb = self.resolveBgColor(cell.style.bg) orelse return false;
     const dimmed_bg = TerminalColors.reduceContrast(bg_rgb, dim_factor);
     cell.style.bg = .{ .rgb = dimmed_bg };
@@ -630,7 +631,7 @@ fn resolveBgColor(self: *const Surface, bg: vaxis.Cell.Color) ?[3]u8 {
     return switch (bg) {
         .rgb => |rgb| rgb,
         .index => |idx| self.resolvePaletteColor(idx),
-        .default => self.resolveDefaultBg(),
+        .default => null, // Don't resolve default - preserve transparency
     };
 }
 
