@@ -147,8 +147,21 @@ local POWERLINE_SYMBOLS = {
 ---@field green string
 ---@field yellow string
 
+---@class StatusSegmentStyle
+---@field fg? string Foreground color (hex string)
+---@field bg? string Background color (hex string)
+---@field bold? boolean Bold text
+---@field italic? boolean Italic text
+
+---@class StatusSegment
+---@field command string Script or binary to execute
+---@field cache_time? number Cache duration in seconds (default: 5)
+---@field style? StatusSegmentStyle Styling for the segment
+---@field separator_style? StatusSegmentStyle Styling for the powerline separator before this segment
+
 ---@class PriseStatusBarConfig
 ---@field enabled? boolean Show the status bar (default: true)
+---@field custom_segments? StatusSegment[] Custom segments to display on the right side
 
 ---@class PriseTabBarConfig
 ---@field show_single_tab? boolean Show tab bar even with one tab (default: false)
@@ -281,6 +294,8 @@ local state = {
     cached_git_branch = nil,
     -- True when detaching (prevents new timers from being scheduled)
     detaching = false,
+    -- Custom segment cache
+    custom_segment_cache = {},
 }
 
 local M = {}
@@ -2472,6 +2487,39 @@ local function build_tab_bar()
     return prise.Text(segments)
 end
 
+---Execute a custom segment command with caching
+---@param segment_idx number Index of the segment in config
+---@param segment StatusSegment Segment configuration
+---@return string
+local function execute_custom_segment(segment_idx, segment)
+    local cache = state.custom_segment_cache[segment_idx]
+    local now = os.time()
+    local cache_time = segment.cache_time or 5
+
+    -- Check if cache is valid
+    if cache and (now - cache.last_update) < cache_time then
+        return cache.value
+    end
+
+    -- Execute command
+    local handle = io.popen(segment.command .. " 2>/dev/null")
+    local output = ""
+    if handle then
+        output = handle:read("*a")
+        handle:close()
+        -- Trim whitespace
+        output = output:gsub("^%s+", ""):gsub("%s+$", "")
+    end
+
+    -- Update cache
+    state.custom_segment_cache[segment_idx] = {
+        value = output,
+        last_update = now,
+    }
+
+    return output
+end
+
 ---Build the powerline-style status bar
 ---@return table
 local function build_status_bar()
@@ -2511,6 +2559,29 @@ local function build_status_bar()
         table.insert(segments, { text = " ZOOM ", style = { bg = THEME.yellow, fg = THEME.fg_dark, bold = true } })
         left_width = left_width + 1 + 6
         last_bg = THEME.yellow
+    end
+
+    -- Add custom segments if configured
+    if config.status_bar.custom_segments then
+        for i, segment in ipairs(config.status_bar.custom_segments) do
+            local output = execute_custom_segment(i, segment)
+            if output and #output > 0 then
+                -- Default styling
+                local seg_style = segment.style or { bg = THEME.bg4, fg = THEME.fg_bright }
+                local sep_style = segment.separator_style or { fg = last_bg, bg = seg_style.bg }
+
+                -- Add separator
+                table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = sep_style })
+                left_width = left_width + 1
+                -- Add segment content
+                local seg_text = " " .. output .. " "
+                table.insert(segments, { text = seg_text, style = seg_style })
+                left_width = left_width + prise.gwidth(seg_text)
+
+                -- Update last_bg for next segment
+                last_bg = seg_style.bg
+            end
+        end
     end
 
     -- End left side
