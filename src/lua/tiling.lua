@@ -1786,6 +1786,10 @@ end
 local function execute_session_switch()
     local query = state.session_picker.input:text()
     local filtered = filter_sessions(query)
+    if #filtered == 0 then
+        close_session_picker()
+        return
+    end
     local idx = state.session_picker.selected
     if idx >= 1 and idx <= #filtered then
         local target = filtered[idx]
@@ -1947,13 +1951,15 @@ function M.update(event)
                 return
             elseif k == "Backspace" then
                 state.session_picker.input:delete_backward()
-                state.session_picker.selected = 1
+                local new_filtered = filter_sessions(state.session_picker.input:text())
+                state.session_picker.selected = math.min(state.session_picker.selected, math.max(1, #new_filtered))
                 state.session_picker.scroll_offset = 0
                 prise.request_frame()
                 return
             elseif #k == 1 and not event.data.ctrl and not event.data.alt and not event.data.super then
                 state.session_picker.input:insert(k)
-                state.session_picker.selected = 1
+                local new_filtered = filter_sessions(state.session_picker.input:text())
+                state.session_picker.selected = math.min(state.session_picker.selected, math.max(1, #new_filtered))
                 state.session_picker.scroll_offset = 0
                 prise.request_frame()
                 return

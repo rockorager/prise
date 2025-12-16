@@ -612,11 +612,19 @@ pub const UI = struct {
         lua.pop(1);
         const ui: *UI = @ptrCast(@alignCast(@constCast(ui_ptr)));
 
-        const target_session = lua.toString(1) catch {
+        const target_session_lua = lua.toString(1) catch {
             log.warn("switchSession: failed to get target session name", .{});
             lua.pushBoolean(false);
             return 1;
         };
+
+        const target_session = ui.allocator.dupe(u8, target_session_lua) catch {
+            log.warn("switchSession: failed to allocate target session name", .{});
+            lua.pushBoolean(false);
+            return 1;
+        };
+        defer ui.allocator.free(target_session);
+
         log.info("switchSession: called with target_session='{s}'", .{target_session});
 
         if (ui.switch_session_callback) |cb| {
