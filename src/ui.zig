@@ -1,7 +1,6 @@
 //! UI layout and widget tree management.
 
 const std = @import("std");
-const builtin = @import("builtin");
 
 const vaxis = @import("vaxis");
 const zeit = @import("zeit");
@@ -150,29 +149,10 @@ pub const UI = struct {
         lua.pushFunction(ziglua.wrap(loadPriseModule));
         lua.setField(-2, "prise");
 
-        // Only register embedded tiling UI if not found on disk
-        // In debug builds, always use embedded to simplify development
-        // (preload takes precedence over path, so we check explicitly)
-        const tiling_on_disk = if (builtin.mode == .Debug) false else blk: {
-            const user_path = std.fs.path.join(allocator, &.{ home, ".local", "share", "prise", "lua", "prise_tiling_ui.lua" }) catch {
-                break :blk false;
-            };
-            defer allocator.free(user_path);
-            const paths = [_][]const u8{
-                user_path,
-                "/usr/local/share/prise/lua/prise_tiling_ui.lua",
-                "/usr/share/prise/lua/prise_tiling_ui.lua",
-            };
-            for (paths) |p| {
-                std.fs.accessAbsolute(p, .{}) catch continue;
-                break :blk true;
-            }
-            break :blk false;
-        };
-        if (!tiling_on_disk) {
-            lua.pushFunction(ziglua.wrap(loadTilingUiModule));
-            lua.setField(-2, "prise_tiling_ui");
-        }
+        // Always use embedded tiling UI module for runtime
+        // (installed to disk only for LSP completion support)
+        lua.pushFunction(ziglua.wrap(loadTilingUiModule));
+        lua.setField(-2, "prise_tiling_ui");
         lua.pop(2);
 
         // Try to load ~/.config/prise/init.lua
