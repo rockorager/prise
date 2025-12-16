@@ -250,10 +250,16 @@ function M.Box(opts)
     }
 end
 
+---@class SeparatorSegment
+---@field ratio_start number Start position as ratio (0.0-1.0)
+---@field ratio_end number End position as ratio (0.0-1.0)
+---@field style? table
+
 ---@class SeparatorOpts
 ---@field axis "horizontal"|"vertical" Separator orientation
----@field style? table Style options (fg, bg, etc.)
+---@field style? table Default style options (fg, bg, etc.)
 ---@field border? "none"|"single"|"double"|"rounded" Line style (default: "single")
+---@field segments? SeparatorSegment[] Optional per-section styles
 
 ---Create a separator widget for tmux-style pane borders
 ---@param opts SeparatorOpts
@@ -264,6 +270,7 @@ function M.Separator(opts)
         axis = opts.axis or "vertical",
         style = opts.style,
         border = opts.border or "single",
+        segments = opts.segments,
     }
 end
 

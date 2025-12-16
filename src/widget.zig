@@ -171,7 +171,11 @@ pub const Widget = struct {
                 p.child.deinit(allocator);
                 allocator.destroy(p.child);
             },
-            .separator => {},
+            .separator => |*sep| {
+                if (sep.segments.len > 0) {
+                    allocator.free(sep.segments);
+                }
+            },
         }
     }
 
@@ -429,10 +433,32 @@ pub const Widget = struct {
             },
             .separator => |sep| {
                 const line_char = sep.lineChar();
-                const style = sep.style;
+                const total_size: u16 = if (sep.axis == .horizontal) win.width else win.height;
 
                 for (0..win.height) |row| {
                     for (0..win.width) |col| {
+                        var style = sep.style;
+
+                        if (sep.segments.len > 0 and total_size > 0) {
+                            const pos: u16 = if (sep.axis == .horizontal) @intCast(col) else @intCast(row);
+
+                            for (sep.segments) |segment| {
+                                const actual_start: u16 = if (segment.is_ratio)
+                                    @intFromFloat(@as(f32, @floatFromInt(segment.start)) / 1000.0 * @as(f32, @floatFromInt(total_size)))
+                                else
+                                    segment.start;
+                                const actual_end: u16 = if (segment.is_ratio)
+                                    @intFromFloat(@as(f32, @floatFromInt(segment.end)) / 1000.0 * @as(f32, @floatFromInt(total_size)))
+                                else
+                                    segment.end;
+
+                                if (pos >= actual_start and pos < actual_end) {
+                                    style = segment.style;
+                                    break;
+                                }
+                            }
+                        }
+
                         win.writeCell(@intCast(col), @intCast(row), .{
                             .char = .{ .grapheme = line_char, .width = 1 },
                             .style = style,
@@ -784,10 +810,18 @@ pub const Box = struct {
     }
 };
 
+pub const SeparatorSegment = struct {
+    start: u16, // Starting position (row/col depending on axis)
+    end: u16, // Ending position (exclusive)
+    style: vaxis.Style,
+    is_ratio: bool = false, // If true, start/end are permille values (0-1000)
+};
+
 pub const Separator = struct {
     axis: Axis,
     style: vaxis.Style = .{},
     border: Box.Border = .single,
+    segments: []const SeparatorSegment = &.{},
 
     pub const Axis = enum { horizontal, vertical };
 
@@ -1524,10 +1558,81 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
         }
         lua.pop(1);
 
+        // Parse optional segments
+        var segments_list: std.ArrayList(SeparatorSegment) = .empty;
+        defer segments_list.deinit(allocator);
+
+        _ = lua.getField(index, "segments");
+        if (lua.typeOf(-1) == .table) {
+            const segments_len = lua.rawLen(-1);
+            for (1..segments_len + 1) |i| {
+                _ = lua.getIndex(-1, @intCast(i));
+                if (lua.typeOf(-1) == .table) {
+                    var ratio_start: ?f32 = null;
+                    var ratio_end: ?f32 = null;
+                    var start: u16 = 0;
+                    var end: u16 = 0;
+                    var seg_style = style;
+
+                    _ = lua.getField(-1, "ratio_start");
+                    if (lua.typeOf(-1) == .number) {
+                        ratio_start = @floatCast(lua.toNumber(-1) catch 0.0);
+                    }
+                    lua.pop(1);
+
+                    _ = lua.getField(-1, "ratio_end");
+                    if (lua.typeOf(-1) == .number) {
+                        ratio_end = @floatCast(lua.toNumber(-1) catch 0.0);
+                    }
+                    lua.pop(1);
+
+                    _ = lua.getField(-1, "start");
+                    if (lua.typeOf(-1) == .number) {
+                        start = @intCast(lua.toInteger(-1) catch 0);
+                    }
+                    lua.pop(1);
+
+                    _ = lua.getField(-1, "end");
+                    if (lua.typeOf(-1) == .number) {
+                        end = @intCast(lua.toInteger(-1) catch 0);
+                    }
+                    lua.pop(1);
+
+                    _ = lua.getField(-1, "style");
+                    if (lua.typeOf(-1) == .table) {
+                        seg_style = parseStyle(lua, -1) catch style;
+                    }
+                    lua.pop(1);
+
+                    var is_ratio = false;
+                    if (ratio_start != null and ratio_end != null) {
+                        start = @intFromFloat(ratio_start.? * 1000.0);
+                        end = @intFromFloat(ratio_end.? * 1000.0);
+                        is_ratio = true;
+                    }
+
+                    try segments_list.append(allocator, .{
+                        .start = start,
+                        .end = end,
+                        .style = seg_style,
+                        .is_ratio = is_ratio,
+                    });
+                }
+                lua.pop(1);
+            }
+        }
+        lua.pop(1);
+
+        const segments: []const SeparatorSegment = if (segments_list.items.len > 0)
+            try segments_list.toOwnedSlice(allocator)
+        else
+            &.{};
+
         return .{ .ratio = ratio, .id = id, .focus = focus, .kind = .{ .separator = .{
             .axis = axis,
             .border = border,
             .style = style,
+            .segments = segments,
         } } };
     }
 

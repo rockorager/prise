@@ -971,6 +971,169 @@ local function contains_focused(node)
     return false
 end
 
+---Compute a child's share as used by the layout engine
+---@param split Split
+---@param idx number
+---@return number
+local function layout_share(split, idx)
+    local ratio_sum = 0
+    local nil_count = 0
+
+    for _, child in ipairs(split.children) do
+        if child.ratio then
+            ratio_sum = ratio_sum + child.ratio
+        else
+            nil_count = nil_count + 1
+        end
+    end
+
+    local remaining = 1.0 - ratio_sum
+    if remaining < 0 then
+        remaining = 0
+    end
+
+    local nil_share = (nil_count > 0) and (remaining / nil_count) or 0
+    return split.children[idx].ratio or nil_share
+end
+
+---Collect leaf ranges along a target split direction, in 0.0-1.0 space
+---@param node Node
+---@param target_direction "row"|"col"
+---@param range_start number
+---@param range_end number
+---@param out? table[]
+---@param depth? number
+---@return table[]
+local function collect_leaf_ranges(node, target_direction, range_start, range_end, out, depth)
+    out = out or {}
+    depth = depth or 0
+
+    local MAX_DEPTH = 20
+    if depth > MAX_DEPTH then
+        table.insert(out, { node = node, ratio_start = range_start, ratio_end = range_end })
+        return out
+    end
+
+    if is_pane(node) then
+        table.insert(out, { node = node, ratio_start = range_start, ratio_end = range_end })
+        return out
+    end
+
+    if is_split(node) and node.direction == target_direction and node.children and #node.children > 0 then
+        ---@cast node Split
+        local span = range_end - range_start
+        local pos = range_start
+
+        for i, child in ipairs(node.children) do
+            local share = layout_share(node, i)
+            local child_start = pos
+            local child_end = (i == #node.children) and range_end or (pos + span * share)
+            collect_leaf_ranges(child, target_direction, child_start, child_end, out, depth + 1)
+            pos = child_end
+        end
+
+        return out
+    end
+
+    table.insert(out, { node = node, ratio_start = range_start, ratio_end = range_end })
+    return out
+end
+
+---Find the focused range within a set of leaf ranges
+---@param ranges table[]
+---@return number?, number?
+local function get_focused_range(ranges)
+    for _, r in ipairs(ranges) do
+        if contains_focused(r.node) then
+            return r.ratio_start, r.ratio_end
+        end
+    end
+    return nil, nil
+end
+
+---Build per-section styles for a separator adjacent to the focused pane
+---@param left_child Node
+---@param right_child Node
+---@param sep_axis "horizontal"|"vertical"
+---@return table[]? segments
+local function build_separator_segments(left_child, right_child, sep_axis)
+    local target_direction = (sep_axis == "vertical") and "col" or "row"
+
+    local left_ranges = collect_leaf_ranges(left_child, target_direction, 0.0, 1.0)
+    local right_ranges = collect_leaf_ranges(right_child, target_direction, 0.0, 1.0)
+
+    local edges = { 0.0, 1.0 }
+    for _, r in ipairs(left_ranges) do
+        table.insert(edges, r.ratio_start)
+        table.insert(edges, r.ratio_end)
+    end
+    for _, r in ipairs(right_ranges) do
+        table.insert(edges, r.ratio_start)
+        table.insert(edges, r.ratio_end)
+    end
+
+    table.sort(edges)
+
+    local unique = {}
+    local last = nil
+    for _, e in ipairs(edges) do
+        if last == nil or math.abs(e - last) > 1e-6 then
+            table.insert(unique, e)
+            last = e
+        end
+    end
+
+    if #unique <= 2 then
+        return nil
+    end
+
+    local left_focus_start, left_focus_end = get_focused_range(left_ranges)
+    local right_focus_start, right_focus_end = get_focused_range(right_ranges)
+
+    local segments = {}
+
+    local function push_segment(seg_start, seg_end, color)
+        if seg_end <= seg_start then
+            return
+        end
+
+        local last_seg = segments[#segments]
+        if
+            last_seg
+            and last_seg.style
+            and last_seg.style.fg == color
+            and math.abs(last_seg.ratio_end - seg_start) < 1e-6
+        then
+            last_seg.ratio_end = seg_end
+            return
+        end
+
+        table.insert(segments, {
+            ratio_start = seg_start,
+            ratio_end = seg_end,
+            style = { fg = color },
+        })
+    end
+
+    for i = 1, #unique - 1 do
+        local a = unique[i]
+        local b = unique[i + 1]
+
+        local focused = false
+        if left_focus_start ~= nil then
+            focused = focused or (a < left_focus_end and b > left_focus_start)
+        end
+        if right_focus_start ~= nil then
+            focused = focused or (a < right_focus_end and b > right_focus_start)
+        end
+
+        local color = focused and config.borders.focused_color or config.borders.unfocused_color
+        push_segment(a, b, color)
+    end
+
+    return segments
+end
+
 ---Serialize a node tree to a table with pty_ids instead of userdata
 ---@param node? Node
 ---@param cwd_lookup? fun(pty_id: number): string?
@@ -2339,22 +2502,41 @@ local function render_node(node, force_unfocused)
             for i, child in ipairs(node.children) do
                 -- Add separator before this child (except for first)
                 if i > 1 then
-                    -- Determine separator color based on adjacency to focused pane
                     local prev_child = node.children[i - 1]
                     local prev_focused = contains_focused(prev_child)
                     local curr_focused = contains_focused(child)
-                    local sep_color = (prev_focused or curr_focused) and config.borders.focused_color
-                        or config.borders.unfocused_color
 
                     local sep_axis = node.direction == "row" and "vertical" or "horizontal"
-                    table.insert(
-                        children_widgets,
-                        prise.Separator({
-                            axis = sep_axis,
-                            style = { fg = sep_color },
-                            border = config.borders.style,
-                        })
-                    )
+
+                    local segments = nil
+                    if prev_focused or curr_focused then
+                        segments = build_separator_segments(prev_child, child, sep_axis)
+                    end
+
+                    if segments then
+                        table.insert(
+                            children_widgets,
+                            prise.Separator({
+                                axis = sep_axis,
+                                style = { fg = config.borders.unfocused_color },
+                                segments = segments,
+                                border = config.borders.style,
+                            })
+                        )
+                    else
+                        -- Default behavior: highlight whole separator if adjacent to focus
+                        local sep_color = (prev_focused or curr_focused) and config.borders.focused_color
+                            or config.borders.unfocused_color
+
+                        table.insert(
+                            children_widgets,
+                            prise.Separator({
+                                axis = sep_axis,
+                                style = { fg = sep_color },
+                                border = config.borders.style,
+                            })
+                        )
+                    end
                 end
                 table.insert(children_widgets, render_node(child, force_unfocused))
             end
