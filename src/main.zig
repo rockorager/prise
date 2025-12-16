@@ -402,6 +402,10 @@ fn runClient(allocator: std.mem.Allocator, socket_path: []const u8, args: ParseR
     };
     defer app.deinit();
 
+    // Initialize TTY after App is in its final memory location
+    // (tty writer holds pointer to tty_buffer)
+    try app.initTty();
+
     app.socket_path = socket_path;
     app.attach_session = args.attach_session;
     app.new_session_name = args.new_session_name;

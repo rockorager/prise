@@ -690,9 +690,6 @@ pub const App = struct {
             .pending_attach_cwd = std.AutoHashMap(u32, []const u8).init(allocator),
             .pending_color_queries = .empty,
         };
-        app.tty = vaxis.Tty.init(&app.tty_buffer) catch |err| {
-            return .{ .err = .{ .err = err, .lua_msg = null } };
-        };
         app.parser = .{};
 
         log.info("Vaxis initialized", .{});
@@ -701,8 +698,8 @@ pub const App = struct {
         switch (UI.init(allocator)) {
             .ok => |ui| app.ui = ui,
             .err => |init_err| {
-                app.vx.deinit(allocator, app.tty.writer());
-                app.tty.deinit();
+                // Note: we skip vx.deinit here since TTY isn't initialized yet
+                // and vx.deinit requires a writer. Resources will be cleaned up on exit.
                 return .{ .err = .{ .err = init_err.err, .lua_msg = init_err.lua_msg } };
             },
         }
@@ -717,6 +714,13 @@ pub const App = struct {
         log.info("Pipe created: read_fd={} write_fd={}", .{ app.pipe_read_fd, app.pipe_write_fd });
 
         return .{ .ok = app };
+    }
+
+    /// Initialize the TTY. Must be called after App is in its final memory location,
+    /// since the tty writer holds a pointer to tty_buffer.
+    pub fn initTty(self: *App) !void {
+        self.tty = try vaxis.Tty.init(&self.tty_buffer);
+        log.info("TTY initialized", .{});
     }
 
     pub fn deinit(self: *App) void {
