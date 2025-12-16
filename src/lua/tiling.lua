@@ -1275,6 +1275,10 @@ local key_prefix = prise.platform == "macos" and "󰘳 +k" or "Super+k"
 ---@type fun()
 local open_rename
 
+---Forward declaration for open_session_picker
+---@type fun()
+local open_session_picker
+
 ---Command palette commands
 ---@type Command[]
 local commands = {
@@ -1415,6 +1419,13 @@ local commands = {
         name = "Rename Session",
         action = function()
             open_rename()
+        end,
+    },
+    {
+        name = "Switch Session",
+        shortcut = key_prefix .. " S",
+        action = function()
+            open_session_picker()
         end,
     },
     {
@@ -1749,7 +1760,7 @@ local function execute_rename()
     close_rename()
 end
 
-local function open_session_picker()
+open_session_picker = function()
     if not state.session_picker.input then
         state.session_picker.input = prise.create_text_input()
     end
