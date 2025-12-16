@@ -2380,7 +2380,10 @@ local function build_palette()
                             input = state.palette.input,
                             style = input_style,
                         }),
-                        prise.Text({ text = string.rep("─", PALETTE_WIDTH), style = { fg = THEME.bg3 } }),
+                        prise.Text({
+                            text = string.rep("─", PALETTE_WIDTH),
+                            style = { fg = THEME.bg3, bg = THEME.bg1 },
+                        }),
                         prise.List({
                             items = items,
                             selected = state.palette.selected,
@@ -2420,7 +2423,7 @@ local function build_rename()
                 child = prise.Column({
                     cross_axis_align = "stretch",
                     children = {
-                        prise.Text({ text = "Rename Session", style = { fg = THEME.fg_dim } }),
+                        prise.Text({ text = "Rename Session", style = { fg = THEME.fg_dim, bg = THEME.bg1 } }),
                         prise.TextInput({
                             input = state.rename.input,
                             style = input_style,
@@ -2457,7 +2460,7 @@ local function build_rename_tab()
                 child = prise.Column({
                     cross_axis_align = "stretch",
                     children = {
-                        prise.Text({ text = "Rename Tab", style = { fg = THEME.fg_dim } }),
+                        prise.Text({ text = "Rename Tab", style = { fg = THEME.fg_dim, bg = THEME.bg1 } }),
                         prise.TextInput({
                             input = state.rename_tab.input,
                             style = input_style,
@@ -2532,13 +2535,16 @@ local function build_session_picker()
                 child = prise.Column({
                     cross_axis_align = "stretch",
                     children = {
-                        prise.Text({ text = "Switch Session", style = { fg = THEME.fg_dim } }),
+                        prise.Text({ text = "Switch Session", style = { fg = THEME.fg_dim, bg = THEME.bg1 } }),
                         prise.TextInput({
                             input = state.session_picker.input,
                             style = input_style,
                             focus = true,
                         }),
-                        prise.Text({ text = string.rep("─", PALETTE_WIDTH), style = { fg = THEME.bg3 } }),
+                        prise.Text({
+                            text = string.rep("─", PALETTE_WIDTH),
+                            style = { fg = THEME.bg3, bg = THEME.bg1 },
+                        }),
                         prise.List({
                             items = items,
                             selected = state.session_picker.selected,
