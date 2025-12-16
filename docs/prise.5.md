@@ -248,6 +248,91 @@ ui.setup({
 return ui
 ```
 
+# BUILT-IN ACTIONS
+
+The following actions can be used as values in the **keybinds** table.
+
+## Pane Management
+
+**split_horizontal**
+:   Split the current pane horizontally (side by side)
+
+**split_vertical**
+:   Split the current pane vertically (stacked)
+
+**split_auto**
+:   Split automatically based on pane dimensions (horizontal if wide, vertical if tall)
+
+**close_pane**
+:   Close the current pane
+
+**toggle_zoom**
+:   Toggle zoom on the current pane (maximize/restore)
+
+## Focus Navigation
+
+**focus_left**
+:   Move focus to the pane on the left
+
+**focus_right**
+:   Move focus to the pane on the right
+
+**focus_up**
+:   Move focus to the pane above
+
+**focus_down**
+:   Move focus to the pane below
+
+## Pane Resizing
+
+**resize_left**
+:   Shrink the current pane horizontally
+
+**resize_right**
+:   Grow the current pane horizontally
+
+**resize_up**
+:   Shrink the current pane vertically
+
+**resize_down**
+:   Grow the current pane vertically
+
+## Tab Management
+
+**new_tab**
+:   Create a new tab
+
+**close_tab**
+:   Close the current tab
+
+**rename_tab**
+:   Rename the current tab
+
+**next_tab**
+:   Switch to the next tab
+
+**previous_tab**
+:   Switch to the previous tab
+
+**tab_1** through **tab_10**
+:   Switch to tab by number
+
+## Session Management
+
+**detach_session**
+:   Detach from the current session
+
+**rename_session**
+:   Rename the current session
+
+**quit**
+:   Quit prise (same as detach)
+
+## Other
+
+**command_palette**
+:   Open the command palette
+
 # DEFAULT KEYBINDS
 
 The tiling UI uses a leader key sequence. Press the leader key (default:
