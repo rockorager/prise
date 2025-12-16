@@ -115,12 +115,14 @@ function M.Text(opts)
         return {
             type = "text",
             content = { opts },
+            style = opts.style,
         }
     end
 
     return {
         type = "text",
         content = opts.content or {},
+        style = opts.style,
         show_cursor = opts.show_cursor,
     }
 end

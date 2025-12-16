@@ -2036,164 +2036,7 @@ function M.update(event)
             state.pending_command = true
             prise.request_frame()
 
-<<<<<<< HEAD
             -- Cancel existing timeout and start new one
-=======
-        -- Handle pending command mode (after Super/Cmd+k)
-        if state.pending_command then
-            local handled = false
-            local k = event.data.key
-
-            -- Leader twice sends leader to inner shell (like tmux)
-            if matches_keybind(event.data, config.keybinds.leader) then
-                local pty = get_focused_pty()
-                if pty then
-                    pty:send_key(event.data)
-                end
-                if state.timer then
-                    state.timer:cancel()
-                    state.timer = nil
-                end
-                state.pending_command = false
-                prise.request_frame()
-                return
-            end
-
-            if k == "h" then
-                move_focus("left")
-                handled = true
-            elseif k == "l" then
-                move_focus("right")
-                handled = true
-            elseif k == "j" then
-                move_focus("down")
-                handled = true
-            elseif k == "k" then
-                move_focus("up")
-                handled = true
-            elseif k == "H" then
-                resize_pane("width", -RESIZE_STEP)
-                handled = true
-            elseif k == "L" then
-                resize_pane("width", RESIZE_STEP)
-                handled = true
-            elseif k == "J" then
-                resize_pane("height", RESIZE_STEP)
-                handled = true
-            elseif k == "K" then
-                resize_pane("height", -RESIZE_STEP)
-                handled = true
-            elseif k == "%" or k == "v" then
-                -- Split horizontal (side-by-side)
-                local pty = get_focused_pty()
-                state.pending_split = { direction = "row" }
-                prise.spawn({ cwd = pty and pty:cwd() })
-                handled = true
-            elseif k == '"' or k == "'" or k == "s" then
-                -- Split vertical (top-bottom)
-                local pty = get_focused_pty()
-                state.pending_split = { direction = "col" }
-                prise.spawn({ cwd = pty and pty:cwd() })
-                handled = true
-            elseif k == "d" then
-                -- Detach from session
-                detach_session()
-                handled = true
-            elseif k == "t" then
-                -- New tab
-                local pty = get_focused_pty()
-                state.pending_new_tab = true
-                prise.spawn({ cwd = pty and pty:cwd() })
-                handled = true
-            elseif k == "n" then
-                -- Next tab
-                if #state.tabs > 1 then
-                    local next_idx = state.active_tab % #state.tabs + 1
-                    set_active_tab_index(next_idx)
-                end
-                handled = true
-            elseif k == "p" then
-                -- Previous tab
-                if #state.tabs > 1 then
-                    local prev_idx = (state.active_tab - 2 + #state.tabs) % #state.tabs + 1
-                    set_active_tab_index(prev_idx)
-                end
-                handled = true
-            elseif k == "c" then
-                -- Close current tab
-                close_current_tab()
-                handled = true
-            elseif k == "r" then
-                -- Rename current tab
-                open_rename_tab()
-                handled = true
-            elseif k == "S" then
-                -- Switch/swap session
-                open_session_picker()
-                handled = true
-            elseif k == "R" then
-                -- Rename session
-                open_rename()
-                handled = true
-            elseif k >= "1" and k <= "9" then
-                -- Switch to tab N
-                local idx = math.tointeger(tonumber(k))
-                if idx and idx <= #state.tabs then
-                    set_active_tab_index(idx)
-                end
-                handled = true
-            elseif k == "0" then
-                -- Switch to tab 10
-                if 10 <= #state.tabs then
-                    set_active_tab_index(10)
-                end
-                handled = true
-            elseif k == "w" then
-                -- Close current pane
-                local root = get_active_root()
-                local path = state.focused_id and find_node_path(root, state.focused_id)
-                if path then
-                    local pane = path[#path]
-                    pane.pty:close()
-                    local was_last = remove_pane_by_id(pane.id)
-                    if not was_last then
-                        prise.save()
-                    end
-                    handled = true
-                end
-            elseif k == "q" then
-                -- Quit
-                detach_session()
-                handled = true
-            elseif k == "z" then
-                -- Toggle zoom
-                if state.zoomed_pane_id then
-                    state.zoomed_pane_id = nil
-                elseif state.focused_id then
-                    state.zoomed_pane_id = state.focused_id
-                end
-                handled = true
-            elseif k == "Enter" or k == "\r" or k == "\n" then
-                local pty = get_focused_pty()
-                state.pending_split = { direction = get_auto_split_direction() }
-                prise.spawn({ cwd = pty and pty:cwd() })
-                handled = true
-            elseif k == "Escape" then
-                handled = true
-            end
-
-            if handled then
-                if state.timer then
-                    state.timer:cancel()
-                    state.timer = nil
-                end
-                state.pending_command = false
-                prise.request_frame()
-                return
-            end
-
-            -- Reset timeout
->>>>>>> c0e82165ba9e (Add session picker)
             if state.timer then
                 state.timer:cancel()
             end
@@ -2621,7 +2464,10 @@ local function build_palette()
                             input = state.palette.input,
                             style = input_style,
                         }),
-                        prise.Text({ text = string.rep("─", PALETTE_WIDTH), style = { fg = THEME.bg3 } }),
+                        prise.Text({
+                            text = string.rep("─", PALETTE_WIDTH),
+                            style = { fg = THEME.bg3, bg = THEME.bg1 },
+                        }),
                         prise.List({
                             items = items,
                             selected = state.palette.selected,
@@ -2661,7 +2507,7 @@ local function build_rename()
                 child = prise.Column({
                     cross_axis_align = "stretch",
                     children = {
-                        prise.Text({ text = "Rename Session", style = { fg = THEME.fg_dim } }),
+                        prise.Text({ text = "Rename Session", style = { fg = THEME.fg_dim, bg = THEME.bg1 } }),
                         prise.TextInput({
                             input = state.rename.input,
                             style = input_style,
@@ -2698,7 +2544,7 @@ local function build_rename_tab()
                 child = prise.Column({
                     cross_axis_align = "stretch",
                     children = {
-                        prise.Text({ text = "Rename Tab", style = { fg = THEME.fg_dim } }),
+                        prise.Text({ text = "Rename Tab", style = { fg = THEME.fg_dim, bg = THEME.bg1 } }),
                         prise.TextInput({
                             input = state.rename_tab.input,
                             style = input_style,
@@ -2773,13 +2619,16 @@ local function build_session_picker()
                 child = prise.Column({
                     cross_axis_align = "stretch",
                     children = {
-                        prise.Text({ text = "Switch Session", style = { fg = THEME.fg_dim } }),
+                        prise.Text({ text = "Switch Session", style = { fg = THEME.fg_dim, bg = THEME.bg1 } }),
                         prise.TextInput({
                             input = state.session_picker.input,
                             style = input_style,
                             focus = true,
                         }),
-                        prise.Text({ text = string.rep("─", PALETTE_WIDTH), style = { fg = THEME.bg3 } }),
+                        prise.Text({
+                            text = string.rep("─", PALETTE_WIDTH),
+                            style = { fg = THEME.bg3, bg = THEME.bg1 },
+                        }),
                         prise.List({
                             items = items,
                             selected = state.session_picker.selected,

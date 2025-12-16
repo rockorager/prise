@@ -269,6 +269,15 @@ pub const Widget = struct {
                 while (try iter.next()) |line| {
                     defer allocator.free(line.segments);
 
+                    if (text.style.bg != .default) {
+                        for (0..win.width) |c| {
+                            win.writeCell(@intCast(c), @intCast(row), .{
+                                .char = .{ .grapheme = " ", .width = 1 },
+                                .style = text.style,
+                            });
+                        }
+                    }
+
                     var col: usize = 0;
 
                     const free_space = if (win.width > line.width) win.width - line.width else 0;
@@ -812,6 +821,7 @@ pub const Text = struct {
     wrap: Wrap = .none,
     // We must quote align because it is a keyword
     @"align": Align = .left,
+    style: vaxis.Style = .{},
 
     pub const Span = struct {
         text: []const u8,
@@ -1397,10 +1407,18 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
         }
         lua.pop(1);
 
+        var text_style = vaxis.Style{};
+        _ = lua.getField(index, "style");
+        if (lua.typeOf(-1) == .table) {
+            text_style = parseStyle(lua, -1) catch .{};
+        }
+        lua.pop(1);
+
         return .{ .ratio = ratio, .id = id, .focus = focus, .kind = .{ .text = .{
             .spans = try spans.toOwnedSlice(allocator),
             .wrap = wrap,
             .@"align" = @"align",
+            .style = text_style,
         } } };
     } else if (std.mem.eql(u8, widget_type, "stack")) {
         _ = lua.getField(index, "children");
