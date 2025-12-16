@@ -2481,10 +2481,6 @@ pub const App = struct {
             try self.saveSession(name);
         }
 
-        // Restore terminal state before exec
-        const writer = self.tty.writer();
-        self.vx.deinit(self.allocator, writer);
-
         // Build arguments for exec
         const target_z = try self.allocator.dupeZ(u8, target_session);
         const args = [_]?[*:0]const u8{
@@ -2497,9 +2493,18 @@ pub const App = struct {
 
         log.info("Exec'ing prise session attach '{s}'", .{target_session});
 
+        // Restore terminal state right before exec to minimize window of failure
+        const writer = self.tty.writer();
+        self.vx.deinit(self.allocator, writer);
+
         // Use execvpeZ with current environment
         const err = posix.execvpeZ("prise", @ptrCast(&args), @ptrCast(std.c.environ));
+
+        // If we get here, exec failed - reinitialize terminal
         log.err("Failed to exec prise: {}", .{err});
+        self.vx = vaxis.Vaxis.init(self.allocator, .{}) catch return err;
+        self.vx.enterAltScreen(writer) catch {};
+        return err;
     }
 
     pub fn deleteCurrentSession(self: *App) void {

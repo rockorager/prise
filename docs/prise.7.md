@@ -112,6 +112,13 @@ command (e.g., **v** for horizontal split).
 Press **Super+p** to open the command palette. Type to fuzzy-search commands,
 then press Enter to execute.
 
+## Session Picker
+
+In command mode (leader key), press **S** to open the session picker. Type to
+filter sessions by name, use arrow keys to navigate, and press Enter to switch.
+
+Press **R** in command mode to rename the current session.
+
 # CUSTOM UI
 
 The UI is implemented in Lua and can be customized or replaced entirely. See
