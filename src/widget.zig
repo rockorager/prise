@@ -86,19 +86,19 @@ pub const SplitHandle = struct {
         const total: f64 = @floatFromInt(self.total_size);
         const sep_space: f64 = @floatFromInt(self.separator_space);
         const container_start: f64 = @floatFromInt(self.container_start);
-        
+
         // Available space for panes (total minus separator space)
         const pane_space = total - sep_space;
         if (pane_space <= 0) return 0.5;
 
         // Calculate new ratio based on mouse position relative to container start
         const relative_pos = mouse_pos - container_start;
-        
+
         // Subtract separator space that comes before the mouse position
         // For now, approximate by assuming separators are evenly distributed
         // This gives us the position within the pane-only space
         var ratio = relative_pos / total;
-        
+
         // Adjust for separator space - the ratio should be relative to pane space only
         // If separator_space > 0, we need to scale the ratio
         if (sep_space > 0) {
@@ -108,7 +108,7 @@ pub const SplitHandle = struct {
             const pane_pos = relative_pos - sep_before;
             ratio = pane_pos / pane_space;
         }
-        
+
         if (ratio < 0.1) ratio = 0.1;
         if (ratio > 0.9) ratio = 0.9;
         return @floatCast(ratio);
@@ -417,6 +417,19 @@ pub const Widget = struct {
                     .height = pos.child.height,
                 });
                 try pos.child.renderTo(child_win, allocator);
+            },
+            .separator => |sep| {
+                const line_char = sep.lineChar();
+                const style = sep.style;
+
+                for (0..win.height) |row| {
+                    for (0..win.width) |col| {
+                        win.writeCell(@intCast(col), @intCast(row), .{
+                            .char = .{ .grapheme = line_char, .width = 1 },
+                            .style = style,
+                        });
+                    }
+                }
             },
         }
     }
