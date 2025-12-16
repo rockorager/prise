@@ -2274,10 +2274,28 @@ function M.update(event)
             end
             if is_split(node) then
                 if node.split_id == split_id then
-                    -- Found it - update the pane's ratio
-                    if node.children[pane_index + 1] then
-                        node.children[pane_index + 1].ratio = new_ratio
+                    -- Found it - adjust two adjacent panes, keeping combined share constant
+                    local left_idx = pane_index + 1 -- Convert 0-based to 1-based
+                    local right_idx = left_idx + 1
+
+                    if not node.children[left_idx] or not node.children[right_idx] then
+                        return false
                     end
+
+                    local left_r = effective_ratio(node, left_idx)
+                    local right_r = effective_ratio(node, right_idx)
+                    local total = left_r + right_r
+
+                    local new_left = new_ratio
+                    if new_left < MIN_PANE_SHARE then
+                        new_left = MIN_PANE_SHARE
+                    end
+                    if new_left > total - MIN_PANE_SHARE then
+                        new_left = total - MIN_PANE_SHARE
+                    end
+
+                    node.children[left_idx].ratio = new_left
+                    node.children[right_idx].ratio = total - new_left
                     return true
                 end
                 for _, child in ipairs(node.children) do
