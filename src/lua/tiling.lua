@@ -1139,22 +1139,28 @@ local function resize_pane(dimension, delta_ratio)
 
     local num_children = #parent_split.children
 
-    -- Use pairwise adjustment to move the divider between two adjacent siblings.
-    -- This keeps other siblings unaffected and matches user expectation of
-    -- "move the nearest divider in that direction".
+    -- Use pairwise adjustment to enable resizing in both directions from any focused pane.
     if delta_ratio < 0 then
-        -- Resize left/up: grow current pane by taking from left neighbor
+        -- Negative delta: try to move left boundary (focused pane may grow by taking from left)
         if child_idx > 1 then
-            -- Move divider between (child_idx-1, child_idx) to the left
-            adjust_pair(parent_split, child_idx - 1, child_idx, delta_ratio)
+            -- Left neighbor exists: adjust the left boundary (left shrinks, focused grows)
+            adjust_pair(parent_split, child_idx - 1, child_idx, delta_ratio) -- delta_ratio is negative
+        elseif child_idx < num_children then
+            -- No left neighbor but right exists: adjust right boundary to achieve opposite effect (focused shrinks, right grows)
+            -- Since we want a "left resize" effect but no left neighbor, we make focused shrink instead
+            adjust_pair(parent_split, child_idx, child_idx + 1, delta_ratio) -- delta_ratio is negative, so focused shrinks, right grows
         else
             return
         end
     else
-        -- Resize right/down: grow current pane by taking from right neighbor
+        -- Positive delta: try to move right boundary (focused pane may grow by taking from right)
         if child_idx < num_children then
-            -- Move divider between (child_idx, child_idx+1) to the right
-            adjust_pair(parent_split, child_idx, child_idx + 1, delta_ratio)
+            -- Right neighbor exists: adjust the right boundary (focused grows, right shrinks)
+            adjust_pair(parent_split, child_idx, child_idx + 1, delta_ratio) -- delta_ratio is positive
+        elseif child_idx > 1 then
+            -- No right neighbor but left exists: adjust left boundary to achieve opposite effect (left shrinks, focused grows)
+            -- Since we want a "right resize" effect but no right neighbor, we make left shrink to grow focused
+            adjust_pair(parent_split, child_idx - 1, child_idx, delta_ratio) -- delta_ratio is positive, so left shrinks, focused grows
         else
             return
         end
