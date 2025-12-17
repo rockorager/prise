@@ -1233,6 +1233,17 @@ local function move_focus(direction)
     end
 end
 
+local function get_tab_display_name(tab_index)
+    local tab = state.tabs[tab_index]
+    if not tab then
+        return "Tab " .. tab_index
+    end
+    if tab.title and tab.title ~= "" then
+        return tab.title
+    end
+    return "Tab " .. tab_index
+end
+
 local function open_rename_tab()
     if not state.rename_tab.input then
         state.rename_tab.input = prise.create_text_input()
@@ -1464,7 +1475,9 @@ local commands = {
         end,
     },
     {
-        name = "Tab 1",
+        name = function()
+            return get_tab_display_name(1)
+        end,
         shortcut = key_prefix .. " 1",
         action = function()
             set_active_tab_index(1)
@@ -1474,7 +1487,9 @@ local commands = {
         end,
     },
     {
-        name = "Tab 2",
+        name = function()
+            return get_tab_display_name(2)
+        end,
         shortcut = key_prefix .. " 2",
         action = function()
             set_active_tab_index(2)
@@ -1484,7 +1499,9 @@ local commands = {
         end,
     },
     {
-        name = "Tab 3",
+        name = function()
+            return get_tab_display_name(3)
+        end,
         shortcut = key_prefix .. " 3",
         action = function()
             set_active_tab_index(3)
@@ -1494,7 +1511,9 @@ local commands = {
         end,
     },
     {
-        name = "Tab 4",
+        name = function()
+            return get_tab_display_name(4)
+        end,
         shortcut = key_prefix .. " 4",
         action = function()
             set_active_tab_index(4)
@@ -1504,7 +1523,9 @@ local commands = {
         end,
     },
     {
-        name = "Tab 5",
+        name = function()
+            return get_tab_display_name(5)
+        end,
         shortcut = key_prefix .. " 5",
         action = function()
             set_active_tab_index(5)
@@ -1514,7 +1535,9 @@ local commands = {
         end,
     },
     {
-        name = "Tab 6",
+        name = function()
+            return get_tab_display_name(6)
+        end,
         shortcut = key_prefix .. " 6",
         action = function()
             set_active_tab_index(6)
@@ -1524,7 +1547,9 @@ local commands = {
         end,
     },
     {
-        name = "Tab 7",
+        name = function()
+            return get_tab_display_name(7)
+        end,
         shortcut = key_prefix .. " 7",
         action = function()
             set_active_tab_index(7)
@@ -1534,7 +1559,9 @@ local commands = {
         end,
     },
     {
-        name = "Tab 8",
+        name = function()
+            return get_tab_display_name(8)
+        end,
         shortcut = key_prefix .. " 8",
         action = function()
             set_active_tab_index(8)
@@ -1699,7 +1726,8 @@ local function filter_commands(query)
     for _, cmd in ipairs(commands) do
         local is_visible = not cmd.visible or cmd.visible()
         if is_visible then
-            if not query or query == "" or cmd.name:lower():find(query:lower(), 1, true) then
+            local cmd_name = type(cmd.name) == "function" and cmd.name() or cmd.name
+            if not query or query == "" or cmd_name:lower():find(query:lower(), 1, true) then
                 table.insert(results, cmd)
             end
         end
@@ -2418,7 +2446,8 @@ local function build_palette()
 
     local items = {}
     for _, cmd in ipairs(filtered) do
-        table.insert(items, format_palette_item(cmd.name, cmd.shortcut, PALETTE_INNER_WIDTH))
+        local cmd_name = type(cmd.name) == "function" and cmd.name() or cmd.name
+        table.insert(items, format_palette_item(cmd_name, cmd.shortcut, PALETTE_INNER_WIDTH))
     end
 
     local palette_style = { bg = THEME.bg1, fg = THEME.fg_bright }
