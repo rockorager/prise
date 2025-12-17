@@ -1268,6 +1268,98 @@ local function execute_rename_tab()
     close_rename_tab()
 end
 
+---Swap the focused pane with a sibling pane in the given direction
+---@param direction "left"|"right"|"up"|"down"
+local function swap_pane(direction)
+    local root = get_active_root()
+    if not state.focused_id or not root then
+        return
+    end
+
+    local path = find_node_path(root, state.focused_id)
+    if not path then
+        return
+    end
+
+    -- "left"/"right" implies moving along "row"
+    -- "up"/"down" implies moving along "col"
+    local target_split_type = (direction == "left" or direction == "right") and "row" or "col"
+    local forward = (direction == "right" or direction == "down")
+
+    local sibling_node = nil
+
+    -- Traverse up the path to find a split of the correct type where we can swap
+    for i = #path - 1, 1, -1 do
+        local node = path[i]
+        local child = path[i + 1]
+
+        if node.type == "split" and node.direction == target_split_type then
+            -- Find index of child
+            local idx = 0
+            for k, c in ipairs(node.children) do
+                if c == child then
+                    idx = k
+                    break
+                end
+            end
+
+            if forward then
+                if idx < #node.children then
+                    sibling_node = node.children[idx + 1]
+                    break
+                end
+            else
+                if idx > 1 then
+                    sibling_node = node.children[idx - 1]
+                    break
+                end
+            end
+        end
+    end
+
+    if sibling_node then
+        -- Found a sibling tree/pane. Find the closest leaf.
+        local target_leaf
+        if forward then
+            target_leaf = get_first_leaf(sibling_node)
+        else
+            target_leaf = get_last_leaf(sibling_node)
+        end
+
+        if target_leaf and target_leaf.id ~= state.focused_id then
+            -- Find both panes
+            local focused_path = find_node_path(root, state.focused_id)
+            local target_path = find_node_path(root, target_leaf.id)
+
+            if focused_path and target_path then
+                local focused_pane = focused_path[#focused_path]
+                local target_pane = target_path[#target_path]
+
+                -- Unfocus the currently focused pane before swapping
+                if state.app_focused then
+                    focused_pane.pty:set_focus(false)
+                end
+
+                -- Swap both the PTY references and the IDs so everything stays consistent
+                focused_pane.pty, target_pane.pty = target_pane.pty, focused_pane.pty
+                focused_pane.id, target_pane.id = target_pane.id, focused_pane.id
+
+                -- Focus stays on the same ID (which now moved to the target position)
+                -- state.focused_id doesn't need to change since we swapped the IDs
+
+                -- Focus the pane that now has our original ID (at target position)
+                if state.app_focused then
+                    target_pane.pty:set_focus(true)
+                end
+
+                update_cached_git_branch()
+                prise.request_frame()
+                prise.save()
+            end
+        end
+    end
+end
+
 -- Platform-dependent key prefix for shortcuts
 local key_prefix = prise.platform == "macos" and "󰘳 +k" or "Super+k"
 
@@ -1563,6 +1655,34 @@ local commands = {
             return #state.tabs >= 10
         end,
     },
+    {
+        name = "Swap pane left",
+        shortcut = key_prefix .. " Ctrl+h",
+        action = function()
+            swap_pane("left")
+        end,
+    },
+    {
+        name = "Swap pane right",
+        shortcut = key_prefix .. " Ctrl+l",
+        action = function()
+            swap_pane("right")
+        end,
+    },
+    {
+        name = "Swap pane up",
+        shortcut = key_prefix .. " Ctrl+k",
+        action = function()
+            swap_pane("up")
+        end,
+    },
+    {
+        name = "Swap pane down",
+        shortcut = key_prefix .. " Ctrl+j",
+        action = function()
+            swap_pane("down")
+        end,
+    },
 }
 
 -- Action handlers for keybind system
@@ -1594,6 +1714,18 @@ action_handlers = {
     end,
     focus_down = function()
         move_focus("down")
+    end,
+    swap_pane_left = function()
+        swap_pane("left")
+    end,
+    swap_pane_right = function()
+        swap_pane("right")
+    end,
+    swap_pane_up = function()
+        swap_pane("up")
+    end,
+    swap_pane_down = function()
+        swap_pane("down")
     end,
     close_pane = function()
         local root = get_active_root()
@@ -2010,6 +2142,28 @@ function M.update(event)
 
         -- Handle keybinds via matcher
         init_keybinds()
+
+        -- Handle Ctrl+H/L/J/K for swapping panes when leader is pending
+        if state.keybind_matcher:is_pending() and event.data.ctrl then
+            if event.data.key == "h" then
+                state.keybind_matcher:reset()
+                swap_pane("left")
+                return
+            elseif event.data.key == "l" then
+                state.keybind_matcher:reset()
+                swap_pane("right")
+                return
+            elseif event.data.key == "j" then
+                state.keybind_matcher:reset()
+                swap_pane("down")
+                return
+            elseif event.data.key == "k" then
+                state.keybind_matcher:reset()
+                swap_pane("up")
+                return
+            end
+        end
+
         local result = state.keybind_matcher:handle_key(event.data)
 
         if result.action or result.func then
