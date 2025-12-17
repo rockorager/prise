@@ -13,6 +13,7 @@ local utils = require("utils")
 ---@field direction "row"|"col"
 ---@field ratio? number
 ---@field children (Pane|Split)[]
+---@field last_focused_child_idx? number
 
 ---@alias Node Pane|Split
 
@@ -572,6 +573,49 @@ local function update_cached_git_branch()
     state.cached_git_branch = nil
 end
 
+---Update the last_focused_child_idx for splits in the current focus path
+local function update_focus_path()
+    local root = get_active_root()
+    if not state.focused_id or not root then
+        return
+    end
+    local path = find_node_path(root, state.focused_id)
+    if not path then
+        return
+    end
+    -- path[1] is root, path[#path] is the focused pane
+    for i = 1, #path - 1 do
+        local node = path[i]
+        local child = path[i + 1]
+        if is_split(node) then
+            for idx, c in ipairs(node.children) do
+                if c == child then
+                    node.last_focused_child_idx = idx
+                    break
+                end
+            end
+        end
+    end
+end
+
+---Get the preferred leaf pane from a node, preferring the last focused child
+---@param node Node
+---@return Pane?
+local function get_preferred_leaf(node)
+    if is_pane(node) then
+        ---@cast node Pane
+        return node
+    elseif is_split(node) then
+        ---@cast node Split
+        if node.last_focused_child_idx and node.children[node.last_focused_child_idx] then
+            return get_preferred_leaf(node.children[node.last_focused_child_idx])
+        else
+            return get_first_leaf(node)
+        end
+    end
+    return nil
+end
+
 ---Recursively insert a new pane relative to target_id
 ---@param node Node
 ---@param target_id number
@@ -766,6 +810,7 @@ local function set_active_tab_index(new_index)
     end
 
     state.focused_id = new_focus_id
+    update_focus_path()
     update_pty_focus(old_focused, new_focus_id)
     update_cached_git_branch()
     prise.request_frame()
@@ -827,11 +872,13 @@ local function close_tab(idx)
             new_focus_id = first_pane and first_pane.id or nil
         end
         state.focused_id = new_focus_id
+        update_focus_path()
         update_pty_focus(old_focused, new_focus_id)
         update_cached_git_branch()
     else
         -- No tabs left
         state.focused_id = nil
+        update_focus_path()
         state.cached_git_branch = nil
     end
 
@@ -893,6 +940,7 @@ local function remove_pane_by_id(id)
                     new_focus_id = first_pane and first_pane.id or nil
                 end
                 state.focused_id = new_focus_id
+                update_focus_path()
                 update_pty_focus(old_focused, new_focus_id)
                 update_cached_git_branch()
             end
@@ -905,10 +953,12 @@ local function remove_pane_by_id(id)
             local old_id = state.focused_id
             if next_focus then
                 state.focused_id = next_focus
+                update_focus_path()
             else
                 local first = get_first_leaf(tab.root)
                 if first then
                     state.focused_id = first.id
+                    update_focus_path()
                 end
             end
             update_pty_focus(old_id, state.focused_id)
@@ -1260,6 +1310,7 @@ local function serialize_node(node, cwd_lookup)
             direction = node.direction,
             ratio = node.ratio,
             children = children,
+            last_focused_child_idx = node.last_focused_child_idx,
         }
     end
     return nil
@@ -1308,6 +1359,7 @@ local function deserialize_node(saved, pty_lookup)
             direction = saved.direction,
             ratio = saved.ratio,
             children = children,
+            last_focused_child_idx = saved.last_focused_child_idx,
         }
     end
     return nil
@@ -1470,18 +1522,13 @@ local function move_focus(direction)
     end
 
     if sibling_node then
-        -- Found a sibling tree/pane. Find the closest leaf.
-        ---@type Pane?
-        local target_leaf
-        if forward then
-            target_leaf = get_first_leaf(sibling_node)
-        else
-            target_leaf = get_last_leaf(sibling_node)
-        end
+        -- Found a sibling tree/pane. Find the preferred leaf.
+        local target_leaf = get_preferred_leaf(sibling_node)
 
         if target_leaf and target_leaf.id ~= state.focused_id then
             local old_id = state.focused_id
             state.focused_id = target_leaf.id
+            update_focus_path()
             update_pty_focus(old_id, state.focused_id)
             update_cached_git_branch()
             prise.request_frame()
@@ -2103,6 +2150,7 @@ function M.update(event)
             table.insert(state.tabs, new_tab)
             state.active_tab = 1
             state.focused_id = new_pane.id
+            update_focus_path()
         else
             -- Insert into active tab's tree
             local tab = get_active_tab()
@@ -2131,6 +2179,7 @@ function M.update(event)
             end
 
             state.focused_id = new_pane.id
+            update_focus_path()
             state.pending_split = nil
         end
         update_pty_focus(old_focused_id, state.focused_id)
@@ -2463,6 +2512,7 @@ function M.update(event)
             if d.target and d.target ~= state.focused_id then
                 local old_id = state.focused_id
                 state.focused_id = d.target
+                update_focus_path()
                 update_pty_focus(old_id, state.focused_id)
                 prise.request_frame()
             end
@@ -3302,6 +3352,7 @@ function M.set_state(saved, pty_lookup)
             state.active_tab = 1
             state.next_tab_id = tab_id + 1
             state.focused_id = saved.focused_id
+            update_focus_path()
             state.next_split_id = saved.next_split_id or 1
         end
     else
@@ -3321,6 +3372,7 @@ function M.set_state(saved, pty_lookup)
         state.active_tab = saved.active_tab or 1
         state.next_tab_id = saved.next_tab_id or (#state.tabs + 1)
         state.focused_id = saved.focused_id
+        update_focus_path()
         state.next_split_id = saved.next_split_id or 1
 
         -- Ensure active_tab is valid
@@ -3339,6 +3391,7 @@ function M.set_state(saved, pty_lookup)
             local first = get_first_leaf(tab.root)
             if first then
                 state.focused_id = first.id
+                update_focus_path()
             end
         end
     end
