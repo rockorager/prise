@@ -267,6 +267,32 @@ function M.Separator(opts)
     }
 end
 
+---@class SeparatorSegment
+---@field ratio_start? number Start position as ratio (0.0-1.0)
+---@field ratio_end? number End position as ratio (0.0-1.0)
+---@field start? number Absolute start position
+---@field end? number Absolute end position
+---@field style table Style options (fg, bg, etc.)
+
+---@class SegmentedSeparatorOpts
+---@field axis "horizontal"|"vertical" Separator orientation
+---@field segments SeparatorSegment[] Array of segments with different styles
+---@field default_style? table Default style for unspecified regions
+---@field border? "none"|"single"|"double"|"rounded" Line style (default: "single")
+
+---Create a segmented separator widget with multiple styled sections
+---@param opts SegmentedSeparatorOpts
+---@return table SegmentedSeparator widget
+function M.SegmentedSeparator(opts)
+    return {
+        type = "segmented_separator",
+        axis = opts.axis or "vertical",
+        segments = opts.segments or {},
+        default_style = opts.default_style,
+        border = opts.border or "single",
+    }
+end
+
 ---Create a padding widget that adds spacing around a child
 ---@param opts PaddingOpts
 ---@return table Padding widget
