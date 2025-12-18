@@ -162,6 +162,7 @@ local POWERLINE_SYMBOLS = {
 
 ---@class PriseTabBarConfig
 ---@field show_single_tab? boolean Show tab bar even with one tab (default: false)
+---@field style? string Tab bar style: "pill" (rounded, default) or "bar" (square/flat)
 
 ---Keybinds are a map from key_string to action name
 ---Example: ["<leader>v"] = "split_horizontal"
@@ -2687,133 +2688,171 @@ local function build_tab_bar()
         return nil
     end
 
-    local num_tabs = #state.tabs
-    local total_width = state.screen_cols
-    local endcap_width = 2 -- left_round and right_round are 1 cell each
-
-    -- Calculate tab widths: divide available space evenly
-    local base_tab_width = math.floor(total_width / num_tabs)
-    local extra_pixels = total_width % num_tabs
-
+    local tab_bar_style = config.tab_bar.style or "pill"
     local segments = {}
     local x_pos = 0
     state.tab_regions = {}
     state.tab_close_regions = {}
 
-    for i, tab in ipairs(state.tabs) do
-        local is_active = (i == state.active_tab)
-        local is_hovered = (i == state.hovered_tab)
-        local is_close_hovered = (i == state.hovered_close_tab)
+    if tab_bar_style == "bar" then
+        -- Simple flat/square bar style (original)
+        for i, tab in ipairs(state.tabs) do
+            local is_active = (i == state.active_tab)
+            local is_hovered = (i == state.hovered_tab)
+            local label = " " .. (tab.title or tostring(i)) .. " "
+            local label_width = prise.gwidth(label)
 
-        -- Distribute extra width to last tabs so they fill the line
-        local tab_width = base_tab_width
-        if i > (num_tabs - extra_pixels) then
-            tab_width = tab_width + 1
+            -- Record hit region for this tab
+            table.insert(state.tab_regions, {
+                start_x = x_pos,
+                end_x = x_pos + label_width,
+                tab_index = i,
+            })
+            x_pos = x_pos + label_width
+
+            local style
+            if is_active then
+                style = { bg = THEME.accent, fg = THEME.fg_dark }
+            elseif is_hovered then
+                style = { bg = THEME.bg3, fg = THEME.fg_bright }
+            else
+                style = { bg = THEME.bg2, fg = THEME.fg_dim }
+            end
+
+            table.insert(segments, { text = label, style = style })
         end
 
-        -- Close widget: always reserve 2 cells, only show icon when hovered
-        local close_widget_width = 2
-        local close_text = "  " -- 2 spaces when not hovered
-        if is_close_hovered then
-            close_text = "\u{F530}" -- md-close_circle (filled)
-        elseif is_hovered then
-            close_text = "\u{F467}" -- md-close_circle_outline
+        -- Fill remaining width with bg color
+        local remaining_width = math.floor(state.screen_cols - x_pos)
+        if remaining_width > 0 then
+            table.insert(segments, { text = string.rep(" ", remaining_width), style = { bg = THEME.bg1 } })
         end
-        -- Pad close_text to exactly close_widget_width cells
-        local close_text_width = prise.gwidth(close_text)
-        if close_text_width < close_widget_width then
-            close_text = close_text .. string.rep(" ", close_widget_width - close_text_width)
-        end
+    else
+        -- Pill style (rounded, default)
+        local num_tabs = #state.tabs
+        local total_width = state.screen_cols
+        local endcap_width = 2 -- left_round and right_round are 1 cell each
 
-        -- Get title: manual title, or focused pty title, or focused pty cwd
-        local title = "Terminal"
-        if tab.title then
-            title = tab.title
-        else
-            local focused_id = is_active and state.focused_id or tab.last_focused_id
-            if focused_id and tab.root then
-                local path = find_node_path(tab.root, focused_id)
-                if path then
-                    local pane = path[#path]
-                    local pty_title = pane.pty:title()
-                    if pty_title and #pty_title > 0 then
-                        title = pty_title
-                    else
-                        local cwd = pane.pty:cwd()
-                        if cwd then
-                            title = cwd:match("([^/]+)/?$") or cwd
+        -- Calculate tab widths: divide available space evenly
+        local base_tab_width = math.floor(total_width / num_tabs)
+        local extra_pixels = total_width % num_tabs
+
+        x_pos = 0
+        for i, tab in ipairs(state.tabs) do
+            local is_active = (i == state.active_tab)
+            local is_hovered = (i == state.hovered_tab)
+            local is_close_hovered = (i == state.hovered_close_tab)
+
+            -- Distribute extra width to last tabs so they fill the line
+            local tab_width = base_tab_width
+            if i > (num_tabs - extra_pixels) then
+                tab_width = tab_width + 1
+            end
+
+            -- Close widget: always reserve 2 cells, only show icon when hovered
+            local close_widget_width = 2
+            local close_text = "  " -- 2 spaces when not hovered
+            if is_close_hovered then
+                close_text = "\u{F530}" -- md-close_circle (filled)
+            elseif is_hovered then
+                close_text = "\u{F467}" -- md-close_circle_outline
+            end
+            -- Pad close_text to exactly close_widget_width cells
+            local close_text_width = prise.gwidth(close_text)
+            if close_text_width < close_widget_width then
+                close_text = close_text .. string.rep(" ", close_widget_width - close_text_width)
+            end
+
+            -- Get title: manual title, or focused pty title, or focused pty cwd
+            local title = "Terminal"
+            if tab.title then
+                title = tab.title
+            else
+                local focused_id = is_active and state.focused_id or tab.last_focused_id
+                if focused_id and tab.root then
+                    local path = find_node_path(tab.root, focused_id)
+                    if path then
+                        local pane = path[#path]
+                        local pty_title = pane.pty:title()
+                        if pty_title and #pty_title > 0 then
+                            title = pty_title
+                        else
+                            local cwd = pane.pty:cwd()
+                            if cwd then
+                                title = cwd:match("([^/]+)/?$") or cwd
+                            end
                         end
                     end
                 end
             end
+
+            -- Tab index shown on the right
+            local index_str = tostring(i)
+            local index_width = #index_str + 2 -- space + index + space
+
+            -- Always reserve space for endcaps, close widget, and index
+            local inner_width = tab_width - endcap_width - close_widget_width - index_width
+            local title_width = prise.gwidth(title)
+
+            -- Truncate title if needed
+            if title_width > inner_width then
+                title = string.sub(title, 1, inner_width - 1) .. "…"
+                title_width = prise.gwidth(title)
+            end
+
+            -- Center the title
+            local padding_total = inner_width - title_width
+            local pad_left = math.floor(padding_total / 2)
+            local pad_right = padding_total - pad_left
+            if pad_left < 0 then
+                pad_left = 0
+            end
+            if pad_right < 0 then
+                pad_right = 0
+            end
+
+            local label = string.rep(" ", pad_left) .. title .. string.rep(" ", pad_right)
+            local index_label = " " .. index_str .. " "
+
+            -- Record close button hit region (after left endcap)
+            local close_start = x_pos + 1 -- after left endcap
+            table.insert(state.tab_close_regions, {
+                start_x = close_start,
+                end_x = close_start + close_widget_width,
+                tab_index = i,
+            })
+
+            -- Record hit region for this tab
+            table.insert(state.tab_regions, {
+                start_x = x_pos,
+                end_x = x_pos + tab_width,
+                tab_index = i,
+            })
+            x_pos = x_pos + tab_width
+
+            local tab_bg, tab_fg
+            if is_active then
+                tab_bg = THEME.bg4
+                tab_fg = THEME.fg_bright
+            elseif is_hovered then
+                tab_bg = THEME.bg3
+                tab_fg = THEME.fg_bright
+            else
+                tab_bg = THEME.bg2
+                tab_fg = THEME.fg_dim
+            end
+
+            -- Left endcap
+            table.insert(segments, { text = POWERLINE_SYMBOLS.left_round, style = { fg = tab_bg, bg = THEME.bg1 } })
+            -- Close widget
+            table.insert(segments, { text = close_text, style = { bg = tab_bg, fg = tab_fg } })
+            -- Tab content (title)
+            table.insert(segments, { text = label, style = { bg = tab_bg, fg = tab_fg, bold = is_active } })
+            -- Tab index (right side, dimmed)
+            table.insert(segments, { text = index_label, style = { bg = tab_bg, fg = THEME.fg_dim } })
+            -- Right endcap
+            table.insert(segments, { text = POWERLINE_SYMBOLS.right_round, style = { fg = tab_bg, bg = THEME.bg1 } })
         end
-
-        -- Tab index shown on the right
-        local index_str = tostring(i)
-        local index_width = #index_str + 2 -- space + index + space
-
-        -- Always reserve space for endcaps, close widget, and index
-        local inner_width = tab_width - endcap_width - close_widget_width - index_width
-        local title_width = prise.gwidth(title)
-
-        -- Truncate title if needed
-        if title_width > inner_width then
-            title = string.sub(title, 1, inner_width - 1) .. "…"
-            title_width = prise.gwidth(title)
-        end
-
-        -- Center the title
-        local padding_total = inner_width - title_width
-        local pad_left = math.floor(padding_total / 2)
-        local pad_right = padding_total - pad_left
-        if pad_left < 0 then
-            pad_left = 0
-        end
-        if pad_right < 0 then
-            pad_right = 0
-        end
-
-        local label = string.rep(" ", pad_left) .. title .. string.rep(" ", pad_right)
-        local index_label = " " .. index_str .. " "
-
-        -- Record close button hit region (after left endcap)
-        local close_start = x_pos + 1 -- after left endcap
-        table.insert(state.tab_close_regions, {
-            start_x = close_start,
-            end_x = close_start + close_widget_width,
-            tab_index = i,
-        })
-
-        -- Record hit region for this tab
-        table.insert(state.tab_regions, {
-            start_x = x_pos,
-            end_x = x_pos + tab_width,
-            tab_index = i,
-        })
-        x_pos = x_pos + tab_width
-
-        local tab_bg, tab_fg
-        if is_active then
-            tab_bg = THEME.bg4
-            tab_fg = THEME.fg_bright
-        elseif is_hovered then
-            tab_bg = THEME.bg3
-            tab_fg = THEME.fg_bright
-        else
-            tab_bg = THEME.bg2
-            tab_fg = THEME.fg_dim
-        end
-
-        -- Left endcap
-        table.insert(segments, { text = POWERLINE_SYMBOLS.left_round, style = { fg = tab_bg, bg = THEME.bg1 } })
-        -- Close widget
-        table.insert(segments, { text = close_text, style = { bg = tab_bg, fg = tab_fg } })
-        -- Tab content (title)
-        table.insert(segments, { text = label, style = { bg = tab_bg, fg = tab_fg, bold = is_active } })
-        -- Tab index (right side, dimmed)
-        table.insert(segments, { text = index_label, style = { bg = tab_bg, fg = THEME.fg_dim } })
-        -- Right endcap
-        table.insert(segments, { text = POWERLINE_SYMBOLS.right_round, style = { fg = tab_bg, bg = THEME.bg1 } })
     end
 
     return prise.Text(segments)
