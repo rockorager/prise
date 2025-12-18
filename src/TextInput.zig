@@ -45,6 +45,28 @@ pub fn deleteForward(self: *TextInput) void {
     }
 }
 
+pub fn deleteWordBackward(self: *TextInput) void {
+    if (self.cursor == 0) return;
+
+    var end = self.cursor;
+    while (end > 0 and self.buffer.items[end - 1] == ' ') {
+        end -= 1;
+    }
+    while (end > 0 and self.buffer.items[end - 1] != ' ') {
+        end -= 1;
+    }
+
+    const count = self.cursor - end;
+    for (0..count) |_| {
+        _ = self.buffer.orderedRemove(end);
+    }
+    self.cursor = end;
+}
+
+pub fn killLine(self: *TextInput) void {
+    self.buffer.shrinkRetainingCapacity(self.cursor);
+}
+
 pub fn moveLeft(self: *TextInput) void {
     if (self.cursor > 0) {
         self.cursor -= 1;
@@ -182,4 +204,104 @@ test "visible cursor position" {
     input.scroll_offset = 3;
 
     try std.testing.expectEqual(@as(usize, 2), input.visibleCursorPos());
+}
+
+// ============================================================================
+// Rendering Tests
+// ============================================================================
+
+const tui_test = @import("tui_test.zig");
+
+test "render - basic text with cursor at end" {
+    const allocator = std.testing.allocator;
+
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+
+    try input.insertSlice("abc");
+
+    var screen = try tui_test.createScreen(allocator, 6, 1);
+    defer screen.deinit(allocator);
+
+    const win = tui_test.windowFromScreen(&screen);
+    input.render(win, .{});
+
+    const ascii = try tui_test.screenToAscii(allocator, &screen, 6, 1);
+    defer allocator.free(ascii);
+
+    try tui_test.expectAsciiEqual("abc   ", ascii);
+
+    // Cursor should be at position 3 (after 'c') with reverse style
+    const cursor_cell = screen.readCell(3, 0).?;
+    try std.testing.expect(cursor_cell.style.reverse);
+
+    // Non-cursor cells should not be reversed
+    const normal_cell = screen.readCell(0, 0).?;
+    try std.testing.expect(!normal_cell.style.reverse);
+}
+
+test "render - cursor in middle" {
+    const allocator = std.testing.allocator;
+
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+
+    try input.insertSlice("hello");
+    input.moveLeft();
+    input.moveLeft();
+
+    var screen = try tui_test.createScreen(allocator, 8, 1);
+    defer screen.deinit(allocator);
+
+    const win = tui_test.windowFromScreen(&screen);
+    input.render(win, .{});
+
+    const ascii = try tui_test.screenToAscii(allocator, &screen, 8, 1);
+    defer allocator.free(ascii);
+
+    try tui_test.expectAsciiEqual("hello   ", ascii);
+
+    // Cursor at position 3 ('l')
+    const cursor_cell = screen.readCell(3, 0).?;
+    try std.testing.expect(cursor_cell.style.reverse);
+}
+
+test "render - with scrolling" {
+    const allocator = std.testing.allocator;
+
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+
+    try input.insertSlice("abcdefghijklmnop");
+    input.updateScrollOffset(5);
+
+    var screen = try tui_test.createScreen(allocator, 5, 1);
+    defer screen.deinit(allocator);
+
+    const win = tui_test.windowFromScreen(&screen);
+    input.render(win, .{});
+
+    const ascii = try tui_test.screenToAscii(allocator, &screen, 5, 1);
+    defer allocator.free(ascii);
+
+    // With scroll, we should see the end portion
+    const visible = input.visibleText(5);
+    try std.testing.expect(visible.len <= 5);
+}
+
+test "render - empty input shows cursor" {
+    const allocator = std.testing.allocator;
+
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+
+    var screen = try tui_test.createScreen(allocator, 5, 1);
+    defer screen.deinit(allocator);
+
+    const win = tui_test.windowFromScreen(&screen);
+    input.render(win, .{});
+
+    // Cursor at position 0
+    const cursor_cell = screen.readCell(0, 0).?;
+    try std.testing.expect(cursor_cell.style.reverse);
 }

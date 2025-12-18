@@ -251,10 +251,11 @@ pub const Handler = struct {
 
             .xtversion => try self.handleXtversion(),
 
+            .device_status => try self.handleDeviceStatus(value),
+
             .bell,
             .enquiry,
             .size_report,
-            .device_status,
             .show_desktop_notification,
             .progress_report,
             .clipboard_contents,
@@ -340,6 +341,32 @@ pub const Handler = struct {
         var buf: [64]u8 = undefined;
         const resp = std.fmt.bufPrint(&buf, "\x1bP>|prise {s}\x1b\\", .{main.version}) catch return;
         try self.write(resp);
+    }
+
+    /// Handle device status requests (DSR).
+    fn handleDeviceStatus(self: *Handler, value: anytype) !void {
+        switch (value.request) {
+            .operating_status => {
+                // CSI 5 n - Report terminal is ready (no malfunction)
+                try self.write("\x1b[0n");
+            },
+            .cursor_position => {
+                // CSI 6 n - Report cursor position as CSI row ; col R
+                const cursor = self.terminal.screens.active.cursor;
+                var buf: [32]u8 = undefined;
+                const resp = std.fmt.bufPrint(&buf, "\x1b[{};{}R", .{
+                    cursor.y + 1,
+                    cursor.x + 1,
+                }) catch return;
+                try self.write(resp);
+            },
+            .color_scheme => {
+                // CSI ? 996 n - Report color scheme (1=dark, 2=light)
+                // TODO: setup client notifications for color scheme changes and
+                // have the server track/respond with the actual scheme
+                try self.write("\x1b[?997;1n");
+            },
+        }
     }
 
     /// Handle report current working directory (OSC 7).

@@ -6,13 +6,16 @@ const ghostty = @import("ghostty-vt");
 
 const log = std.log.scoped(.key_encode);
 
+pub const OptionAsAlt = @TypeOf(@as(ghostty.input.KeyEncodeOptions, undefined).macos_option_as_alt);
+
 pub fn encode(
     writer: anytype,
     key: ghostty.input.KeyEvent,
     terminal: *const ghostty.Terminal,
+    macos_option_as_alt: OptionAsAlt,
 ) !void {
     var opts = ghostty.input.KeyEncodeOptions.fromTerminal(terminal);
-    opts.macos_option_as_alt = .false;
+    opts.macos_option_as_alt = macos_option_as_alt;
     try ghostty.input.encodeKey(writer, key, opts);
 }
 

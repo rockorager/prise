@@ -27,6 +27,8 @@ jobs:
           version: latest
           args: --version
 
+      - uses: ./.github/actions/setup-lua-ls
+
       - name: Build
         run: zig build
 

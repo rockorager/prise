@@ -34,6 +34,7 @@ pub const LIMITS = struct {
     pub const TITLE_LEN_MAX: usize = 4096;
     pub const CWD_LEN_MAX: usize = 4096; // typical PATH_MAX
     pub const COLOR_QUERY_MAX: usize = 32;
+    pub const RESPONSE_QUEUE_MAX: usize = 64;
     pub const COLOR_QUERY_TIMEOUT_MS: i64 = 5000;
 };
 
@@ -74,6 +75,24 @@ const Pty = struct {
     const ColorQuery = struct {
         target: vt_handler.ColorTarget,
         timestamp_ms: i64,
+        response_slot: usize, // Index into response_queue for this query's response
+    };
+
+    const QueuedResponse = struct {
+        const Tag = enum { pending_color, ready };
+        tag: Tag,
+        data: [64]u8 = undefined,
+        len: usize = 0,
+
+        fn ready(response: []const u8) QueuedResponse {
+            var r: QueuedResponse = .{ .tag = .ready, .len = @min(response.len, 64) };
+            @memcpy(r.data[0..r.len], response[0..r.len]);
+            return r;
+        }
+
+        fn pendingColor() QueuedResponse {
+            return .{ .tag = .pending_color };
+        }
     };
 
     id: usize,
@@ -96,6 +115,12 @@ const Pty = struct {
     color_queries_buf: [LIMITS.COLOR_QUERY_MAX]ColorQuery = undefined,
     color_queries_len: usize = 0,
     color_queries_mutex: std.Thread.Mutex = .{},
+
+    // Response queue for ordered response delivery (ring buffer with absolute slots)
+    response_queue: [LIMITS.RESPONSE_QUEUE_MAX]QueuedResponse = undefined,
+    response_queue_head: usize = 0, // Next slot to flush (absolute, wraps)
+    response_queue_tail: usize = 0, // Next slot to allocate (absolute, wraps)
+    response_queue_start: i64 = 0, // Timestamp when first item was queued
 
     // Track color queries sent vs responses received
     color_queries_sent: usize = 0,
@@ -120,8 +145,9 @@ const Pty = struct {
     render_timer: ?io.Task = null,
     render_state: ghostty_vt.RenderState,
 
-    // Selection state: stores click position for drag selection
-    selection_start: ?struct { col: u16, row: u16 } = null,
+    // Selection state: stores click position for drag selection as a Pin
+    // to survive viewport scrolling during drag operations
+    selection_start: ?ghostty_vt.PageList.Pin = null,
     // Click counting for double/triple click
     left_click_count: u8 = 0,
     left_click_time: i64 = 0, // milliseconds timestamp
@@ -284,23 +310,11 @@ const Pty = struct {
 
         const now_ms = std.time.milliTimestamp();
 
-        // Expire old queries first
-        var i: usize = 0;
-        while (i < self.color_queries_len) {
-            if (now_ms - self.color_queries_buf[i].timestamp_ms > LIMITS.COLOR_QUERY_TIMEOUT_MS) {
-                // Shift remaining elements down
-                const remaining = self.color_queries_len - i - 1;
-                if (remaining > 0) {
-                    std.mem.copyForwards(
-                        ColorQuery,
-                        self.color_queries_buf[i..][0..remaining],
-                        self.color_queries_buf[i + 1 ..][0..remaining],
-                    );
-                }
-                self.color_queries_len -= 1;
-            } else {
-                i += 1;
-            }
+        // Check response queue capacity first
+        const queue_len = self.response_queue_tail - self.response_queue_head;
+        if (queue_len >= LIMITS.RESPONSE_QUEUE_MAX) {
+            log.warn("Response queue full, dropping color query", .{});
+            return;
         }
 
         if (self.color_queries_len >= LIMITS.COLOR_QUERY_MAX) {
@@ -308,21 +322,115 @@ const Pty = struct {
             return;
         }
 
+        // Allocate a slot in the response queue for this color query (absolute slot)
+        const slot = self.response_queue_tail;
+        self.response_queue[slot % LIMITS.RESPONSE_QUEUE_MAX] = QueuedResponse.pendingColor();
+        self.response_queue_tail += 1;
+        if (queue_len == 0) {
+            self.response_queue_start = now_ms;
+        }
+
         self.color_queries_buf[self.color_queries_len] = .{
             .target = target,
             .timestamp_ms = now_ms,
+            .response_slot = slot,
         };
         self.color_queries_len += 1;
+
+        // Signal dirty to trigger sending color queries to client
+        _ = posix.write(self.pipe_fds[1], "c") catch {};
     }
 
-    /// Queue a DA1 response to be sent after color queries are resolved.
+    /// Queue a DA1 response to be sent after all other responses are flushed.
     fn queueDa1(self: *Pty) void {
         self.color_queries_mutex.lock();
         defer self.color_queries_mutex.unlock();
 
         self.da1_pending = true;
         self.da1_timestamp_ms = std.time.milliTimestamp();
-        log.debug("DA1 queued for PTY {}", .{self.id});
+
+        // Try to send immediately if queue is empty, otherwise signal dirty
+        _ = self.flushResponsesUnlocked();
+        _ = posix.write(self.pipe_fds[1], "d") catch {};
+    }
+
+    /// Queue a response to be sent to the PTY in order.
+    fn queueResponse(self: *Pty, response: []const u8) void {
+        self.color_queries_mutex.lock();
+        defer self.color_queries_mutex.unlock();
+
+        const queue_len = self.response_queue_tail - self.response_queue_head;
+        if (queue_len >= LIMITS.RESPONSE_QUEUE_MAX) {
+            log.warn("Response queue full, dropping response", .{});
+            return;
+        }
+
+        self.response_queue[self.response_queue_tail % LIMITS.RESPONSE_QUEUE_MAX] = QueuedResponse.ready(response);
+        self.response_queue_tail += 1;
+        if (queue_len == 0) {
+            self.response_queue_start = std.time.milliTimestamp();
+        }
+    }
+
+    /// Fill in a color query response at its reserved slot.
+    fn fillColorResponse(self: *Pty, slot: usize, response: []const u8) void {
+        self.color_queries_mutex.lock();
+        defer self.color_queries_mutex.unlock();
+
+        // Slot must be within the current queue range (head <= slot < tail)
+        if (slot >= self.response_queue_head and slot < self.response_queue_tail) {
+            self.response_queue[slot % LIMITS.RESPONSE_QUEUE_MAX] = QueuedResponse.ready(response);
+        }
+    }
+
+    /// Try to flush ready responses from the front of the queue.
+    /// Returns true if there are still pending responses.
+    fn flushResponses(self: *Pty) bool {
+        self.color_queries_mutex.lock();
+        defer self.color_queries_mutex.unlock();
+        return self.flushResponsesUnlocked();
+    }
+
+    /// Flush responses without taking the lock (caller must hold color_queries_mutex).
+    fn flushResponsesUnlocked(self: *Pty) bool {
+        const now_ms = std.time.milliTimestamp();
+        const queue_len = self.response_queue_tail - self.response_queue_head;
+        const timed_out = queue_len > 0 and
+            (now_ms - self.response_queue_start > LIMITS.COLOR_QUERY_TIMEOUT_MS);
+
+        // Flush consecutive ready responses from the head
+        while (self.response_queue_head < self.response_queue_tail) {
+            const resp = &self.response_queue[self.response_queue_head % LIMITS.RESPONSE_QUEUE_MAX];
+            if (resp.tag == .pending_color) {
+                if (timed_out) {
+                    // Skip timed-out pending responses
+                    self.response_queue_head += 1;
+                    continue;
+                }
+                break; // Wait for this response
+            }
+            // Write ready response to PTY
+            writeAllFd(self.process.master, resp.data[0..resp.len]) catch |err| {
+                log.err("Failed to write response to PTY: {}", .{err});
+            };
+            self.response_queue_head += 1;
+        }
+
+        // Update start time if queue still has items
+        const new_queue_len = self.response_queue_tail - self.response_queue_head;
+        if (new_queue_len > 0 and new_queue_len < queue_len) {
+            self.response_queue_start = now_ms;
+        }
+
+        // Send DA1 if queue is empty and DA1 is pending
+        if (self.da1_pending and new_queue_len == 0) {
+            self.da1_pending = false;
+            writeAllFd(self.process.master, "\x1b[?1;2c") catch |err| {
+                log.err("Failed to write DA1 response to PTY: {}", .{err});
+            };
+        }
+
+        return new_queue_len > 0;
     }
 
     // Removed broadcast - we'll send msgpack-RPC redraw notifications instead
@@ -342,14 +450,13 @@ const Pty = struct {
         var handler = vt_handler.Handler.init(&self.terminal);
         defer handler.deinit();
 
-        // Set up the write callback so the handler can respond to queries
+        // Set up the write callback so the handler can respond to queries.
+        // Responses are queued to ensure proper ordering with async color responses.
         handler.setWriteCallback(self, struct {
             fn writeToPty(ctx: ?*anyopaque, data: []const u8) !void {
                 const pty_inst: *Pty = @ptrCast(@alignCast(ctx));
-                _ = posix.write(pty_inst.process.master, data) catch |err| {
-                    log.err("Failed to write to PTY: {}", .{err});
-                    return err;
-                };
+                pty_inst.queueResponse(data);
+                _ = pty_inst.flushResponses();
             }
         }.writeToPty);
 
@@ -986,6 +1093,7 @@ const Client = struct {
     send_queue: std.ArrayList([]u8),
     attached_ptys: std.ArrayList(usize),
     closing: bool = false,
+    macos_option_as_alt: key_encode.OptionAsAlt = .false,
     // Map style ID to its last known definition hash/attributes to detect changes
     // We store the Attributes struct directly.
     // style_cache: std.AutoHashMap(u16, redraw.UIEvent.Style.Attributes),
@@ -1295,14 +1403,25 @@ const Client = struct {
             var writer = std.Io.Writer.fixed(&encode_buf);
 
             pty_instance.terminal_mutex.lock();
-            key_encode.encode(&writer, key, &pty_instance.terminal) catch |err| {
+            key_encode.encode(&writer, key, &pty_instance.terminal, self.macos_option_as_alt) catch |err| {
                 log.err("Failed to encode key: {}", .{err});
                 pty_instance.terminal_mutex.unlock();
                 return;
             };
-            pty_instance.terminal_mutex.unlock();
 
             const encoded = writer.buffered();
+            if (encoded.len > 0 and !key.key.modifier()) {
+                pty_instance.terminal.scrollViewport(.bottom) catch |err| {
+                    log.err("Failed to scroll viewport: {}", .{err});
+                };
+                pty_instance.terminal.screens.active.select(null) catch {};
+            }
+            pty_instance.terminal_mutex.unlock();
+
+            if (encoded.len > 0 and !key.key.modifier()) {
+                _ = posix.write(pty_instance.pipe_fds[1], "x") catch {};
+            }
+
             if (encoded.len > 0) {
                 _ = posix.write(pty_instance.process.master, encoded) catch |err| {
                     log.err("Write to PTY failed: {}", .{err});
@@ -1418,7 +1537,6 @@ const Client = struct {
                     pty_instance.left_click_count = 1;
                 }
                 pty_instance.left_click_time = now;
-                pty_instance.selection_start = .{ .col = col, .row = row };
 
                 pty_instance.terminal_mutex.lock();
                 defer pty_instance.terminal_mutex.unlock();
@@ -1428,6 +1546,9 @@ const Client = struct {
                     .x = col,
                     .y = row,
                 } }) orelse return;
+
+                // Store the pin so it survives viewport scrolling during drag
+                pty_instance.selection_start = pin;
 
                 switch (pty_instance.left_click_count) {
                     1 => screen.select(null) catch {},
@@ -1451,10 +1572,9 @@ const Client = struct {
                     defer pty_instance.terminal_mutex.unlock();
 
                     const screen = pty_instance.terminal.screens.active;
-                    const start_pin = screen.pages.pin(.{ .viewport = .{
-                        .x = start.col,
-                        .y = start.row,
-                    } }) orelse return;
+
+                    // start is already a Pin (stored during press event)
+                    const start_pin = start;
                     const end_pin = screen.pages.pin(.{ .viewport = .{
                         .x = col,
                         .y = row,
@@ -1582,6 +1702,7 @@ const Client = struct {
                 ) catch |err| {
                     log.err("Resize terminal failed: {}", .{err});
                 };
+                pty_instance.terminal.screens.active.select(null) catch {};
             }
             // Update pixel dimensions for mouse encoding
             pty_instance.terminal.width_px = x_pixel;
@@ -1709,6 +1830,7 @@ const Client = struct {
         var b: ?u8 = null;
         var index: ?u8 = null;
         var kind: ?[]const u8 = null;
+        var slot: ?usize = null;
 
         for (notif.params.map) |kv| {
             if (kv.key != .string) continue;
@@ -1724,6 +1846,8 @@ const Client = struct {
                 index = parseU8(kv.value);
             } else if (std.mem.eql(u8, kv.key.string, "kind")) {
                 kind = if (kv.value == .string) kv.value.string else null;
+            } else if (std.mem.eql(u8, kv.key.string, "slot")) {
+                slot = parsePtyId(kv.value);
             }
         }
 
@@ -1741,6 +1865,10 @@ const Client = struct {
         };
         const blue = b orelse {
             log.warn("color_response: missing b", .{});
+            return;
+        };
+        const response_slot = slot orelse {
+            log.warn("color_response: missing slot", .{});
             return;
         };
 
@@ -1776,34 +1904,11 @@ const Client = struct {
             return;
         };
 
-        writeAllFd(pty_instance.process.master, response) catch |err| {
-            log.err("Failed to write color response to PTY: {}", .{err});
-            return;
-        };
+        // Fill the response into its slot and try to flush
+        pty_instance.fillColorResponse(response_slot, response);
+        _ = pty_instance.flushResponses();
 
-        // Track response received and check if DA1 can be sent now
-        {
-            pty_instance.color_queries_mutex.lock();
-            defer pty_instance.color_queries_mutex.unlock();
-
-            pty_instance.color_queries_received += 1;
-
-            // If DA1 is pending and all queries are responded, send it now
-            if (pty_instance.da1_pending and
-                pty_instance.color_queries_received >= pty_instance.color_queries_sent and
-                pty_instance.color_queries_len == 0)
-            {
-                pty_instance.da1_pending = false;
-                pty_instance.color_queries_sent = 0;
-                pty_instance.color_queries_received = 0;
-                writeAllFd(pty_instance.process.master, "\x1b[?1;2c") catch |err| {
-                    log.err("Failed to write DA1 response to PTY: {}", .{err});
-                };
-                log.debug("Sent DA1 response to PTY {} (triggered by color_response)", .{pid});
-            }
-        }
-
-        log.debug("Sent color response to PTY {}: {s}", .{ pid, response });
+        log.debug("Filled color response slot {} for PTY {}: {s}", .{ response_slot, pid, response });
     }
 
     /// Parse u8 from msgpack value, returns null if invalid type.
@@ -1927,12 +2032,13 @@ const Server = struct {
     /// Timestamp (ms since epoch) when server started - used to detect server restarts
     start_time_ms: i64 = 0,
 
-    fn parseSpawnPtyParams(params: msgpack.Value) struct { size: pty.Winsize, attach: bool, cwd: ?[]const u8, env: ?[]const msgpack.Value } {
+    fn parseSpawnPtyParams(params: msgpack.Value) struct { size: pty.Winsize, attach: bool, cwd: ?[]const u8, env: ?[]const msgpack.Value, macos_option_as_alt: key_encode.OptionAsAlt } {
         var rows: u16 = 24;
         var cols: u16 = 80;
         var attach: bool = false;
         var cwd: ?[]const u8 = null;
         var env: ?[]const msgpack.Value = null;
+        var macos_option_as_alt: key_encode.OptionAsAlt = .false;
 
         if (params == .map) {
             for (params.map) |kv| {
@@ -1947,6 +2053,8 @@ const Server = struct {
                     cwd = kv.value.string;
                 } else if (std.mem.eql(u8, kv.key.string, "env") and kv.value == .array) {
                     env = kv.value.array;
+                } else if (std.mem.eql(u8, kv.key.string, "macos_option_as_alt")) {
+                    macos_option_as_alt = parseMacosOptionAsAlt(kv.value);
                 }
             }
         }
@@ -1961,6 +2069,7 @@ const Server = struct {
             .attach = attach,
             .cwd = cwd,
             .env = env,
+            .macos_option_as_alt = macos_option_as_alt,
         };
     }
 
@@ -1981,8 +2090,13 @@ const Server = struct {
         return parsePtyId(params);
     }
 
-    fn parseAttachPtyParams(params: msgpack.Value) !usize {
-        return parsePtyId(params);
+    fn parseAttachPtyParams(params: msgpack.Value) !struct { pty_id: usize, macos_option_as_alt: key_encode.OptionAsAlt } {
+        const pty_id = try parsePtyId(params);
+        const macos_option_as_alt = if (params == .array and params.array.len >= 2)
+            parseMacosOptionAsAlt(params.array[1])
+        else
+            .false;
+        return .{ .pty_id = pty_id, .macos_option_as_alt = macos_option_as_alt };
     }
 
     fn parsePtyId(params: msgpack.Value) !usize {
@@ -1994,6 +2108,21 @@ const Server = struct {
             .integer => |i| @intCast(i),
             else => error.InvalidParams,
         };
+    }
+
+    fn parseMacosOptionAsAlt(value: msgpack.Value) key_encode.OptionAsAlt {
+        if (value == .string) {
+            if (std.mem.eql(u8, value.string, "left")) {
+                return .left;
+            } else if (std.mem.eql(u8, value.string, "right")) {
+                return .right;
+            } else if (std.mem.eql(u8, value.string, "true")) {
+                return .true;
+            }
+        } else if (value == .boolean and value.boolean) {
+            return .true;
+        }
+        return .false;
     }
 
     fn parseWritePtyParams(params: msgpack.Value) !struct { id: usize, data: []const u8 } {
@@ -2033,16 +2162,6 @@ const Server = struct {
             .cols = @intCast(params.array[2].unsigned),
             .x_pixel = x_pixel,
             .y_pixel = y_pixel,
-        };
-    }
-
-    fn parseDetachPtyParams(params: msgpack.Value) !struct { id: usize, client_fd: posix.fd_t } {
-        if (params != .array or params.array.len < 2 or params.array[0] != .unsigned or params.array[1] != .unsigned) {
-            return error.InvalidParams;
-        }
-        return .{
-            .id = @intCast(params.array[0].unsigned),
-            .client_fd = @intCast(params.array[1].unsigned),
         };
     }
 
@@ -2108,6 +2227,7 @@ const Server = struct {
         });
 
         if (parsed.attach) {
+            client.macos_option_as_alt = parsed.macos_option_as_alt;
             try pty_instance.addClient(self.allocator, client);
             try client.attached_ptys.append(self.allocator, pty_id);
 
@@ -2141,28 +2261,30 @@ const Server = struct {
 
     fn handleAttachPty(self: *Server, client: *Client, params: msgpack.Value) !msgpack.Value {
         log.info("attach_pty called with params: {}", .{params});
-        const pty_id = parseAttachPtyParams(params) catch |err| {
+        const parsed = parseAttachPtyParams(params) catch |err| {
             log.warn("attach_pty: invalid params: {}", .{err});
             return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
         };
 
-        log.info("attach_pty: pty_id={} client_fd={}", .{ pty_id, client.fd });
+        log.info("attach_pty: pty_id={} client_fd={} macos_option_as_alt={}", .{ parsed.pty_id, client.fd, parsed.macos_option_as_alt });
 
-        const pty_instance = self.ptys.get(pty_id) orelse {
-            log.warn("attach_pty: PTY {} not found", .{pty_id});
+        const pty_instance = self.ptys.get(parsed.pty_id) orelse {
+            log.warn("attach_pty: PTY {} not found", .{parsed.pty_id});
             return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
         };
 
+        client.macos_option_as_alt = parsed.macos_option_as_alt;
+
         try pty_instance.addClient(self.allocator, client);
-        try client.attached_ptys.append(self.allocator, pty_id);
-        log.info("Client {} attached to PTY {}", .{ client.fd, pty_id });
+        try client.attached_ptys.append(self.allocator, parsed.pty_id);
+        log.info("Client {} attached to PTY {}", .{ client.fd, parsed.pty_id });
 
         const msg = try buildRedrawMessageFromPty(self.allocator, pty_instance, .full);
         defer self.allocator.free(msg);
 
         try self.sendRedraw(self.loop, pty_instance, msg, client);
 
-        return msgpack.Value{ .unsigned = pty_id };
+        return msgpack.Value{ .unsigned = parsed.pty_id };
     }
 
     fn handleWritePty(self: *Server, params: msgpack.Value) !msgpack.Value {
@@ -2182,7 +2304,7 @@ const Server = struct {
         return msgpack.Value.nil;
     }
 
-    fn handleResizePty(self: *Server, params: msgpack.Value) !msgpack.Value {
+    fn handleResizePty(self: *Server, client: *Client, params: msgpack.Value) !msgpack.Value {
         const args = parseResizePtyParams(params) catch {
             return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
         };
@@ -2250,61 +2372,58 @@ const Server = struct {
 
         pty_instance.terminal_mutex.unlock();
 
+        // Send full redraw to client so the resized terminal content is visible
+        // immediately, without waiting for the child process to produce output
+        const msg = buildRedrawMessageFromPty(self.allocator, pty_instance, .full) catch |err| {
+            log.warn("resize_pty request: failed to build redraw message: {}", .{err});
+            return msgpack.Value.nil;
+        };
+        defer self.allocator.free(msg);
+
+        self.sendRedraw(self.loop, pty_instance, msg, client) catch |err| {
+            log.warn("resize_pty request: failed to send redraw: {}", .{err});
+        };
+
         log.info("Resized PTY {} to {}x{} ({}x{}px)", .{ args.id, args.cols, args.rows, args.x_pixel, args.y_pixel });
         return msgpack.Value.nil;
     }
 
-    fn handleDetachPty(self: *Server, params: msgpack.Value) !msgpack.Value {
-        const args = parseDetachPtyParams(params) catch {
-            return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
+    fn handleDetachPty(self: *Server, client: *Client, params: msgpack.Value) !msgpack.Value {
+        const pty_id: usize = switch (params) {
+            .unsigned => |u| u,
+            .integer => |i| @intCast(i),
+            .array => |arr| blk: {
+                if (arr.len < 1) return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
+                break :blk switch (arr[0]) {
+                    .unsigned => |u| u,
+                    .integer => |i| @intCast(i),
+                    else => return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") },
+                };
+            },
+            else => return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") },
         };
 
-        const pty_instance = self.ptys.get(args.id) orelse {
+        const pty_instance = self.ptys.get(pty_id) orelse {
             return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
         };
 
-        for (self.clients.items) |c| {
-            if (c.fd == args.client_fd) {
-                pty_instance.removeClient(c);
-                for (c.attached_ptys.items, 0..) |pid, i| {
-                    if (pid == args.id) {
-                        _ = c.attached_ptys.swapRemove(i);
-                        break;
-                    }
-                }
-                log.info("Client {} detached from PTY {}", .{ c.fd, args.id });
+        pty_instance.removeClient(client);
+        for (client.attached_ptys.items, 0..) |pid, i| {
+            if (pid == pty_id) {
+                _ = client.attached_ptys.swapRemove(i);
                 break;
             }
         }
+        log.info("Client {} detached from PTY {}", .{ client.fd, pty_id });
 
         return msgpack.Value.nil;
     }
 
-    fn handleDetachPtys(self: *Server, params: msgpack.Value) !msgpack.Value {
-        const params_arr = switch (params) {
+    fn handleDetachPtys(self: *Server, client: *Client, params: msgpack.Value) !msgpack.Value {
+        const pty_ids = switch (params) {
             .array => |arr| arr,
             else => return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") },
         };
-        if (params_arr.len < 2) {
-            return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
-        }
-        const pty_ids = switch (params_arr[0]) {
-            .array => |arr| arr,
-            else => return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") },
-        };
-        const client_fd: posix.fd_t = switch (params_arr[1]) {
-            .unsigned => |u| @intCast(u),
-            .integer => |i| @intCast(i),
-            else => return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") },
-        };
-
-        var matching_client: ?*Client = null;
-        for (self.clients.items) |c| {
-            if (c.fd == client_fd) {
-                matching_client = c;
-                break;
-            }
-        }
 
         for (pty_ids) |pty_id_val| {
             const pty_id: usize = switch (pty_id_val) {
@@ -2314,16 +2433,14 @@ const Server = struct {
             };
 
             if (self.ptys.get(pty_id)) |pty_instance| {
-                if (matching_client) |c| {
-                    pty_instance.removeClient(c);
-                    for (c.attached_ptys.items, 0..) |pid, i| {
-                        if (pid == pty_id) {
-                            _ = c.attached_ptys.swapRemove(i);
-                            break;
-                        }
+                pty_instance.removeClient(client);
+                for (client.attached_ptys.items, 0..) |pid, i| {
+                    if (pid == pty_id) {
+                        _ = client.attached_ptys.swapRemove(i);
+                        break;
                     }
                 }
-                std.log.info("Client detached from PTY {}", .{pty_id});
+                std.log.info("Client {} detached from PTY {}", .{ client.fd, pty_id });
             }
         }
 
@@ -2450,11 +2567,11 @@ const Server = struct {
         } else if (std.mem.eql(u8, method, "write_pty")) {
             return self.handleWritePty(params);
         } else if (std.mem.eql(u8, method, "resize_pty")) {
-            return self.handleResizePty(params);
+            return self.handleResizePty(client, params);
         } else if (std.mem.eql(u8, method, "detach_pty")) {
-            return self.handleDetachPty(params);
+            return self.handleDetachPty(client, params);
         } else if (std.mem.eql(u8, method, "detach_ptys")) {
-            return self.handleDetachPtys(params);
+            return self.handleDetachPtys(client, params);
         } else if (std.mem.eql(u8, method, "get_selection")) {
             return self.handleGetSelection(params);
         } else if (std.mem.eql(u8, method, "clear_selection")) {
@@ -2697,11 +2814,12 @@ const Server = struct {
                 continue;
             }
 
-            // Build notification params based on target type
-            var map_items = try self.allocator.alloc(msgpack.Value.KeyValue, 2);
+            // Build notification params based on target type (include slot for response routing)
+            var map_items = try self.allocator.alloc(msgpack.Value.KeyValue, 3);
             defer self.allocator.free(map_items);
 
             map_items[0] = .{ .key = .{ .string = "pty_id" }, .value = .{ .unsigned = pty_instance.id } };
+            map_items[2] = .{ .key = .{ .string = "slot" }, .value = .{ .unsigned = query.response_slot } };
 
             switch (query.target) {
                 .palette => |idx| {
@@ -2749,29 +2867,8 @@ const Server = struct {
             removeFirst(pty_instance);
         }
 
-        // Check if we should send pending DA1 response
-        // Send if: all sent queries have been responded to, OR DA1 has timed out
-        if (pty_instance.da1_pending) {
-            const da1_timed_out = now_ms - pty_instance.da1_timestamp_ms > LIMITS.COLOR_QUERY_TIMEOUT_MS;
-            const all_responded = pty_instance.color_queries_received >= pty_instance.color_queries_sent and
-                pty_instance.color_queries_len == 0;
-
-            if (all_responded or da1_timed_out) {
-                pty_instance.da1_pending = false;
-                // Reset counters for next batch
-                pty_instance.color_queries_sent = 0;
-                pty_instance.color_queries_received = 0;
-                // Send DA1 response: ESC [ ? 1 ; 2 c
-                writeAllFd(pty_instance.process.master, "\x1b[?1;2c") catch |err| {
-                    log.err("Failed to write DA1 response to PTY: {}", .{err});
-                };
-                log.debug("Sent DA1 response to PTY {} (all_responded={}, timed_out={})", .{
-                    pty_instance.id,
-                    all_responded,
-                    da1_timed_out,
-                });
-            }
-        }
+        // Try to flush any ready responses (lock is already held)
+        _ = pty_instance.flushResponsesUnlocked();
     }
 
     fn shutdown(self: *Server) void {
@@ -3339,8 +3436,14 @@ test "parseAttachPtyParams" {
     const testing = std.testing;
 
     var valid_args = [_]msgpack.Value{.{ .unsigned = 42 }};
-    const id = try Server.parseAttachPtyParams(.{ .array = &valid_args });
-    try testing.expectEqual(@as(usize, 42), id);
+    const result = try Server.parseAttachPtyParams(.{ .array = &valid_args });
+    try testing.expectEqual(@as(usize, 42), result.pty_id);
+    try testing.expectEqual(key_encode.OptionAsAlt.false, result.macos_option_as_alt);
+
+    var valid_args_with_opt = [_]msgpack.Value{ .{ .unsigned = 42 }, .{ .string = "left" } };
+    const result2 = try Server.parseAttachPtyParams(.{ .array = &valid_args_with_opt });
+    try testing.expectEqual(@as(usize, 42), result2.pty_id);
+    try testing.expectEqual(key_encode.OptionAsAlt.left, result2.macos_option_as_alt);
 
     var invalid_args = [_]msgpack.Value{};
     try testing.expectError(error.InvalidParams, Server.parseAttachPtyParams(.{ .array = &invalid_args }));
@@ -3386,18 +3489,6 @@ test "parseResizePtyParams" {
     try testing.expectEqual(@as(u16, 80), p_args.cols);
     try testing.expectEqual(@as(u16, 800), p_args.x_pixel);
     try testing.expectEqual(@as(u16, 600), p_args.y_pixel);
-}
-
-test "parseDetachPtyParams" {
-    const testing = std.testing;
-
-    var valid_args = [_]msgpack.Value{
-        .{ .unsigned = 42 },
-        .{ .unsigned = 10 },
-    };
-    const args = try Server.parseDetachPtyParams(.{ .array = &valid_args });
-    try testing.expectEqual(@as(usize, 42), args.id);
-    try testing.expectEqual(@as(posix.fd_t, 10), args.client_fd);
 }
 
 test "buildRedrawMessageFromPty" {

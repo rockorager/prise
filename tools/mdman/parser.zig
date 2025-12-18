@@ -152,10 +152,26 @@ const Parser = struct {
         const term_line = self.consumeLine();
         const term = try self.parseInline(term_line);
 
-        // Consume : line
+        // Consume : line and any continuation lines (indented with spaces)
         const desc_line = self.consumeLine();
         const desc_text = std.mem.trimLeft(u8, desc_line[1..], " \t"); // skip ':' and whitespace
-        const description = try self.parseInline(desc_text);
+
+        var full_desc: std.ArrayListUnmanaged(u8) = .empty;
+        try full_desc.appendSlice(self.allocator, desc_text);
+
+        // Continue consuming indented lines
+        while (!self.isAtEnd()) {
+            const next_line = self.peekLine();
+            // Stop at blank line or non-indented line
+            if (next_line.len == 0) break;
+            if (!std.mem.startsWith(u8, next_line, "    ")) break;
+
+            _ = self.consumeLine();
+            try full_desc.append(self.allocator, ' ');
+            try full_desc.appendSlice(self.allocator, std.mem.trimLeft(u8, next_line, " \t"));
+        }
+
+        const description = try self.parseInline(full_desc.items);
 
         return .{ .definition = .{ .term = term, .description = description } };
     }

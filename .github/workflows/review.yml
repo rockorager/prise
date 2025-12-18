@@ -52,6 +52,8 @@ jobs:
         with:
           version: 0.15.2
 
+      - uses: ./.github/actions/setup-lua-ls
+
       - name: Gather PR context
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

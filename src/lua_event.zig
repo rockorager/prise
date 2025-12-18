@@ -7,9 +7,15 @@ const ziglua = @import("zlua");
 
 const msgpack = @import("msgpack.zig");
 const Surface = @import("Surface.zig");
+const TextInput = @import("TextInput.zig");
 const vaxis_helper = @import("vaxis_helper.zig");
 
 const log = std.log.scoped(.lua_event);
+
+pub const CellSize = struct {
+    width: u16,
+    height: u16,
+};
 
 pub const PtyAttachInfo = struct {
     id: u32,
@@ -22,6 +28,7 @@ pub const PtyAttachInfo = struct {
     close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
     copy_selection_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
+    cell_size_fn: *const fn (app: *anyopaque) CellSize,
 };
 
 pub const PtyExitedInfo = struct {
@@ -130,6 +137,7 @@ fn pushPtyAttachEvent(lua: *ziglua.Lua, info: PtyAttachInfo) void {
         .close_fn = info.close_fn,
         .cwd_fn = info.cwd_fn,
         .copy_selection_fn = info.copy_selection_fn,
+        .cell_size_fn = info.cell_size_fn,
     };
 
     _ = lua.getMetatableRegistry("PrisePty");
@@ -382,6 +390,7 @@ const PtyHandle = struct {
     close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
     copy_selection_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
+    cell_size_fn: *const fn (app: *anyopaque) CellSize,
 };
 
 fn ptyIndex(lua: *ziglua.Lua) i32 {
@@ -431,11 +440,16 @@ fn ptyIndex(lua: *ziglua.Lua) i32 {
 
 fn ptySize(lua: *ziglua.Lua) i32 {
     const pty = lua.checkUserdata(PtyHandle, 1, "PrisePty");
-    lua.createTable(0, 2);
+    const cell_size = pty.cell_size_fn(pty.app);
+    lua.createTable(0, 4);
     lua.pushInteger(@intCast(pty.surface.rows));
     lua.setField(-2, "rows");
     lua.pushInteger(@intCast(pty.surface.cols));
     lua.setField(-2, "cols");
+    lua.pushInteger(@intCast(@as(u32, pty.surface.cols) * cell_size.width));
+    lua.setField(-2, "width_px");
+    lua.pushInteger(@intCast(@as(u32, pty.surface.rows) * cell_size.height));
+    lua.setField(-2, "height_px");
     return 1;
 }
 
@@ -643,11 +657,12 @@ pub fn luaToMsgpack(lua: *ziglua.Lua, index: i32, allocator: std.mem.Allocator) 
     }
 }
 
-pub fn getPtyId(lua: *ziglua.Lua, index: i32) !u32 {
-    if (lua.typeOf(index) == .number) {
-        return @intCast(try lua.toInteger(index));
-    }
+pub const PtyInfo = struct {
+    id: u32,
+    surface: *Surface,
+};
 
+pub fn getPtyInfo(lua: *ziglua.Lua, index: i32) !PtyInfo {
     if (lua.isUserdata(index)) {
         lua.getMetatable(index) catch return error.InvalidPty;
 
@@ -657,22 +672,33 @@ pub fn getPtyId(lua: *ziglua.Lua, index: i32) !u32 {
 
         if (equal) {
             const pty = try lua.toUserdata(PtyHandle, index);
-            return pty.id;
+            return .{ .id = pty.id, .surface = pty.surface };
         }
     }
 
     return error.InvalidPty;
 }
 
-const TextInputHandle = struct {
-    id: u32,
-};
-
-pub fn getTextInputId(lua: *ziglua.Lua, index: i32) !u32 {
+pub fn getPtyId(lua: *ziglua.Lua, index: i32) !u32 {
     if (lua.typeOf(index) == .number) {
         return @intCast(try lua.toInteger(index));
     }
 
+    const info = try getPtyInfo(lua, index);
+    return info.id;
+}
+
+const TextInputHandle = struct {
+    id: u32,
+    input: *TextInput,
+};
+
+pub const TextInputInfo = struct {
+    id: u32,
+    input: *TextInput,
+};
+
+pub fn getTextInputInfo(lua: *ziglua.Lua, index: i32) !TextInputInfo {
     if (lua.isUserdata(index)) {
         lua.getMetatable(index) catch return error.InvalidTextInput;
 
@@ -682,11 +708,20 @@ pub fn getTextInputId(lua: *ziglua.Lua, index: i32) !u32 {
 
         if (equal) {
             const handle = try lua.toUserdata(TextInputHandle, index);
-            return handle.id;
+            return .{ .id = handle.id, .input = handle.input };
         }
     }
 
     return error.InvalidTextInput;
+}
+
+pub fn getTextInputId(lua: *ziglua.Lua, index: i32) !u32 {
+    if (lua.typeOf(index) == .number) {
+        return @intCast(try lua.toInteger(index));
+    }
+
+    const info = try getTextInputInfo(lua, index);
+    return info.id;
 }
 
 pub fn pushPtyUserdata(
@@ -701,6 +736,7 @@ pub fn pushPtyUserdata(
     close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
     copy_selection_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
+    cell_size_fn: *const fn (app: *anyopaque) CellSize,
 ) !void {
     const pty = lua.newUserdata(PtyHandle, @sizeOf(PtyHandle));
     pty.* = .{
@@ -714,6 +750,7 @@ pub fn pushPtyUserdata(
         .close_fn = close_fn,
         .cwd_fn = cwd_fn,
         .copy_selection_fn = copy_selection_fn,
+        .cell_size_fn = cell_size_fn,
     };
 
     _ = lua.getMetatableRegistry("PrisePty");

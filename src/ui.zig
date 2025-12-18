@@ -3,9 +3,11 @@
 const std = @import("std");
 
 const vaxis = @import("vaxis");
+const zeit = @import("zeit");
 const ziglua = @import("zlua");
 
 const io = @import("io.zig");
+const keybind = @import("keybind.zig");
 const lua_event = @import("lua_event.zig");
 const msgpack = @import("msgpack.zig");
 const Surface = @import("Surface.zig");
@@ -67,6 +69,7 @@ fn registerTimerMetatable(lua: *ziglua.Lua) void {
 pub const UI = struct {
     allocator: std.mem.Allocator,
     lua: *ziglua.Lua,
+    local_tz: zeit.TimeZone,
     loop: ?*io.Loop = null,
     exit_callback: ?*const fn (ctx: *anyopaque) void = null,
     exit_ctx: *anyopaque = undefined,
@@ -78,6 +81,8 @@ pub const UI = struct {
     detach_ctx: *anyopaque = undefined,
     save_callback: ?*const fn (ctx: *anyopaque) void = null,
     save_ctx: *anyopaque = undefined,
+    switch_session_callback: ?*const fn (ctx: *anyopaque, target_session: []const u8) anyerror!void = null,
+    switch_session_ctx: *anyopaque = undefined,
     get_session_name_callback: ?*const fn (ctx: *anyopaque) ?[]const u8 = null,
     get_session_name_ctx: *anyopaque = undefined,
     rename_session_callback: ?*const fn (ctx: *anyopaque, new_name: []const u8) anyerror!void = null,
@@ -92,59 +97,70 @@ pub const UI = struct {
         cwd: ?[]const u8 = null,
     };
 
-    pub fn init(allocator: std.mem.Allocator) !UI {
-        const lua = try ziglua.Lua.init(allocator);
+    pub const InitError = struct {
+        err: anyerror,
+        lua_msg: ?[:0]const u8,
+    };
+
+    pub const InitResult = union(enum) {
+        ok: UI,
+        err: InitError,
+    };
+
+    pub fn init(allocator: std.mem.Allocator) InitResult {
+        const lua = ziglua.Lua.init(allocator) catch |err| {
+            return .{ .err = .{ .err = err, .lua_msg = null } };
+        };
         errdefer lua.deinit();
+
+        const local_tz = zeit.local(allocator, null) catch |err| {
+            return .{ .err = .{ .err = err, .lua_msg = null } };
+        };
+        errdefer local_tz.deinit();
 
         lua.openLibs();
 
         // Add prise lua paths to package.path for runtime loading
-        const home = std.posix.getenv("HOME") orelse return error.NoHomeDirectory;
-        _ = try lua.getGlobal("package");
+        const home = std.posix.getenv("HOME") orelse {
+            return .{ .err = .{ .err = error.NoHomeDirectory, .lua_msg = null } };
+        };
+        _ = lua.getGlobal("package") catch |err| {
+            return .{ .err = .{ .err = err, .lua_msg = null } };
+        };
         _ = lua.getField(-1, "path");
         const current_path = lua.toString(-1) catch "";
         lua.pop(1);
 
-        const extra_paths = try std.fmt.allocPrint(
+        const extra_paths = std.fmt.allocPrint(
             allocator,
-            "{s}/.local/share/prise/lua/?.lua;/usr/local/share/prise/lua/?.lua;/usr/share/prise/lua/?.lua;{s}",
+            "{s}/.local/share/prise/lua/?.lua;/usr/local/share/prise/lua/?.lua;/usr/share/prise/lua/?.lua;/opt/homebrew/share/prise/lua/?.lua;{s}",
             .{ home, current_path },
-        );
+        ) catch |err| {
+            return .{ .err = .{ .err = err, .lua_msg = null } };
+        };
         defer allocator.free(extra_paths);
         _ = lua.pushString(extra_paths);
         lua.setField(-2, "path");
         lua.pop(1);
 
         // Register prise module loader (always use embedded for API stability)
-        _ = try lua.getGlobal("package");
+        _ = lua.getGlobal("package") catch |err| {
+            return .{ .err = .{ .err = err, .lua_msg = null } };
+        };
         _ = lua.getField(-1, "preload");
         lua.pushFunction(ziglua.wrap(loadPriseModule));
         lua.setField(-2, "prise");
 
-        // Only register embedded tiling UI if not found on disk
-        // (preload takes precedence over path, so we check explicitly)
-        const tiling_on_disk = blk: {
-            const user_path = try std.fs.path.join(allocator, &.{ home, ".local", "share", "prise", "lua", "prise_tiling_ui.lua" });
-            defer allocator.free(user_path);
-            const paths = [_][]const u8{
-                user_path,
-                "/usr/local/share/prise/lua/prise_tiling_ui.lua",
-                "/usr/share/prise/lua/prise_tiling_ui.lua",
-            };
-            for (paths) |p| {
-                std.fs.accessAbsolute(p, .{}) catch continue;
-                break :blk true;
-            }
-            break :blk false;
-        };
-        if (!tiling_on_disk) {
-            lua.pushFunction(ziglua.wrap(loadTilingUiModule));
-            lua.setField(-2, "prise_tiling_ui");
-        }
+        // Always use embedded tiling UI module for runtime
+        // (installed to disk only for LSP completion support)
+        lua.pushFunction(ziglua.wrap(loadTilingUiModule));
+        lua.setField(-2, "prise_tiling_ui");
         lua.pop(2);
 
         // Try to load ~/.config/prise/init.lua
-        const config_path = try std.fs.path.joinZ(allocator, &.{ home, ".config", "prise", "init.lua" });
+        const config_path = std.fs.path.joinZ(allocator, &.{ home, ".config", "prise", "init.lua" }) catch |err| {
+            return .{ .err = .{ .err = err, .lua_msg = null } };
+        };
         defer allocator.free(config_path);
 
         // If init.lua doesn't exist, use default UI
@@ -159,19 +175,19 @@ pub const UI = struct {
             lua.doString(fallback_init) catch {
                 const msg = lua.toString(-1) catch "unknown error";
                 log.err("Failed to load default UI: {s}", .{msg});
-                return error.DefaultUIFailed;
+                return .{ .err = .{ .err = error.DefaultUIFailed, .lua_msg = msg } };
             };
         } else {
             lua.doFile(config_path) catch {
                 const msg = lua.toString(-1) catch "unknown error";
                 log.err("Failed to load init.lua: {s}", .{msg});
-                return error.InitLuaFailed;
+                return .{ .err = .{ .err = error.InitLuaFailed, .lua_msg = msg } };
             };
         }
 
         // init.lua should return a table with update and view functions
         if (lua.typeOf(-1) != .table) {
-            return error.InitLuaMustReturnTable;
+            return .{ .err = .{ .err = error.InitLuaMustReturnTable, .lua_msg = null } };
         }
 
         // Store the UI table in registry
@@ -180,17 +196,18 @@ pub const UI = struct {
         // Initialize PrisePty metatable
         lua_event.registerMetatable(lua) catch |err| {
             log.err("Failed to register metatable: {}", .{err});
-            return err;
+            return .{ .err = .{ .err = err, .lua_msg = null } };
         };
 
         // Initialize TextInput metatable
         registerTextInputMetatable(lua);
 
-        return .{
+        return .{ .ok = .{
             .allocator = allocator,
             .lua = lua,
+            .local_tz = local_tz,
             .text_inputs = std.AutoHashMap(u32, *TextInput).init(allocator),
-        };
+        } };
     }
 
     pub fn setLoop(self: *UI, loop: *io.Loop) void {
@@ -223,6 +240,11 @@ pub const UI = struct {
     pub fn setSaveCallback(self: *UI, ctx: *anyopaque, cb: *const fn (ctx: *anyopaque) void) void {
         self.save_ctx = ctx;
         self.save_callback = cb;
+    }
+
+    pub fn setSwitchSessionCallback(self: *UI, ctx: *anyopaque, cb: *const fn (ctx: *anyopaque, target_session: []const u8) anyerror!void) void {
+        self.switch_session_ctx = ctx;
+        self.switch_session_callback = cb;
     }
 
     pub fn setGetSessionNameCallback(self: *UI, ctx: *anyopaque, cb: *const fn (ctx: *anyopaque) ?[]const u8) void {
@@ -357,6 +379,14 @@ pub const UI = struct {
         lua.pushFunction(ziglua.wrap(createTextInput));
         lua.setField(-2, "create_text_input");
 
+        // Register list_sessions
+        lua.pushFunction(ziglua.wrap(listSessions));
+        lua.setField(-2, "list_sessions");
+
+        // Register switch_session
+        lua.pushFunction(ziglua.wrap(switchSession));
+        lua.setField(-2, "switch_session");
+
         // Register log
         lua.createTable(0, 4);
 
@@ -390,7 +420,19 @@ pub const UI = struct {
         lua.pushFunction(ziglua.wrap(gwidth));
         lua.setField(-2, "gwidth");
 
+        // Register get_time
+        lua.pushFunction(ziglua.wrap(getTime));
+        lua.setField(-2, "get_time");
+
+        // Register get_git_branch
+        lua.pushFunction(ziglua.wrap(getGitBranch));
+        lua.setField(-2, "get_git_branch");
+
         registerTimerMetatable(lua);
+
+        // Register keybind module
+        keybind.registerKeybindModule(lua);
+        lua.setField(-2, "keybind");
 
         return 1;
     }
@@ -499,6 +541,99 @@ pub const UI = struct {
             };
             lua.pushBoolean(true);
         } else {
+            lua.pushBoolean(false);
+        }
+        return 1;
+    }
+
+    fn listSessions(lua: *ziglua.Lua) i32 {
+        _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
+        const ui_ptr = lua.toPointer(-1) catch {
+            lua.createTable(0, 0);
+            return 1;
+        };
+        lua.pop(1);
+        const ui: *UI = @ptrCast(@alignCast(@constCast(ui_ptr)));
+
+        const home = std.posix.getenv("HOME") orelse {
+            lua.createTable(0, 0);
+            return 1;
+        };
+
+        const sessions_dir = std.fs.path.join(ui.allocator, &.{ home, ".local", "state", "prise", "sessions" }) catch {
+            lua.createTable(0, 0);
+            return 1;
+        };
+        defer ui.allocator.free(sessions_dir);
+
+        var dir = std.fs.openDirAbsolute(sessions_dir, .{ .iterate = true }) catch {
+            lua.createTable(0, 0);
+            return 1;
+        };
+        defer dir.close();
+
+        // Collect session names in a single pass
+        var names: std.ArrayList([]const u8) = .empty;
+        defer {
+            for (names.items) |name| {
+                ui.allocator.free(name);
+            }
+            names.deinit(ui.allocator);
+        }
+
+        var iter = dir.iterate();
+        while (iter.next() catch null) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.name, ".json")) continue;
+            const name_without_ext = entry.name[0 .. entry.name.len - 5];
+            const duped = ui.allocator.dupe(u8, name_without_ext) catch continue;
+            names.append(ui.allocator, duped) catch {
+                ui.allocator.free(duped);
+                continue;
+            };
+        }
+
+        lua.createTable(@intCast(names.items.len), 0);
+        for (names.items, 1..) |name, idx| {
+            _ = lua.pushString(name);
+            lua.rawSetIndex(-2, @intCast(idx));
+        }
+
+        return 1;
+    }
+
+    fn switchSession(lua: *ziglua.Lua) i32 {
+        _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
+        const ui_ptr = lua.toPointer(-1) catch {
+            log.warn("switchSession: failed to get ui pointer", .{});
+            lua.pushBoolean(false);
+            return 1;
+        };
+        lua.pop(1);
+        const ui: *UI = @ptrCast(@alignCast(@constCast(ui_ptr)));
+
+        const target_session_lua = lua.toString(1) catch {
+            log.warn("switchSession: failed to get target session name", .{});
+            lua.pushBoolean(false);
+            return 1;
+        };
+
+        const target_session = ui.allocator.dupe(u8, target_session_lua) catch {
+            log.warn("switchSession: failed to allocate target session name", .{});
+            lua.pushBoolean(false);
+            return 1;
+        };
+        defer ui.allocator.free(target_session);
+
+        log.info("switchSession: called with target_session='{s}'", .{target_session});
+
+        if (ui.switch_session_callback) |cb| {
+            cb(ui.switch_session_ctx, target_session) catch |err| {
+                lua.raiseErrorStr("Failed to switch session: %s", .{@errorName(err).ptr});
+            };
+            lua.pushBoolean(true);
+        } else {
+            log.warn("switchSession: no callback registered", .{});
             lua.pushBoolean(false);
         }
         return 1;
@@ -648,6 +783,70 @@ pub const UI = struct {
         return 1;
     }
 
+    fn getTime(lua: *ziglua.Lua) i32 {
+        _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
+        const ui = lua.toUserdata(UI, -1) catch {
+            lua.pushNil();
+            return 1;
+        };
+        lua.pop(1);
+
+        const now = zeit.instant(.{}) catch {
+            lua.pushNil();
+            return 1;
+        };
+        const local_instant = now.in(&ui.local_tz);
+        const local_time = local_instant.time();
+        const weekday = zeit.weekdayFromDays(zeit.daysSinceEpoch(local_instant.unixTimestamp()));
+
+        var buf: [16]u8 = undefined;
+        const time_str = std.fmt.bufPrint(&buf, "{s} {d:0>2}:{d:0>2}", .{ weekday.shortName(), local_time.hour, local_time.minute }) catch {
+            lua.pushNil();
+            return 1;
+        };
+        _ = lua.pushString(time_str);
+        return 1;
+    }
+
+    fn getGitBranch(lua: *ziglua.Lua) i32 {
+        _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
+        const ui = lua.toUserdata(UI, -1) catch {
+            lua.pushNil();
+            return 1;
+        };
+        lua.pop(1);
+
+        const cwd = lua.toString(1) catch {
+            lua.pushNil();
+            return 1;
+        };
+
+        const result = std.process.Child.run(.{
+            .allocator = ui.allocator,
+            .argv = &.{ "git", "rev-parse", "--abbrev-ref", "HEAD" },
+            .cwd = cwd,
+        }) catch {
+            lua.pushNil();
+            return 1;
+        };
+        defer ui.allocator.free(result.stdout);
+        defer ui.allocator.free(result.stderr);
+
+        if (result.term.Exited != 0) {
+            lua.pushNil();
+            return 1;
+        }
+
+        const branch = std.mem.trimRight(u8, result.stdout, "\n\r");
+        if (branch.len == 0) {
+            lua.pushNil();
+            return 1;
+        }
+
+        _ = lua.pushString(branch);
+        return 1;
+    }
+
     fn setTimeout(lua: *ziglua.Lua) i32 {
         // Get UI ptr
         _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
@@ -763,7 +962,28 @@ pub const UI = struct {
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.text_inputs.deinit();
+        self.local_tz.deinit();
         self.lua.deinit();
+    }
+
+    pub fn getMacosOptionAsAlt(self: *UI) []const u8 {
+        _ = self.lua.getField(ziglua.registry_index, "prise_ui");
+        defer self.lua.pop(1);
+
+        _ = self.lua.getField(-1, "get_macos_option_as_alt");
+        if (self.lua.typeOf(-1) != .function) {
+            self.lua.pop(1);
+            return "false";
+        }
+
+        self.lua.call(.{ .args = 0, .results = 1 });
+        defer self.lua.pop(1);
+
+        const val = self.lua.toString(-1) catch return "false";
+        if (std.mem.eql(u8, val, "left")) return "left";
+        if (std.mem.eql(u8, val, "right")) return "right";
+        if (std.mem.eql(u8, val, "true")) return "true";
+        return "false";
     }
 
     pub fn update(self: *UI, event: lua_event.Event) !void {
@@ -850,6 +1070,7 @@ pub const UI = struct {
         close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
         cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
         copy_selection_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
+        cell_size_fn: *const fn (app: *anyopaque) lua_event.CellSize,
     };
 
     pub const PtyLookupFn = *const fn (ctx: *anyopaque, id: u32) ?PtyLookupResult;
@@ -898,7 +1119,7 @@ pub const UI = struct {
         const result = lookup_ctx.lookup_fn(lookup_ctx.ctx, id);
 
         if (result) |r| {
-            lua_event.pushPtyUserdata(lua, id, r.surface, r.app, r.send_key_fn, r.send_mouse_fn, r.send_paste_fn, r.set_focus_fn, r.close_fn, r.cwd_fn, r.copy_selection_fn) catch {
+            lua_event.pushPtyUserdata(lua, id, r.surface, r.app, r.send_key_fn, r.send_mouse_fn, r.send_paste_fn, r.set_focus_fn, r.close_fn, r.cwd_fn, r.copy_selection_fn, r.cell_size_fn) catch {
                 lua.pushNil();
             };
         } else {
@@ -1046,6 +1267,7 @@ fn pushJsonValue(lua: *ziglua.Lua, value: std.json.Value) !void {
 
 const TextInputHandle = struct {
     id: u32,
+    input: *TextInput,
 };
 
 fn registerTextInputMetatable(lua: *ziglua.Lua) void {
@@ -1079,6 +1301,14 @@ fn textInputIndex(lua: *ziglua.Lua) i32 {
         lua.pushFunction(ziglua.wrap(textInputDeleteForward));
         return 1;
     }
+    if (std.mem.eql(u8, key, "delete_word_backward")) {
+        lua.pushFunction(ziglua.wrap(textInputDeleteWordBackward));
+        return 1;
+    }
+    if (std.mem.eql(u8, key, "kill_line")) {
+        lua.pushFunction(ziglua.wrap(textInputKillLine));
+        return 1;
+    }
     if (std.mem.eql(u8, key, "move_left")) {
         lua.pushFunction(ziglua.wrap(textInputMoveLeft));
         return 1;
@@ -1108,10 +1338,7 @@ fn textInputIndex(lua: *ziglua.Lua) i32 {
 
 fn getTextInput(lua: *ziglua.Lua) ?*TextInput {
     const handle = lua.checkUserdata(TextInputHandle, 1, "PriseTextInput");
-    _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
-    const ui = lua.toUserdata(UI, -1) catch return null;
-    lua.pop(1);
-    return ui.text_inputs.get(handle.id);
+    return handle.input;
 }
 
 fn textInputId(lua: *ziglua.Lua) i32 {
@@ -1145,6 +1372,18 @@ fn textInputDeleteBackward(lua: *ziglua.Lua) i32 {
 fn textInputDeleteForward(lua: *ziglua.Lua) i32 {
     const input = getTextInput(lua) orelse return 0;
     input.deleteForward();
+    return 0;
+}
+
+fn textInputDeleteWordBackward(lua: *ziglua.Lua) i32 {
+    const input = getTextInput(lua) orelse return 0;
+    input.deleteWordBackward();
+    return 0;
+}
+
+fn textInputKillLine(lua: *ziglua.Lua) i32 {
+    const input = getTextInput(lua) orelse return 0;
+    input.killLine();
     return 0;
 }
 
@@ -1216,7 +1455,7 @@ fn createTextInput(lua: *ziglua.Lua) i32 {
     };
 
     const handle = lua.newUserdata(TextInputHandle, @sizeOf(TextInputHandle));
-    handle.* = .{ .id = id };
+    handle.* = .{ .id = id, .input = input };
 
     _ = lua.getMetatableRegistry("PriseTextInput");
     lua.setMetatable(-2);

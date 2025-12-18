@@ -3,7 +3,6 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 
-const client = @import("client.zig");
 const msgpack = @import("msgpack.zig");
 const redraw = @import("redraw.zig");
 
@@ -12,6 +11,43 @@ const log = std.log.scoped(.surface);
 const Surface = @This();
 
 const SELECTION_BG_COLOR: [3]u8 = .{ 0x26, 0x4f, 0x78 };
+
+pub const TerminalColors = struct {
+    fg: ?vaxis.Cell.Color = null,
+    bg: ?vaxis.Cell.Color = null,
+    cursor: ?vaxis.Cell.Color = null,
+    palette: [256]?vaxis.Cell.Color = .{null} ** 256,
+
+    pub fn isDark(rgb: [3]u8) bool {
+        const r: u32 = rgb[0];
+        const g: u32 = rgb[1];
+        const b: u32 = rgb[2];
+        // Perceived luminance (Rec. 601)
+        // Y = 0.299R + 0.587G + 0.114B
+        // Using integer arithmetic with 1000 scale
+        const y = 299 * r + 587 * g + 114 * b;
+        return y < 128000;
+    }
+
+    pub fn reduceContrast(rgb: [3]u8, factor: f32) [3]u8 {
+        std.debug.assert(factor >= 0.0 and factor <= 1.0);
+        if (isDark(rgb)) {
+            // Dark background -> Lighten (mix with white)
+            return .{
+                @intFromFloat(@as(f32, @floatFromInt(rgb[0])) * (1.0 - factor) + 255.0 * factor),
+                @intFromFloat(@as(f32, @floatFromInt(rgb[1])) * (1.0 - factor) + 255.0 * factor),
+                @intFromFloat(@as(f32, @floatFromInt(rgb[2])) * (1.0 - factor) + 255.0 * factor),
+            };
+        } else {
+            // Light background -> Darken (mix with black)
+            return .{
+                @intFromFloat(@as(f32, @floatFromInt(rgb[0])) * (1.0 - factor)),
+                @intFromFloat(@as(f32, @floatFromInt(rgb[1])) * (1.0 - factor)),
+                @intFromFloat(@as(f32, @floatFromInt(rgb[2])) * (1.0 - factor)),
+            };
+        }
+    }
+};
 
 front: *vaxis.AllocatingScreen,
 back: *vaxis.AllocatingScreen,
@@ -24,6 +60,7 @@ dirty: bool = false,
 hl_attrs: std.AutoHashMap(u32, vaxis.Style),
 title: std.ArrayList(u8),
 pty_id: u32,
+colors: TerminalColors = .{},
 // Selection bounds (viewport coordinates)
 selection: ?struct {
     start_row: u16,
@@ -32,7 +69,7 @@ selection: ?struct {
     end_col: u16,
 } = null,
 
-pub fn init(allocator: std.mem.Allocator, pty_id: u32, rows: u16, cols: u16) !Surface {
+pub fn init(allocator: std.mem.Allocator, pty_id: u32, rows: u16, cols: u16, colors: TerminalColors) !Surface {
     // Precondition: dimensions must be positive to create valid screen buffers
     std.debug.assert(rows > 0);
     std.debug.assert(cols > 0);
@@ -57,6 +94,7 @@ pub fn init(allocator: std.mem.Allocator, pty_id: u32, rows: u16, cols: u16) !Su
         .hl_attrs = std.AutoHashMap(u32, vaxis.Style).init(allocator),
         .title = std.ArrayList(u8).empty,
         .pty_id = pty_id,
+        .colors = colors,
     };
 }
 
@@ -552,7 +590,11 @@ const fallback_palette: [16]vaxis.Cell.Color = .{
     .{ .rgb = .{ 0xff, 0xff, 0xff } }, // Bright White
 };
 
-pub fn render(self: *const Surface, win: vaxis.Window, focused: bool, terminal_colors: *const client.App.TerminalColors, dim_factor: f32) void {
+const DIM_UNFOCUSED: f32 = 0.05;
+
+pub fn render(self: *const Surface, win: vaxis.Window, focused: bool) void {
+    const dim_factor: f32 = if (focused) 0.0 else DIM_UNFOCUSED;
+
     for (0..self.rows) |row| {
         for (0..self.cols) |col| {
             if (col >= win.width or row >= win.height) continue;
@@ -564,7 +606,7 @@ pub fn render(self: *const Surface, win: vaxis.Window, focused: bool, terminal_c
             }
 
             if (dim_factor > 0.0) {
-                if (!self.applyDimming(&cell, terminal_colors, dim_factor)) {
+                if (!self.applyDimming(&cell, dim_factor)) {
                     win.writeCell(@intCast(col), @intCast(row), cell);
                     continue;
                 }
@@ -577,26 +619,25 @@ pub fn render(self: *const Surface, win: vaxis.Window, focused: bool, terminal_c
     self.renderCursor(win, focused);
 }
 
-fn applyDimming(self: *const Surface, cell: *vaxis.Cell, terminal_colors: *const client.App.TerminalColors, dim_factor: f32) bool {
-    _ = self;
-    const bg_rgb = resolveBgColor(cell.style.bg, terminal_colors) orelse return false;
-    const dimmed_bg = client.App.TerminalColors.reduceContrast(bg_rgb, dim_factor);
+fn applyDimming(self: *const Surface, cell: *vaxis.Cell, dim_factor: f32) bool {
+    const bg_rgb = self.resolveBgColor(cell.style.bg) orelse return false;
+    const dimmed_bg = TerminalColors.reduceContrast(bg_rgb, dim_factor);
     cell.style.bg = .{ .rgb = dimmed_bg };
     return true;
 }
 
-fn resolveBgColor(bg: vaxis.Cell.Color, terminal_colors: *const client.App.TerminalColors) ?[3]u8 {
+fn resolveBgColor(self: *const Surface, bg: vaxis.Cell.Color) ?[3]u8 {
     return switch (bg) {
         .rgb => |rgb| rgb,
-        .index => |idx| resolvePaletteColor(idx, terminal_colors),
-        .default => resolveDefaultBg(terminal_colors),
+        .index => |idx| self.resolvePaletteColor(idx),
+        .default => self.resolveDefaultBg(),
     };
 }
 
-fn resolvePaletteColor(idx: u8, terminal_colors: *const client.App.TerminalColors) ?[3]u8 {
+fn resolvePaletteColor(self: *const Surface, idx: u8) ?[3]u8 {
     if (idx >= 16) return null;
 
-    if (terminal_colors.palette[idx]) |c_val| {
+    if (self.colors.palette[idx]) |c_val| {
         return switch (c_val) {
             .rgb => |rgb| rgb,
             else => null,
@@ -609,8 +650,8 @@ fn resolvePaletteColor(idx: u8, terminal_colors: *const client.App.TerminalColor
     };
 }
 
-fn resolveDefaultBg(terminal_colors: *const client.App.TerminalColors) [3]u8 {
-    if (terminal_colors.bg) |c| {
+fn resolveDefaultBg(self: *const Surface) [3]u8 {
+    if (self.colors.bg) |c| {
         return switch (c) {
             .rgb => |rgb| rgb,
             else => .{ 0, 0, 0 },
@@ -641,7 +682,7 @@ test "Surface - applyRedraw style handling" {
 
     const allocator = testing.allocator;
 
-    var surface = try Surface.init(allocator, 1, 5, 10);
+    var surface = try Surface.init(allocator, 1, 5, 10, .{});
     defer surface.deinit();
 
     // Define style 1 (red)
@@ -728,7 +769,7 @@ test "Surface - applyRedraw style handling with integer attributes" {
 
     const allocator = testing.allocator;
 
-    var surface = try Surface.init(allocator, 1, 5, 10);
+    var surface = try Surface.init(allocator, 1, 5, 10, .{});
     defer surface.deinit();
 
     // Define style 2 with integer fg (using msgpack integer type explicitly)
@@ -771,7 +812,7 @@ test "Surface - applyRedraw extended attributes" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var surface = try Surface.init(allocator, 1, 5, 10);
+    var surface = try Surface.init(allocator, 1, 5, 10, .{});
     defer surface.deinit();
 
     var items = std.ArrayList(msgpack.Value.KeyValue).empty;
@@ -822,7 +863,7 @@ test "Surface - cursor rendering" {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var surface = try Surface.init(allocator, 1, 10, 10);
+    var surface = try Surface.init(allocator, 1, 10, 10, .{});
     defer surface.deinit();
 
     // Set cursor position

@@ -94,6 +94,12 @@ The **borders** table configures pane borders for visual separation.
 **enabled**
 :   Enable or disable pane borders globally. Default: **false**
 
+**show_single_pane**
+:   Show border when only one pane exists. Default: **false**
+
+**mode**
+:   Border rendering mode. Options: **"box"**, **"separator"**. Default: **"box"**
+
 **style**
 :   Border drawing style. Options: **"none"**, **"single"**, **"double"**, **"rounded"**. Default: **"single"**
 
@@ -102,6 +108,11 @@ The **borders** table configures pane borders for visual separation.
 
 **unfocused_color**
 :   Hex color code for unfocused pane borders. Default: **#585b70**
+
+Available border modes:
+
+- **"box"** - Full borders around each pane (default)
+- **"separator"** - Tmux-style borders drawn only between panes
 
 Available border styles:
 
@@ -116,9 +127,11 @@ Example:
 ui.setup({
     borders = {
         enabled = true,
-        style = "double",
-        focused_color = "#f38ba8",  -- Pink
-        unfocused_color = "#313244", -- Dark gray
+        mode = "box",                       -- or "separator" for tmux-style
+        show_single_pane = false,           -- Hide border for single pane
+        style = "rounded",
+        focused_color = "#f38ba8",          -- Pink
+        unfocused_color = "#313244",        -- Dark gray
     },
 })
 ```
@@ -145,34 +158,189 @@ The **tab_bar** table configures the tab bar.
 **show_single_tab**
 :   Show the tab bar even with only one tab. Default: **false**
 
-# KEYBINDS
+# MACOS OPTION KEY
 
-The **keybinds** table configures key bindings.
+**macos_option_as_alt**
+:   Controls how the macOS Option key behaves. Options: **"false"**, **"left"**, **"right"**, **"true"**. Default: **"false"**
 
-**leader**
-:   Key to enter command mode. Default: **{ key = "k", super = true }**
-
-**palette**
-:   Key to open command palette. Default: **{ key = "p", super = true }**
-
-Each keybind is a table with:
-
-- **key**: The key character (e.g., "k", "p")
-- **ctrl**: Require Ctrl modifier (boolean)
-- **alt**: Require Alt modifier (boolean)
-- **shift**: Require Shift modifier (boolean)
-- **super**: Require Super/Cmd modifier (boolean)
+When set to **"false"**, Option produces special characters (e.g., Option+e for é).
+When set to **"left"**, **"right"**, or **"true"**, the corresponding Option key(s)
+act as Alt for keybindings and terminal applications.
 
 Example:
 
 ```lua
 ui.setup({
-    keybinds = {
-        leader = { key = "a", ctrl = true },
-        palette = { key = "Space", ctrl = true, shift = true },
-    },
+    macos_option_as_alt = "true",
 })
 ```
+
+# LEADER KEY
+
+**leader**
+:   The leader key sequence used as a prefix for keybindings. Uses vim-style
+    notation (see Key Notation below). Default: **"<D-k>"** (Super+k)
+
+Example:
+
+```lua
+ui.setup({
+    leader = "<C-a>",  -- Use Ctrl+a as leader
+})
+```
+
+# CUSTOM KEYBINDS
+
+The **keybinds** table maps vim-style key strings to either built-in actions
+or custom Lua functions.
+
+Each entry maps a key string to:
+
+- A **string**: The name of a built-in action (e.g., "split_horizontal")
+- A **function**: A custom Lua function to execute
+
+Key strings use vim-style notation with angle brackets for modifiers and
+special keys. Plain characters can be written directly.
+
+## Modifiers
+
+- **<C-x>** - Ctrl+x
+- **<A-x>** - Alt+x
+- **<S-x>** - Shift+x
+- **<D-x>** - Super/Cmd+x
+- **<leader>** - Expands to the configured leader key
+
+Modifiers can be combined: **<C-A-x>** for Ctrl+Alt+x, **<C-S-D-a>** for
+Ctrl+Shift+Super+a.
+
+## Special Keys
+
+- **<Enter>**, **<Return>**, **<CR>** - Enter key
+- **<Tab>** - Tab key
+- **<Esc>**, **<Escape>** - Escape key
+- **<Space>** - Space bar
+- **<BS>**, **<Backspace>** - Backspace key
+- **<Del>**, **<Delete>** - Delete key
+- **<Up>**, **<Down>**, **<Left>**, **<Right>** - Arrow keys
+- **<Home>**, **<End>** - Home/End keys
+- **<PageUp>**, **<PageDown>** - Page Up/Down keys
+- **<Insert>** - Insert key
+- **<F1>** through **<F12>** - Function keys
+
+## Examples
+
+- **a** - The letter "a"
+- **<C-a>** - Ctrl+a
+- **<D-k>v** - Super+k followed by v
+- **<leader>s** - Leader followed by s
+- **<C-S-Tab>** - Ctrl+Shift+Tab
+
+Example:
+
+```lua
+local prise = require("prise")
+local ui = prise.tiling()
+
+ui.setup({
+    leader = "<C-a>",  -- Use Ctrl+a as leader
+    keybinds = {
+        -- Built-in action
+        ["<leader>v"] = "split_horizontal",
+
+        -- Custom function
+        ["<leader>g"] = function()
+            prise.log.info("Custom keybind executed!")
+        end,
+    },
+})
+
+return ui
+```
+
+# BUILT-IN ACTIONS
+
+The following actions can be used as values in the **keybinds** table.
+
+## Pane Management
+
+**split_horizontal**
+:   Split the current pane horizontally (side by side)
+
+**split_vertical**
+:   Split the current pane vertically (stacked)
+
+**split_auto**
+:   Split automatically based on pane dimensions (horizontal if wide, vertical if tall)
+
+**close_pane**
+:   Close the current pane
+
+**toggle_zoom**
+:   Toggle zoom on the current pane (maximize/restore)
+
+## Focus Navigation
+
+**focus_left**
+:   Move focus to the pane on the left
+
+**focus_right**
+:   Move focus to the pane on the right
+
+**focus_up**
+:   Move focus to the pane above
+
+**focus_down**
+:   Move focus to the pane below
+
+## Pane Resizing
+
+**resize_left**
+:   Shrink the current pane horizontally
+
+**resize_right**
+:   Grow the current pane horizontally
+
+**resize_up**
+:   Shrink the current pane vertically
+
+**resize_down**
+:   Grow the current pane vertically
+
+## Tab Management
+
+**new_tab**
+:   Create a new tab
+
+**close_tab**
+:   Close the current tab
+
+**rename_tab**
+:   Rename the current tab
+
+**next_tab**
+:   Switch to the next tab
+
+**previous_tab**
+:   Switch to the previous tab
+
+**tab_1** through **tab_10**
+:   Switch to tab by number
+
+## Session Management
+
+**detach_session**
+:   Detach from the current session
+
+**rename_session**
+:   Rename the current session
+
+**quit**
+:   Quit prise (same as detach)
+
+## Other
+
+**command_palette**
+:   Open the command palette
 
 # DEFAULT KEYBINDS
 
@@ -212,8 +380,17 @@ The tiling UI uses a leader key sequence. Press the leader key (default:
 **1-9**
 :   Switch to tab by number
 
-**d**, **q**
+**r**
+:   Rename current tab
+
+**d**
 :   Detach from session
+
+**q**
+:   Quit prise
+
+**0**
+:   Switch to tab 10
 
 The command palette (**Super+p**) provides fuzzy search for all commands.
 

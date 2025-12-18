@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const lua_check = b.option(bool, "lua-check", "Run lua-language-server typecheck") orelse true;
 
     const version = getVersion(b);
 
@@ -34,6 +35,9 @@ pub fn build(b: *std.Build) void {
         .lang = .lua54,
     });
     exe_mod.addImport("zlua", zlua.module("zlua"));
+
+    const zeit = b.dependency("zeit", .{});
+    exe_mod.addImport("zeit", zeit.module("zeit"));
 
     const exe = b.addExecutable(.{
         .name = "prise",
@@ -103,7 +107,7 @@ pub fn build(b: *std.Build) void {
         _ = service.add("prise.service", service_content);
         b.getInstallStep().dependOn(&b.addInstallDirectory(.{
             .source_dir = service.getDirectory(),
-            .install_dir = .{ .custom = "lib/systemd/user" },
+            .install_dir = .{ .custom = "share/systemd/user" },
             .install_subdir = "",
         }).step);
     }
@@ -146,6 +150,17 @@ pub fn build(b: *std.Build) void {
 
     const stylua = b.addSystemCommand(&.{ "stylua", "src/lua" });
     fmt_step.dependOn(&stylua.step);
+
+    if (lua_check) {
+        const lua_typecheck = b.addSystemCommand(&.{
+            "sh", "-c",
+            \\output=$(lua-language-server --check src/lua --configpath src/lua/.luarc.json 2>&1)
+            \\status=$?
+            \\if [ $status -ne 0 ]; then echo "$output"; exit $status; fi
+            ,
+        });
+        b.getInstallStep().dependOn(&lua_typecheck.step);
+    }
 
     // mdman - markdown to man page converter
     const mdman_mod = b.createModule(.{
@@ -255,43 +270,33 @@ pub fn build(b: *std.Build) void {
             "sh",
             "-c",
             \\set -e
-            \\SERVICE_SRC="$1/lib/systemd/user/prise.service"
-            \\SERVICE_DST="$HOME/.config/systemd/user/prise.service"
-            \\mkdir -p "$HOME/.config/systemd/user"
-            \\ln -sf "$SERVICE_SRC" "$SERVICE_DST"
             \\systemctl --user daemon-reload
             \\systemctl --user enable --now prise.service
             \\echo "✓ prise server enabled and started"
             ,
-            "--",
         });
-        enable_linux.addDirectoryArg(.{ .cwd_relative = b.install_prefix });
         enable_service_step.dependOn(&enable_linux.step);
     }
     enable_service_step.dependOn(b.getInstallStep());
 }
 
-const version_base = "0.1.0";
-
 fn getVersion(b: *std.Build) []const u8 {
     var code: u8 = undefined;
-    const git_describe = b.runAllowFail(&.{ "git", "describe", "--match", "*.*.*", "--tags" }, &code, .Ignore) catch {
-        return getDevVersion(b);
+    const git_describe = b.runAllowFail(&.{ "git", "describe", "--match", "v*.*.*", "--tags" }, &code, .Ignore) catch {
+        return "unknown";
     };
     const trimmed = std.mem.trim(u8, git_describe, " \n\r");
-    if (std.mem.eql(u8, trimmed, version_base)) {
-        return version_base;
-    }
-    return getDevVersion(b);
-}
+    const without_v = if (trimmed.len > 0 and trimmed[0] == 'v') trimmed[1..] else trimmed;
 
-fn getDevVersion(b: *std.Build) []const u8 {
-    var code: u8 = undefined;
-    const commit_count = b.runAllowFail(&.{ "git", "rev-list", "--count", "HEAD" }, &code, .Ignore) catch "0";
-    const commit_hash = b.runAllowFail(&.{ "git", "rev-parse", "--short=7", "HEAD" }, &code, .Ignore) catch "unknown";
-    return b.fmt("{s}-dev.{s}+{s}", .{
-        version_base,
-        std.mem.trim(u8, commit_count, " \n\r"),
-        std.mem.trim(u8, commit_hash, " \n\r"),
-    });
+    if (std.mem.indexOfScalar(u8, without_v, '-')) |dash_idx| {
+        const tag_part = without_v[0..dash_idx];
+        const rest = without_v[dash_idx + 1 ..];
+        if (std.mem.indexOfScalar(u8, rest, '-')) |second_dash| {
+            const count = rest[0..second_dash];
+            const hash = rest[second_dash + 1 ..];
+            const hash_without_g = if (hash.len > 0 and hash[0] == 'g') hash[1..] else hash;
+            return b.fmt("{s}-{s}+{s}", .{ tag_part, count, hash_without_g });
+        }
+    }
+    return without_v;
 }

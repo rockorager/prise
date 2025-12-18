@@ -8,7 +8,8 @@ const msgpack = @import("msgpack.zig");
 const redraw = @import("redraw.zig");
 const rpc = @import("rpc.zig");
 const Surface = @import("Surface.zig");
-const UI = @import("ui.zig").UI;
+const ui_mod = @import("ui.zig");
+const UI = ui_mod.UI;
 const vaxis_helper = @import("vaxis_helper.zig");
 const widget = @import("widget.zig");
 const posix = std.posix;
@@ -221,6 +222,7 @@ pub const ServerAction = union(enum) {
     pub const ColorQueryTarget = struct {
         pty_id: u32,
         target: Target,
+        slot: usize, // Response slot for ordered delivery
 
         pub const Target = union(enum) {
             palette: u8,
@@ -301,7 +303,13 @@ pub const ClientLogic = struct {
 
     fn handleCopySelectionResult(result: msgpack.Value) ServerAction {
         if (result == .string) {
+            log.info("handleCopySelectionResult: received selection text ({} bytes)", .{result.string.len});
             return .{ .copy_to_clipboard = result.string };
+        }
+        if (result == .nil) {
+            log.warn("handleCopySelectionResult: no selection (nil result)", .{});
+        } else {
+            log.warn("handleCopySelectionResult: unexpected result type: {s}", .{@tagName(result)});
         }
         return .none;
     }
@@ -399,6 +407,7 @@ pub const ClientLogic = struct {
         var pty_id: ?u32 = null;
         var index: ?u8 = null;
         var kind: ?[]const u8 = null;
+        var slot: ?usize = null;
 
         for (params.map) |kv| {
             if (kv.key != .string) continue;
@@ -416,13 +425,20 @@ pub const ClientLogic = struct {
                 };
             } else if (std.mem.eql(u8, kv.key.string, "kind")) {
                 kind = if (kv.value == .string) kv.value.string else null;
+            } else if (std.mem.eql(u8, kv.key.string, "slot")) {
+                slot = switch (kv.value) {
+                    .integer => |i| @intCast(i),
+                    .unsigned => |u| @intCast(u),
+                    else => null,
+                };
             }
         }
 
         const pid = pty_id orelse return .none;
+        const response_slot = slot orelse return .none;
 
         if (index) |idx| {
-            return .{ .color_query = .{ .pty_id = pid, .target = .{ .palette = idx } } };
+            return .{ .color_query = .{ .pty_id = pid, .target = .{ .palette = idx }, .slot = response_slot } };
         } else if (kind) |k| {
             const target: ServerAction.ColorQueryTarget.Target = if (std.mem.eql(u8, k, "foreground"))
                 .foreground
@@ -432,7 +448,7 @@ pub const ClientLogic = struct {
                 .cursor
             else
                 return .none;
-            return .{ .color_query = .{ .pty_id = pid, .target = target } };
+            return .{ .color_query = .{ .pty_id = pid, .target = target, .slot = response_slot } };
         }
 
         return .none;
@@ -603,7 +619,10 @@ pub const App = struct {
     ui: UI = undefined,
     first_resize_done: bool = false,
     socket_path: []const u8 = undefined,
+    /// Session name to attach to (existing session passed via `prise session attach <name>`)
     attach_session: ?[]const u8 = null,
+    /// User-specified session name for new session (passed via `prise -s <name>`)
+    new_session_name: ?[]const u8 = null,
     initial_cwd: ?[]const u8 = null,
     last_render_time: i64 = 0,
     render_timer: ?io.Task = null,
@@ -624,7 +643,7 @@ pub const App = struct {
     parser: vaxis.Parser = undefined,
     pipe_buf: std.ArrayList(u8),
     pipe_recv_buffer: [4096]u8 = undefined,
-    colors: TerminalColors = .{},
+    colors: Surface.TerminalColors = .{},
 
     pending_attach_ids: ?[]u32 = null,
     pending_attach_count: usize = 0,
@@ -644,53 +663,29 @@ pub const App = struct {
     pub const PendingColorQuery = struct {
         pty_id: u32,
         target: ServerAction.ColorQueryTarget.Target,
+        slot: usize,
     };
 
-    pub const TerminalColors = struct {
-        fg: ?vaxis.Cell.Color = null,
-        bg: ?vaxis.Cell.Color = null,
-        cursor: ?vaxis.Cell.Color = null,
-        palette: [256]?vaxis.Cell.Color = .{null} ** 256,
-
-        pub fn isDark(rgb: [3]u8) bool {
-            const r: u32 = rgb[0];
-            const g: u32 = rgb[1];
-            const b: u32 = rgb[2];
-            // Perceived luminance (Rec. 601)
-            // Y = 0.299R + 0.587G + 0.114B
-            // Using integer arithmetic with 1000 scale
-            const y = 299 * r + 587 * g + 114 * b;
-            return y < 128000;
-        }
-
-        pub fn reduceContrast(rgb: [3]u8, factor: f32) [3]u8 {
-            std.debug.assert(factor >= 0.0 and factor <= 1.0);
-            if (isDark(rgb)) {
-                // Dark background -> Lighten (mix with white)
-                return .{
-                    @intFromFloat(@as(f32, @floatFromInt(rgb[0])) * (1.0 - factor) + 255.0 * factor),
-                    @intFromFloat(@as(f32, @floatFromInt(rgb[1])) * (1.0 - factor) + 255.0 * factor),
-                    @intFromFloat(@as(f32, @floatFromInt(rgb[2])) * (1.0 - factor) + 255.0 * factor),
-                };
-            } else {
-                // Light background -> Darken (mix with black)
-                return .{
-                    @intFromFloat(@as(f32, @floatFromInt(rgb[0])) * (1.0 - factor)),
-                    @intFromFloat(@as(f32, @floatFromInt(rgb[1])) * (1.0 - factor)),
-                    @intFromFloat(@as(f32, @floatFromInt(rgb[2])) * (1.0 - factor)),
-                };
-            }
-        }
+    pub const InitError = struct {
+        err: anyerror,
+        lua_msg: ?[:0]const u8,
     };
 
-    pub fn init(allocator: std.mem.Allocator) !App {
+    pub const InitResult = union(enum) {
+        ok: App,
+        err: InitError,
+    };
+
+    pub fn init(allocator: std.mem.Allocator) InitResult {
         var app: App = .{
             .allocator = allocator,
-            .vx = try vaxis.init(allocator, .{
+            .vx = vaxis.init(allocator, .{
                 .kitty_keyboard_flags = .{
                     .report_events = true,
                 },
-            }),
+            }) catch |err| {
+                return .{ .err = .{ .err = err, .lua_msg = null } };
+            },
             .tty = undefined,
             .tty_buffer = undefined,
             .msg_buffer = .empty,
@@ -701,27 +696,37 @@ pub const App = struct {
             .pending_attach_cwd = std.AutoHashMap(u32, []const u8).init(allocator),
             .pending_color_queries = .empty,
         };
-        app.tty = try vaxis.Tty.init(&app.tty_buffer);
-        // parser doesn't need init? assuming default init is fine or init(&allocator)
         app.parser = .{};
 
         log.info("Vaxis initialized", .{});
 
         // Initialize Lua UI
-        app.ui = UI.init(allocator) catch |err| {
-            app.vx.deinit(allocator, app.tty.writer());
-            app.tty.deinit();
-            return err;
-        };
+        switch (UI.init(allocator)) {
+            .ok => |ui| app.ui = ui,
+            .err => |init_err| {
+                // Note: we skip vx.deinit here since TTY isn't initialized yet
+                // and vx.deinit requires a writer. Resources will be cleaned up on exit.
+                return .{ .err = .{ .err = init_err.err, .lua_msg = init_err.lua_msg } };
+            },
+        }
         log.info("Lua UI initialized", .{});
 
         // Create pipe for TTY thread -> Main thread communication
-        const fds = try posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true });
+        const fds = posix.pipe2(.{ .CLOEXEC = true, .NONBLOCK = true }) catch |err| {
+            return .{ .err = .{ .err = err, .lua_msg = null } };
+        };
         app.pipe_read_fd = fds[0];
         app.pipe_write_fd = fds[1];
         log.info("Pipe created: read_fd={} write_fd={}", .{ app.pipe_read_fd, app.pipe_write_fd });
 
-        return app;
+        return .{ .ok = app };
+    }
+
+    /// Initialize the TTY. Must be called after App is in its final memory location,
+    /// since the tty writer holds a pointer to tty_buffer.
+    pub fn initTty(self: *App) !void {
+        self.tty = try vaxis.Tty.init(&self.tty_buffer);
+        log.info("TTY initialized", .{});
     }
 
     pub fn deinit(self: *App) void {
@@ -827,6 +832,14 @@ pub const App = struct {
                     if (app.io_loop) |l| task.cancel(l) catch {};
                     app.render_timer = null;
                 }
+                if (app.pipe_read_task) |*task| {
+                    if (app.io_loop) |l| task.cancel(l) catch {};
+                    app.pipe_read_task = null;
+                }
+                if (app.send_task) |*task| {
+                    if (app.io_loop) |l| task.cancel(l) catch {};
+                    app.send_task = null;
+                }
                 // Wake up TTY thread so it can exit
                 app.vx.deviceStatusReport(app.tty.writer()) catch {};
             }
@@ -897,24 +910,18 @@ pub const App = struct {
                 const msgid = app_ptr.state.next_msgid;
                 app_ptr.state.next_msgid +%= 1;
 
-                var params = try app_ptr.allocator.alloc(msgpack.Value, 2);
-                params[0] = .{ .array = pty_ids };
-                params[1] = .{ .unsigned = @intCast(app_ptr.fd) };
-
                 var arr = try app_ptr.allocator.alloc(msgpack.Value, 4);
                 arr[0] = .{ .unsigned = 0 }; // request
                 arr[1] = .{ .unsigned = msgid };
                 arr[2] = .{ .string = "detach_ptys" };
-                arr[3] = .{ .array = params };
+                arr[3] = .{ .array = pty_ids };
 
                 const encoded = msgpack.encodeFromValue(app_ptr.allocator, msgpack.Value{ .array = arr }) catch {
                     app_ptr.allocator.free(arr);
-                    app_ptr.allocator.free(params);
                     return;
                 };
                 defer app_ptr.allocator.free(encoded);
                 app_ptr.allocator.free(arr);
-                app_ptr.allocator.free(params);
 
                 // Track that we're waiting for detach response
                 try app_ptr.state.pending_requests.put(msgid, .detach);
@@ -946,6 +953,14 @@ pub const App = struct {
                 try app_ptr.renameCurrentSession(new_name);
             }
         }.renameCb);
+
+        // Register switch_session callback
+        self.ui.setSwitchSessionCallback(self, struct {
+            fn switchCb(ctx: *anyopaque, target_session: []const u8) anyerror!void {
+                const app_ptr: *App = @ptrCast(@alignCast(ctx));
+                try app_ptr.switchToSession(target_session);
+            }
+        }.switchCb);
 
         // Manually trigger initial resize to connect
         const ws = try vaxis.Tty.getWinsize(self.tty.fd);
@@ -1338,7 +1353,7 @@ pub const App = struct {
                 log.err("Failed to allocate surface: {}", .{err});
                 return;
             };
-            surface.* = Surface.init(self.allocator, pty_id, rows, cols) catch |err| {
+            surface.* = Surface.init(self.allocator, pty_id, rows, cols, self.colors) catch |err| {
                 log.err("Failed to create surface: {}", .{err});
                 self.allocator.destroy(surface);
                 return;
@@ -1377,7 +1392,7 @@ pub const App = struct {
     }
 
     fn handleColorQuery(self: *App, query: ServerAction.ColorQueryTarget) !void {
-        log.debug("handleColorQuery: pty={} target={any}", .{ query.pty_id, query.target });
+        log.debug("handleColorQuery: pty={} slot={} target={any}", .{ query.pty_id, query.slot, query.target });
 
         // Check if we have the color cached
         const cached_color: ?vaxis.Cell.Color = switch (query.target) {
@@ -1389,10 +1404,14 @@ pub const App = struct {
 
         if (cached_color) |color| {
             // Send response immediately
-            try self.sendColorResponse(query.pty_id, query.target, color);
+            try self.sendColorResponse(query.pty_id, query.slot, query.target, color);
         } else {
             // Queue for later when we get the color_report
-            try self.pending_color_queries.append(self.allocator, .{ .pty_id = query.pty_id, .target = query.target });
+            try self.pending_color_queries.append(self.allocator, .{
+                .pty_id = query.pty_id,
+                .target = query.target,
+                .slot = query.slot,
+            });
 
             // Query the terminal for this color
             switch (query.target) {
@@ -1426,7 +1445,7 @@ pub const App = struct {
                 };
 
                 if (color) |c| {
-                    self.sendColorResponse(pending.pty_id, pending.target, c) catch |err| {
+                    self.sendColorResponse(pending.pty_id, pending.slot, pending.target, c) catch |err| {
                         log.err("Failed to send color response: {}", .{err});
                     };
                 }
@@ -1438,33 +1457,34 @@ pub const App = struct {
         }
     }
 
-    fn sendColorResponse(self: *App, pty_id: u32, target: ServerAction.ColorQueryTarget.Target, color: vaxis.Cell.Color) !void {
+    fn sendColorResponse(self: *App, pty_id: u32, slot: usize, target: ServerAction.ColorQueryTarget.Target, color: vaxis.Cell.Color) !void {
         const rgb = color.rgb;
-        log.debug("sendColorResponse: pty={} target={any} color=#{x:0>2}{x:0>2}{x:0>2}", .{ pty_id, target, rgb[0], rgb[1], rgb[2] });
+        log.debug("sendColorResponse: pty={} slot={} target={any} color=#{x:0>2}{x:0>2}{x:0>2}", .{ pty_id, slot, target, rgb[0], rgb[1], rgb[2] });
 
         // Build the color_response notification
-        // Format: [2, "color_response", {pty_id: N, r: R, g: G, b: B, index: M}] or
-        //         [2, "color_response", {pty_id: N, r: R, g: G, b: B, kind: "foreground"}]
-        var map_items = try self.allocator.alloc(msgpack.Value.KeyValue, 5);
+        // Format: [2, "color_response", {pty_id: N, slot: S, r: R, g: G, b: B, index: M}] or
+        //         [2, "color_response", {pty_id: N, slot: S, r: R, g: G, b: B, kind: "foreground"}]
+        var map_items = try self.allocator.alloc(msgpack.Value.KeyValue, 6);
         defer self.allocator.free(map_items);
 
         map_items[0] = .{ .key = .{ .string = "pty_id" }, .value = .{ .unsigned = pty_id } };
-        map_items[1] = .{ .key = .{ .string = "r" }, .value = .{ .unsigned = rgb[0] } };
-        map_items[2] = .{ .key = .{ .string = "g" }, .value = .{ .unsigned = rgb[1] } };
-        map_items[3] = .{ .key = .{ .string = "b" }, .value = .{ .unsigned = rgb[2] } };
+        map_items[1] = .{ .key = .{ .string = "slot" }, .value = .{ .unsigned = slot } };
+        map_items[2] = .{ .key = .{ .string = "r" }, .value = .{ .unsigned = rgb[0] } };
+        map_items[3] = .{ .key = .{ .string = "g" }, .value = .{ .unsigned = rgb[1] } };
+        map_items[4] = .{ .key = .{ .string = "b" }, .value = .{ .unsigned = rgb[2] } };
 
         switch (target) {
             .palette => |idx| {
-                map_items[4] = .{ .key = .{ .string = "index" }, .value = .{ .unsigned = idx } };
+                map_items[5] = .{ .key = .{ .string = "index" }, .value = .{ .unsigned = idx } };
             },
             .foreground => {
-                map_items[4] = .{ .key = .{ .string = "kind" }, .value = .{ .string = "foreground" } };
+                map_items[5] = .{ .key = .{ .string = "kind" }, .value = .{ .string = "foreground" } };
             },
             .background => {
-                map_items[4] = .{ .key = .{ .string = "kind" }, .value = .{ .string = "background" } };
+                map_items[5] = .{ .key = .{ .string = "kind" }, .value = .{ .string = "background" } };
             },
             .cursor => {
-                map_items[4] = .{ .key = .{ .string = "kind" }, .value = .{ .string = "cursor" } };
+                map_items[5] = .{ .key = .{ .string = "kind" }, .value = .{ .string = "cursor" } };
             },
         }
 
@@ -1518,218 +1538,7 @@ pub const App = struct {
     }
 
     fn renderWidget(self: *App, w: widget.Widget, win: vaxis.Window) !void {
-        switch (w.kind) {
-            .surface => |surf| {
-                if (self.surfaces.get(surf.pty_id)) |surface| {
-                    // Check if we need to resize the PTY
-                    log.debug("renderWidget surface: pty={} widget={}x{} surface={}x{}", .{
-                        surf.pty_id,
-                        w.width,
-                        w.height,
-                        surface.cols,
-                        surface.rows,
-                    });
-                    if (w.width != surface.cols or w.height != surface.rows) {
-                        log.info("renderWidget: size mismatch for pty={}, sending resize", .{surf.pty_id});
-                        self.sendResize(surf.pty_id, w.height, w.width) catch |err| {
-                            log.err("Failed to send resize: {}", .{err});
-                        };
-                    }
-                    // Calculate dim factor based on focus
-                    const dim_factor: f32 = if (w.focus) 0.0 else 0.05; // Dim inactive windows by 5%
-                    surface.render(win, w.focus, &self.colors, dim_factor);
-                }
-            },
-            .text => |text| {
-                // Use a temporary arena for rendering this frame
-                var arena = std.heap.ArenaAllocator.init(self.allocator);
-                defer arena.deinit();
-                const alloc = arena.allocator();
-
-                var iter = widget.Text.Iterator{
-                    .text = text,
-                    .max_width = w.width,
-                    .allocator = alloc,
-                };
-
-                var row: usize = 0;
-                while (iter.next() catch null) |line| {
-                    var col: usize = 0;
-
-                    // Handle alignment
-                    const free_space = if (w.width > line.width) w.width - line.width else 0;
-                    const start_col: u16 = switch (text.@"align") {
-                        widget.Text.Align.left => 0,
-                        widget.Text.Align.center => free_space / 2,
-                        widget.Text.Align.right => free_space,
-                    };
-
-                    col = start_col;
-
-                    for (line.segments) |seg| {
-                        _ = win.printSegment(seg, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
-                        col += vaxis.gwidth.gwidth(seg.text, .unicode);
-                    }
-
-                    // Fill remaining space with background from last segment
-                    if (line.segments.len > 0 and col < w.width) {
-                        const last_style = line.segments[line.segments.len - 1].style;
-                        const spacer = vaxis.Segment{
-                            .text = " ",
-                            .style = last_style,
-                        };
-                        while (col < w.width) {
-                            _ = win.printSegment(spacer, .{ .row_offset = @intCast(row), .col_offset = @intCast(col) });
-                            col += 1;
-                        }
-                    }
-
-                    row += 1;
-                }
-            },
-            .text_input => |ti| {
-                if (self.ui.text_inputs.get(ti.input_id)) |input| {
-                    input.updateScrollOffset(@intCast(win.width));
-                    input.render(win, ti.style);
-                }
-            },
-            .list => |list| {
-                const visible_rows = w.height;
-                const start = list.scroll_offset;
-                const end = @min(start + visible_rows, list.items.len);
-
-                log.debug("render list: items={} height={} start={} end={}", .{ list.items.len, w.height, start, end });
-
-                for (start..end) |i| {
-                    const row: u16 = @intCast(i - start);
-                    const item = list.items[i];
-                    const is_selected = list.selected != null and list.selected.? == i;
-
-                    const item_style = if (is_selected)
-                        list.selected_style
-                    else
-                        item.style orelse list.style;
-
-                    // Fill entire row with background first
-                    for (0..win.width) |col| {
-                        win.writeCell(@intCast(col), row, .{
-                            .char = .{ .grapheme = " ", .width = 1 },
-                            .style = item_style,
-                        });
-                    }
-
-                    // Render text using grapheme iterator
-                    var col: u16 = 0;
-                    var giter = vaxis.unicode.graphemeIterator(item.text);
-                    while (giter.next()) |grapheme| {
-                        if (col >= win.width) break;
-                        const bytes = grapheme.bytes(item.text);
-                        const gw: u8 = @intCast(vaxis.gwidth.gwidth(bytes, .unicode));
-                        win.writeCell(col, row, .{
-                            .char = .{ .grapheme = bytes, .width = gw },
-                            .style = item_style,
-                        });
-                        col += gw;
-                    }
-                }
-            },
-            .box => |b| {
-                const chars = b.borderChars();
-                const style = b.style;
-
-                log.debug("render box: w={} h={}", .{ win.width, win.height });
-
-                // Fill the entire box with background color
-                for (0..win.height) |row| {
-                    for (0..win.width) |col| {
-                        win.writeCell(@intCast(col), @intCast(row), .{
-                            .char = .{ .grapheme = " ", .width = 1 },
-                            .style = style,
-                        });
-                    }
-                }
-
-                if (b.border != .none and win.width >= 2 and win.height >= 2) {
-                    win.writeCell(0, 0, .{ .char = .{ .grapheme = chars.tl, .width = 1 }, .style = style });
-                    win.writeCell(win.width - 1, 0, .{ .char = .{ .grapheme = chars.tr, .width = 1 }, .style = style });
-                    win.writeCell(0, win.height - 1, .{ .char = .{ .grapheme = chars.bl, .width = 1 }, .style = style });
-                    win.writeCell(win.width - 1, win.height - 1, .{ .char = .{ .grapheme = chars.br, .width = 1 }, .style = style });
-
-                    if (win.width > 2) {
-                        for (1..win.width - 1) |col| {
-                            win.writeCell(@intCast(col), 0, .{ .char = .{ .grapheme = chars.h, .width = 1 }, .style = style });
-                            win.writeCell(@intCast(col), win.height - 1, .{ .char = .{ .grapheme = chars.h, .width = 1 }, .style = style });
-                        }
-                    }
-
-                    if (win.height > 2) {
-                        for (1..win.height - 1) |row| {
-                            win.writeCell(0, @intCast(row), .{ .char = .{ .grapheme = chars.v, .width = 1 }, .style = style });
-                            win.writeCell(win.width - 1, @intCast(row), .{ .char = .{ .grapheme = chars.v, .width = 1 }, .style = style });
-                        }
-                    }
-                }
-
-                const child_win = win.child(.{
-                    .x_off = b.child.x,
-                    .y_off = b.child.y,
-                    .width = b.child.width,
-                    .height = b.child.height,
-                });
-                try self.renderWidget(b.child.*, child_win);
-            },
-            .padding => |p| {
-                const child_win = win.child(.{
-                    .x_off = p.child.x,
-                    .y_off = p.child.y,
-                    .width = p.child.width,
-                    .height = p.child.height,
-                });
-                try self.renderWidget(p.child.*, child_win);
-            },
-            .column => |col| {
-                for (col.children) |child| {
-                    const child_win = win.child(.{
-                        .x_off = child.x,
-                        .y_off = child.y,
-                        .width = child.width,
-                        .height = child.height,
-                    });
-                    try self.renderWidget(child, child_win);
-                }
-            },
-            .row => |row| {
-                for (row.children) |child| {
-                    const child_win = win.child(.{
-                        .x_off = child.x,
-                        .y_off = child.y,
-                        .width = child.width,
-                        .height = child.height,
-                    });
-                    try self.renderWidget(child, child_win);
-                }
-            },
-            .stack => |stack| {
-                for (stack.children) |child| {
-                    const child_win = win.child(.{
-                        .x_off = child.x,
-                        .y_off = child.y,
-                        .width = child.width,
-                        .height = child.height,
-                    });
-                    try self.renderWidget(child, child_win);
-                }
-            },
-            .positioned => |pos| {
-                const child_win = win.child(.{
-                    .x_off = pos.child.x,
-                    .y_off = pos.child.y,
-                    .width = pos.child.width,
-                    .height = pos.child.height,
-                });
-                try self.renderWidget(pos.child.*, child_win);
-            },
-        }
+        try w.renderTo(win, self.allocator);
     }
 
     pub fn scheduleRender(self: *App) !void {
@@ -1800,6 +1609,22 @@ pub const App = struct {
         }
         self.split_handles = w.collectSplitHandles(self.allocator, 0, 0) catch &.{};
 
+        // Check for surface resize mismatches and send resize events
+        const resizes = w.collectSurfaceResizes(self.allocator) catch &.{};
+        defer if (resizes.len > 0) self.allocator.free(resizes);
+        for (resizes) |resize| {
+            log.info("Surface resize needed: pty={} {}x{} -> {}x{}", .{
+                resize.pty_id,
+                resize.surface.cols,
+                resize.surface.rows,
+                resize.width,
+                resize.height,
+            });
+            self.sendResize(resize.pty_id, resize.height, resize.width) catch |err| {
+                log.err("Failed to send resize: {}", .{err});
+            };
+        }
+
         try self.renderWidget(w, win);
 
         log.debug("render: calling vx.render()", .{});
@@ -1869,6 +1694,11 @@ pub const App = struct {
             log.info("Setting current_session_name to: {s}", .{session_name});
             self.current_session_name = try self.allocator.dupe(u8, session_name);
             try self.startSessionAttach(session_name);
+        } else if (self.new_session_name) |name| {
+            // User specified a name for new session
+            self.current_session_name = try self.allocator.dupe(u8, name);
+            log.info("Starting new session with user-specified name: {s}", .{name});
+            try self.spawnInitialPty();
         } else {
             // Generate a new session name for fresh launch
             self.current_session_name = try self.ui.getNextSessionName();
@@ -1899,7 +1729,8 @@ pub const App = struct {
             try env_array.append(self.allocator, .{ .string = env_str });
         }
 
-        const param_count: usize = if (self.initial_cwd != null) 5 else 4;
+        const macos_option_as_alt = self.ui.getMacosOptionAsAlt();
+        const param_count: usize = if (self.initial_cwd != null) 6 else 5;
         var params_kv = try self.allocator.alloc(msgpack.Value.KeyValue, param_count);
         defer self.allocator.free(params_kv);
         log.info("Sending spawn_pty: rows={} cols={} cwd={?s} env_count={}", .{ ws.rows, ws.cols, self.initial_cwd, env_array.items.len });
@@ -1907,8 +1738,9 @@ pub const App = struct {
         params_kv[1] = .{ .key = .{ .string = "cols" }, .value = .{ .unsigned = ws.cols } };
         params_kv[2] = .{ .key = .{ .string = "attach" }, .value = .{ .boolean = true } };
         params_kv[3] = .{ .key = .{ .string = "env" }, .value = .{ .array = env_array.items } };
+        params_kv[4] = .{ .key = .{ .string = "macos_option_as_alt" }, .value = .{ .string = macos_option_as_alt } };
         if (self.initial_cwd) |cwd| {
-            params_kv[4] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = cwd } };
+            params_kv[5] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = cwd } };
         }
         const params_val = msgpack.Value{ .map = params_kv };
         const msg = try msgpack.encode(self.allocator, .{ 0, msgid, "spawn_pty", params_val });
@@ -1978,9 +1810,11 @@ pub const App = struct {
             self.state.next_msgid += 1;
             try self.state.pending_requests.put(msgid, .{ .attach = .{ .pty_id = @intCast(pty_id), .cwd = cwd } });
 
-            // Server expects params as array: [pty_id]
-            var params = try self.allocator.alloc(msgpack.Value, 1);
+            // Server expects params as array: [pty_id, macos_option_as_alt]
+            const macos_option_as_alt = self.ui.getMacosOptionAsAlt();
+            var params = try self.allocator.alloc(msgpack.Value, 2);
             params[0] = .{ .unsigned = pty_id };
+            params[1] = .{ .string = macos_option_as_alt };
             const params_val = msgpack.Value{ .array = params };
 
             var arr = try self.allocator.alloc(msgpack.Value, 4);
@@ -2022,15 +1856,17 @@ pub const App = struct {
             try env_array.append(self.allocator, .{ .string = env_str });
         }
 
-        const param_count: usize = if (cwd != null) 5 else 4;
+        const macos_option_as_alt = self.ui.getMacosOptionAsAlt();
+        const param_count: usize = if (cwd != null) 6 else 5;
         var params_kv = try self.allocator.alloc(msgpack.Value.KeyValue, param_count);
         defer self.allocator.free(params_kv);
         params_kv[0] = .{ .key = .{ .string = "rows" }, .value = .{ .unsigned = ws.rows } };
         params_kv[1] = .{ .key = .{ .string = "cols" }, .value = .{ .unsigned = ws.cols } };
         params_kv[2] = .{ .key = .{ .string = "attach" }, .value = .{ .boolean = true } };
         params_kv[3] = .{ .key = .{ .string = "env" }, .value = .{ .array = env_array.items } };
+        params_kv[4] = .{ .key = .{ .string = "macos_option_as_alt" }, .value = .{ .string = macos_option_as_alt } };
         if (cwd) |c| {
-            params_kv[4] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = c } };
+            params_kv[5] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = c } };
         }
         const params_val = msgpack.Value{ .map = params_kv };
         const msg = try msgpack.encode(self.allocator, .{ 0, msgid, "spawn_pty", params_val });
@@ -2099,7 +1935,7 @@ pub const App = struct {
                         switch (action) {
                             .send_attach => |pty_id| {
                                 log.info("Sending attach_pty for session {}", .{pty_id});
-                                app.send_buffer = try msgpack.encode(app.allocator, .{ 0, @intFromEnum(MsgId.attach_pty), "attach_pty", .{pty_id} });
+                                app.send_buffer = try msgpack.encode(app.allocator, .{ 0, @intFromEnum(MsgId.attach_pty), "attach_pty", .{ pty_id, "false" } });
                                 _ = try l.send(app.fd, app.send_buffer.?, .{
                                     .ptr = app,
                                     .cb = onSendComplete,
@@ -2122,7 +1958,7 @@ pub const App = struct {
                                         log.err("Failed to allocate surface: {}", .{err});
                                         return error.SurfaceInitFailed;
                                     };
-                                    surface.* = Surface.init(app.allocator, pty_id, ws.rows, ws.cols) catch |err| {
+                                    surface.* = Surface.init(app.allocator, pty_id, ws.rows, ws.cols, app.colors) catch |err| {
                                         log.err("Failed to create surface: {}", .{err});
                                         app.allocator.destroy(surface);
                                         return error.SurfaceInitFailed;
@@ -2300,6 +2136,15 @@ pub const App = struct {
                                                         try self.requestCopySelection(id);
                                                     }
                                                 }.appCopySelection,
+                                                .cell_size_fn = struct {
+                                                    fn appGetCellSize(ctx: *anyopaque) lua_event.CellSize {
+                                                        const self: *App = @ptrCast(@alignCast(ctx));
+                                                        return .{
+                                                            .width = self.cell_width_px,
+                                                            .height = self.cell_height_px,
+                                                        };
+                                                    }
+                                                }.appGetCellSize,
                                             },
                                         }) catch |err| {
                                             log.err("Failed to update UI with pty_attach: {}", .{err});
@@ -2434,6 +2279,14 @@ pub const App = struct {
                                     task.cancel(l) catch {};
                                     app.autosave_timer = null;
                                 }
+                                if (app.pipe_read_task) |*task| {
+                                    task.cancel(l) catch {};
+                                    app.pipe_read_task = null;
+                                }
+                                if (app.send_task) |*task| {
+                                    task.cancel(l) catch {};
+                                    app.send_task = null;
+                                }
 
                                 log.info("Closing connection", .{});
                                 if (app.connected) {
@@ -2504,7 +2357,10 @@ pub const App = struct {
     fn sendDirect(self: *App, data: []const u8) !void {
         var index: usize = 0;
         while (index < data.len) {
-            const n = try posix.write(self.fd, data[index..]);
+            const n = posix.write(self.fd, data[index..]) catch |err| {
+                if (err == error.WouldBlock) continue;
+                return err;
+            };
             index += n;
         }
     }
@@ -2569,9 +2425,62 @@ pub const App = struct {
     }
 
     fn copyToClipboard(self: *App, text: []const u8) void {
+        if (text.len == 0) {
+            log.warn("copyToClipboard: empty text, nothing to copy", .{});
+            return;
+        }
+
+        log.info("copyToClipboard: copying {} bytes to clipboard", .{text.len});
+
+        // Try native clipboard utilities first (more reliable than OSC 52)
+        self.copyToClipboardNative(text) catch |err| {
+            log.warn("Native clipboard copy failed: {}, trying OSC 52", .{err});
+            self.copyToClipboardOSC52(text);
+        };
+    }
+
+    fn copyToClipboardNative(self: *App, text: []const u8) !void {
+        const builtin = @import("builtin");
+        const clipboard_cmd = switch (builtin.os.tag) {
+            .macos => "pbcopy",
+            .linux => blk: {
+                // Try to detect which clipboard utility is available
+                // Prefer wl-copy (Wayland) or xclip (X11)
+                const wayland = std.process.hasEnvVar(self.allocator, "WAYLAND_DISPLAY") catch false;
+                break :blk if (wayland) "wl-copy" else "xclip";
+            },
+            else => return error.UnsupportedPlatform,
+        };
+
+        const args = if (std.mem.eql(u8, clipboard_cmd, "xclip"))
+            &[_][]const u8{ clipboard_cmd, "-selection", "clipboard" }
+        else
+            &[_][]const u8{clipboard_cmd};
+
+        var child = std.process.Child.init(args, self.allocator);
+        child.stdin_behavior = .Pipe;
+
+        try child.spawn();
+
+        try child.stdin.?.writeAll(text);
+        child.stdin.?.close();
+        child.stdin = null;
+
+        const result = try child.wait();
+        if (result != .Exited or result.Exited != 0) {
+            return error.ClipboardCopyFailed;
+        }
+
+        log.info("Successfully copied to clipboard using {s}", .{clipboard_cmd});
+    }
+
+    fn copyToClipboardOSC52(self: *App, text: []const u8) void {
         const encoder = std.base64.standard.Encoder;
         const encoded_len = encoder.calcSize(text.len);
-        const encoded = self.allocator.alloc(u8, encoded_len) catch return;
+        const encoded = self.allocator.alloc(u8, encoded_len) catch |err| {
+            log.err("Failed to allocate memory for OSC 52 encoding: {}", .{err});
+            return;
+        };
         defer self.allocator.free(encoded);
         _ = encoder.encode(encoded, text);
 
@@ -2652,6 +2561,50 @@ pub const App = struct {
         };
 
         return error.SessionAlreadyExists;
+    }
+
+    pub fn switchToSession(self: *App, target_session: []const u8) !void {
+        std.debug.assert(target_session.len > 0);
+        // Don't switch if already on the target session
+        if (self.current_session_name) |current| {
+            if (std.mem.eql(u8, current, target_session)) {
+                log.info("Already on session '{s}', not switching", .{target_session});
+                return;
+            }
+        }
+
+        // Save current session first
+        if (self.current_session_name) |name| {
+            log.info("Saving current session '{s}' before switch", .{name});
+            try self.saveSession(name);
+        }
+
+        // Build arguments for exec
+        // Build arguments for exec
+        const target_z = try self.allocator.dupeZ(u8, target_session);
+        errdefer self.allocator.free(target_z);
+        const args = [_]?[*:0]const u8{
+            "prise",
+            "session",
+            "attach",
+            target_z,
+            null,
+        };
+
+        log.info("Exec'ing prise session attach '{s}'", .{target_session});
+
+        // Restore terminal state right before exec to minimize window of failure
+        const writer = self.tty.writer();
+        self.vx.deinit(self.allocator, writer);
+
+        // Use execvpeZ with current environment
+        const err = posix.execvpeZ("prise", @ptrCast(&args), @ptrCast(std.c.environ));
+
+        // If we get here, exec failed - reinitialize terminal
+        log.err("Failed to exec prise: {}", .{err});
+        self.vx = vaxis.Vaxis.init(self.allocator, .{}) catch return err;
+        self.vx.enterAltScreen(writer) catch {};
+        return err;
     }
 
     pub fn deleteCurrentSession(self: *App) void {
@@ -3016,6 +2969,15 @@ pub const App = struct {
                     try app.requestCopySelection(pty_id);
                 }
             }.copySelection,
+            .cell_size_fn = struct {
+                fn getCellSize(app_ctx: *anyopaque) lua_event.CellSize {
+                    const app: *App = @ptrCast(@alignCast(app_ctx));
+                    return .{
+                        .width = app.cell_width_px,
+                        .height = app.cell_height_px,
+                    };
+                }
+            }.getCellSize,
         };
     }
 };

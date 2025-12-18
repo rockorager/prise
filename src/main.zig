@@ -14,6 +14,14 @@ pub const version = build_options.version;
 
 const log = std.log.scoped(.main);
 
+/// Result of parsing command-line arguments.
+const ParseResult = struct {
+    /// Session name to attach to (existing session)
+    attach_session: ?[]const u8 = null,
+    /// Session name for a new session (user-specified)
+    new_session_name: ?[]const u8 = null,
+};
+
 var log_file: ?std.fs.File = null;
 
 pub const std_options: std.Options = .{
@@ -86,37 +94,68 @@ pub fn main() !void {
     var socket_buffer: [256]u8 = undefined;
     const socket_path = try std.fmt.bufPrint(&socket_buffer, "/tmp/prise-{d}.sock", .{uid});
 
-    const attach_session = try parseArgs(allocator, socket_path) orelse return;
-    defer if (attach_session) |s| allocator.free(s);
-    try runClient(allocator, socket_path, attach_session);
+    const result = try parseArgs(allocator, socket_path) orelse return;
+    defer {
+        if (result.attach_session) |s| allocator.free(s);
+        if (result.new_session_name) |s| allocator.free(s);
+    }
+    try runClient(allocator, socket_path, result);
 }
 
-fn parseArgs(allocator: std.mem.Allocator, socket_path: []const u8) !?(?[]const u8) {
+fn parseArgs(allocator: std.mem.Allocator, socket_path: []const u8) !?ParseResult {
     var args = try std.process.argsWithAllocator(allocator);
     defer args.deinit();
     _ = args.skip();
 
-    const cmd = args.next() orelse return @as(?[]const u8, null);
+    var result: ParseResult = .{};
+    errdefer if (result.new_session_name) |s| allocator.free(s);
 
-    if (std.mem.eql(u8, cmd, "--version") or std.mem.eql(u8, cmd, "-v")) {
-        try printVersion();
-        return null;
-    } else if (std.mem.eql(u8, cmd, "--help") or std.mem.eql(u8, cmd, "-h")) {
-        try printHelp();
-        return null;
-    } else if (std.mem.eql(u8, cmd, "serve")) {
-        initLogFile("server.log");
-        try server.startServer(allocator, socket_path);
-        return null;
-    } else if (std.mem.eql(u8, cmd, "session")) {
-        return try handleSessionCommand(allocator, &args);
-    } else if (std.mem.eql(u8, cmd, "pty")) {
-        return try handlePtyCommand(allocator, &args, socket_path);
-    } else {
-        log.err("Unknown command: {s}", .{cmd});
-        try printHelp();
-        return error.UnknownCommand;
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v")) {
+            try printVersion();
+            return null;
+        } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
+            try printHelp();
+            return null;
+        } else if (std.mem.eql(u8, arg, "-s") or std.mem.eql(u8, arg, "--session")) {
+            const name = args.next() orelse {
+                printSessionNameError("error: -s/--session requires a session name\n");
+                return error.MissingArgument;
+            };
+            validateSessionName(name) catch |err| {
+                printSessionNameValidationError(err);
+                return err;
+            };
+            if (sessionExists(allocator, name)) {
+                var err_buf: [128]u8 = undefined;
+                const msg = std.fmt.bufPrint(&err_buf, "error: session '{s}' already exists\n", .{name}) catch return error.SessionAlreadyExists;
+                printSessionNameError(msg);
+                return error.SessionAlreadyExists;
+            }
+            result.new_session_name = try allocator.dupe(u8, name);
+        } else if (std.mem.eql(u8, arg, "serve")) {
+            initLogFile("server.log");
+            try server.startServer(allocator, socket_path);
+            return null;
+        } else if (std.mem.eql(u8, arg, "session")) {
+            if (result.new_session_name != null) {
+                printSessionNameError("error: -s/--session cannot be used with 'session attach'\n");
+                return error.ConflictingOptions;
+            }
+            const session_result = try handleSessionCommand(allocator, &args) orelse return null;
+            result.attach_session = session_result.attach_session;
+            return result;
+        } else if (std.mem.eql(u8, arg, "pty")) {
+            _ = try handlePtyCommand(allocator, &args, socket_path);
+            return null;
+        } else {
+            log.err("Unknown command: {s}", .{arg});
+            try printHelp();
+            return error.UnknownCommand;
+        }
     }
+
+    return result;
 }
 
 fn printVersion() !void {
@@ -126,6 +165,45 @@ fn printVersion() !void {
     try stdout.interface.print("prise {s}\n", .{version});
 }
 
+const MAX_SESSION_NAME_LEN = 64;
+
+fn validateSessionName(name: []const u8) !void {
+    if (name.len == 0) return error.SessionNameEmpty;
+    if (name.len > MAX_SESSION_NAME_LEN) return error.SessionNameTooLong;
+    for (name) |c| {
+        if (!std.ascii.isAlphanumeric(c) and c != '-' and c != '_') {
+            return error.SessionNameInvalid;
+        }
+    }
+}
+
+fn sessionExists(allocator: std.mem.Allocator, name: []const u8) bool {
+    const result = getSessionsDir(allocator) catch return false;
+    defer allocator.free(result.path);
+    var dir = result.dir;
+    defer dir.close();
+
+    var filename_buf: [256]u8 = undefined;
+    const filename = std.fmt.bufPrint(&filename_buf, "{s}.json", .{name}) catch return false;
+
+    dir.access(filename, .{}) catch return false;
+    return true;
+}
+
+fn printSessionNameError(msg: []const u8) void {
+    std.fs.File.stderr().writeAll(msg) catch {};
+}
+
+fn printSessionNameValidationError(err: anyerror) void {
+    const msg = switch (err) {
+        error.SessionNameEmpty => "error: session name cannot be empty\n",
+        error.SessionNameTooLong => "error: session name must be 64 characters or fewer\n",
+        error.SessionNameInvalid => "error: session name may only contain letters, numbers, dashes, and underscores\n",
+        else => "error: invalid session name\n",
+    };
+    printSessionNameError(msg);
+}
+
 fn printHelp() !void {
     var buf: [4096]u8 = undefined;
     var stdout = std.fs.File.stdout().writer(&buf);
@@ -133,7 +211,7 @@ fn printHelp() !void {
     try stdout.interface.print(
         \\prise - Terminal multiplexer
         \\
-        \\Usage: prise [command] [options]
+        \\Usage: prise [options] [command]
         \\
         \\Commands:
         \\  (none)     Start client, connect to server (spawns server if needed)
@@ -142,8 +220,9 @@ fn printHelp() !void {
         \\  pty        Manage PTYs (list, kill)
         \\
         \\Options:
-        \\  -h, --help     Show this help message
-        \\  -v, --version  Show version
+        \\  -s, --session <name>  Create a new session with the specified name
+        \\  -h, --help            Show this help message
+        \\  -v, --version         Show version
         \\
         \\Run 'prise <command> --help' for more information on a command.
         \\
@@ -175,7 +254,7 @@ fn printSessionHelpTo(file: std.fs.File) !void {
     , .{});
 }
 
-fn handleSessionCommand(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !?(?[]const u8) {
+fn handleSessionCommand(allocator: std.mem.Allocator, args: *std.process.ArgIterator) !?ParseResult {
     const subcmd = args.next() orelse {
         try printSessionHelp();
         return error.MissingCommand;
@@ -185,8 +264,11 @@ fn handleSessionCommand(allocator: std.mem.Allocator, args: *std.process.ArgIter
         try printSessionHelp();
         return null;
     } else if (std.mem.eql(u8, subcmd, "attach")) {
-        const session = args.next() orelse try findMostRecentSession(allocator);
-        return @as(?[]const u8, session);
+        const session = if (args.next()) |s|
+            try allocator.dupe(u8, s)
+        else
+            try findMostRecentSession(allocator);
+        return .{ .attach_session = session };
     } else if (std.mem.eql(u8, subcmd, "list")) {
         try listSessions(allocator);
         return null;
@@ -242,7 +324,7 @@ fn printPtyHelpTo(file: std.fs.File) !void {
     , .{});
 }
 
-fn handlePtyCommand(allocator: std.mem.Allocator, args: *std.process.ArgIterator, socket_path: []const u8) !?(?[]const u8) {
+fn handlePtyCommand(allocator: std.mem.Allocator, args: *std.process.ArgIterator, socket_path: []const u8) !?ParseResult {
     const subcmd = args.next() orelse {
         try printPtyHelp();
         return error.MissingCommand;
@@ -276,7 +358,7 @@ fn handlePtyCommand(allocator: std.mem.Allocator, args: *std.process.ArgIterator
     }
 }
 
-fn runClient(allocator: std.mem.Allocator, socket_path: []const u8, attach_session: ?[]const u8) !void {
+fn runClient(allocator: std.mem.Allocator, socket_path: []const u8, args: ParseResult) !void {
     std.fs.accessAbsolute(socket_path, .{}) catch |err| {
         if (err == error.FileNotFound) {
             log.err("Server not running. Start it with: prise serve", .{});
@@ -291,22 +373,42 @@ fn runClient(allocator: std.mem.Allocator, socket_path: []const u8, attach_sessi
     var loop = try io.Loop.init(allocator);
     defer loop.deinit();
 
-    var app = client.App.init(allocator) catch |err| {
-        var buf: [512]u8 = undefined;
-        var stderr = std.fs.File.stderr().writer(&buf);
-        defer stderr.interface.flush() catch {};
-        switch (err) {
-            error.InitLuaMustReturnTable => stderr.interface.print("error: init.lua must return a UI table\n  example: return require('prise').default()\n", .{}) catch {},
-            error.InitLuaFailed => stderr.interface.print("error: failed to load init.lua (check logs for details)\n", .{}) catch {},
-            error.DefaultUIFailed => stderr.interface.print("error: failed to load default UI\n", .{}) catch {},
-            else => {},
-        }
-        return err;
+    var app = switch (client.App.init(allocator)) {
+        .ok => |a| a,
+        .err => |init_err| {
+            var buf: [512]u8 = undefined;
+            var stderr = std.fs.File.stderr().writer(&buf);
+            defer stderr.interface.flush() catch {};
+            switch (init_err.err) {
+                error.InitLuaMustReturnTable => stderr.interface.print("error: init.lua must return a UI table\n  example: return require('prise').tiling()\n  see: man 5 prise\n", .{}) catch {},
+                error.InitLuaFailed => {
+                    if (init_err.lua_msg) |lua_msg| {
+                        stderr.interface.print("error: {s}\n  see: man 5 prise\n", .{lua_msg}) catch {};
+                    } else {
+                        stderr.interface.print("error: failed to load init.lua\n  see: man 5 prise\n", .{}) catch {};
+                    }
+                },
+                error.DefaultUIFailed => {
+                    if (init_err.lua_msg) |lua_msg| {
+                        stderr.interface.print("error: failed to load default UI: {s}\n", .{lua_msg}) catch {};
+                    } else {
+                        stderr.interface.print("error: failed to load default UI\n", .{}) catch {};
+                    }
+                },
+                else => {},
+            }
+            return init_err.err;
+        },
     };
     defer app.deinit();
 
+    // Initialize TTY after App is in its final memory location
+    // (tty writer holds pointer to tty_buffer)
+    try app.initTty();
+
     app.socket_path = socket_path;
-    app.attach_session = attach_session;
+    app.attach_session = args.attach_session;
+    app.new_session_name = args.new_session_name;
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     app.initial_cwd = posix.getcwd(&cwd_buf) catch null;
@@ -668,10 +770,16 @@ test {
     _ = @import("Surface.zig");
     _ = @import("widget.zig");
     _ = @import("TextInput.zig");
+    _ = @import("tui_test.zig");
     _ = @import("key_encode.zig");
     _ = @import("mouse_encode.zig");
     _ = @import("vaxis_helper.zig");
     _ = @import("lua_test.zig");
+    _ = @import("key_string.zig");
+    _ = @import("action.zig");
+    _ = @import("keybind.zig");
+    _ = @import("keybind_compiler.zig");
+    _ = @import("keybind_matcher.zig");
 
     if (builtin.os.tag.isDarwin() or builtin.os.tag.isBSD()) {
         _ = @import("io/kqueue.zig");

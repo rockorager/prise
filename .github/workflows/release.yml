@@ -1,0 +1,122 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: ""
+            artifact: prise-aarch64-macos
+          - os: ubuntu-latest
+            target: x86_64-linux
+            artifact: prise-x86_64-linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Install StyLua
+        uses: JohnnyMorganz/stylua-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          version: latest
+          args: --version
+
+      - uses: ./.github/actions/setup-lua-ls
+
+      - name: Test
+        run: zig build test
+
+      - name: Build
+        run: zig build -Doptimize=ReleaseFast ${{ matrix.target && format('-Dtarget={0}', matrix.target) || '' }}
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar -czvf dist/${{ matrix.artifact }}.tar.gz -C zig-out/bin prise
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Read release notes
+        id: notes
+        run: |
+          VERSION="${{ steps.version.outputs.VERSION }}"
+          NOTES_FILE="docs/releases/${VERSION}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            echo "Release notes found at $NOTES_FILE"
+            # Use delimiter for multiline output
+            {
+              echo "BODY<<EOF"
+              cat "$NOTES_FILE"
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+          else
+            echo "No release notes found at $NOTES_FILE"
+            echo "BODY=Release $VERSION" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.version.outputs.VERSION }}
+          body: ${{ steps.notes.outputs.BODY }}
+          files: artifacts/*.tar.gz
+          draft: false
+          prerelease: ${{ contains(steps.version.outputs.VERSION, '-') }}
+
+  homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for Homebrew token
+        env:
+          TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::HOMEBREW_TAP_TOKEN secret is not set"
+            exit 1
+          fi
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+
+      - name: Trigger Homebrew tap update
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          repository: rockorager/homebrew-tap
+          event-type: prise-release
+          client-payload: '{"version": "${{ steps.version.outputs.VERSION }}", "tag": "${{ github.ref_name }}"}'

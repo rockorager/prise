@@ -1,12 +1,12 @@
 .{
     .name = .prise,
-    .version = "0.1.0",
+    .version = "0.3.1",
     .fingerprint = 0x800a3088c306ef62,
     .minimum_zig_version = "0.15.2",
     .dependencies = .{
         .ghostty = .{
-            .url = "https://github.com/ghostty-org/ghostty/archive/1207240cf170e4a5d77d38730bbe537ade46868b.tar.gz",
-            .hash = "ghostty-1.3.0-dev-5UdBC07cPgQvfx4BGxQK26ra7EpUzQTlUmOTxkrCJqnB",
+            .url = "https://github.com/ghostty-org/ghostty/archive/7642b8bec4294ecdaf9184fd69ed761a7e2aa422.tar.gz",
+            .hash = "ghostty-1.3.0-dev-5UdBC460QAT2YkmS3_MczhE-h8ltC_7ViAwpnATZaVeQ",
         },
         .vaxis = .{
             .url = "https://github.com/rockorager/libvaxis/archive/68d6ea1d94fa0e5575e3af505bebab29a15acb96.tar.gz",
@@ -15,6 +15,10 @@
         .zlua = .{
             .url = "https://github.com/natecraddock/ziglua/archive/af970851f5412a32c9eceb1c4519679a242c6093.tar.gz",
             .hash = "zlua-0.1.0-hGRpCx89BQCdTNT2LiQGKujXawO2jCgB4hGl0WEqj0cz",
+        },
+        .zeit = .{
+            .url = "git+https://github.com/rockorager/zeit#7ac64d72dbfb1a4ad549102e7d4e232a687d32d8",
+            .hash = "zeit-0.6.0-5I6bk36tAgATpSl9wjFmRPMqYN2Mn0JQHgIcRNcqDpJA",
         },
     },
     .paths = .{
