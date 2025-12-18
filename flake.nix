@@ -83,6 +83,7 @@
                 zigpkgs."0.15.2"
                 stylua
                 zigdoc
+                lua-language-server
               ]
               ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
                 pkgs.darwin.DarwinTools
