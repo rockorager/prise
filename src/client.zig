@@ -186,6 +186,7 @@ pub const ClientState = struct {
         detach,
         get_server_info,
         copy_selection,
+        capture_pane: struct { path: []const u8 },
     };
 
     pub fn init(allocator: std.mem.Allocator) ClientState {
@@ -296,6 +297,7 @@ pub const ClientLogic = struct {
                 .detach => .detached,
                 .get_server_info => handleServerInfoResult(state, result),
                 .copy_selection => handleCopySelectionResult(result),
+                .capture_pane => |capture_info| handleCapturePaneResult(result, capture_info.path),
             };
         }
         return handleUnsolicitedResult(state, result);
@@ -311,6 +313,25 @@ pub const ClientLogic = struct {
         } else {
             log.warn("handleCopySelectionResult: unexpected result type: {s}", .{@tagName(result)});
         }
+        return .none;
+    }
+
+    fn handleCapturePaneResult(result: msgpack.Value, path: []const u8) ServerAction {
+        if (result == .string) {
+            log.info("handleCapturePaneResult: writing {} bytes to {s}", .{ result.string.len, path });
+            const file = std.fs.cwd().createFile(path, .{}) catch |err| {
+                log.err("Failed to create file {s}: {}", .{ path, err });
+                return .none;
+            };
+            defer file.close();
+            _ = file.writeAll(result.string) catch |err| {
+                log.err("Failed to write pane content to {s}: {}", .{ path, err });
+                return .none;
+            };
+            log.info("Successfully wrote pane content to {s}", .{path});
+            return .none;
+        }
+        log.warn("handleCapturePaneResult: unexpected result type: {s}", .{@tagName(result)});
         return .none;
     }
 
@@ -2136,6 +2157,12 @@ pub const App = struct {
                                                         try self.requestCopySelection(id);
                                                     }
                                                 }.appCopySelection,
+                                                .capture_pane_fn = struct {
+                                                    fn appCapturePane(ctx: *anyopaque, id: u32, path: []const u8) anyerror!void {
+                                                        const self: *App = @ptrCast(@alignCast(ctx));
+                                                        try self.requestCapturePane(id, path);
+                                                    }
+                                                }.appCapturePane,
                                                 .cell_size_fn = struct {
                                                     fn appGetCellSize(ctx: *anyopaque) lua_event.CellSize {
                                                         const self: *App = @ptrCast(@alignCast(ctx));
@@ -2419,6 +2446,23 @@ pub const App = struct {
         params[0] = .{ .unsigned = pty_id };
 
         const msg = try msgpack.encode(self.allocator, .{ 0, msgid, "get_selection", msgpack.Value{ .array = params } });
+        defer self.allocator.free(msg);
+
+        try self.sendDirect(msg);
+    }
+
+    pub fn requestCapturePane(self: *App, pty_id: u32, path: []const u8) !void {
+        const msgid = self.state.next_msgid;
+        self.state.next_msgid += 1;
+
+        const path_copy = try self.allocator.dupe(u8, path);
+        try self.state.pending_requests.put(msgid, .{ .capture_pane = .{ .path = path_copy } });
+
+        var params = try self.allocator.alloc(msgpack.Value, 1);
+        defer self.allocator.free(params);
+        params[0] = .{ .unsigned = pty_id };
+
+        const msg = try msgpack.encode(self.allocator, .{ 0, msgid, "capture_pane", msgpack.Value{ .array = params } });
         defer self.allocator.free(msg);
 
         try self.sendDirect(msg);
@@ -2969,6 +3013,12 @@ pub const App = struct {
                     try app.requestCopySelection(pty_id);
                 }
             }.copySelection,
+            .capture_pane_fn = struct {
+                fn capturePane(app_ctx: *anyopaque, pty_id: u32, path: []const u8) anyerror!void {
+                    const app: *App = @ptrCast(@alignCast(app_ctx));
+                    try app.requestCapturePane(pty_id, path);
+                }
+            }.capturePane,
             .cell_size_fn = struct {
                 fn getCellSize(app_ctx: *anyopaque) lua_event.CellSize {
                     const app: *App = @ptrCast(@alignCast(app_ctx));
