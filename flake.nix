@@ -4,7 +4,7 @@
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixpkgs-unstable";
 
-    zig-overlay = {
+    zig = {
       url = "github:mitchellh/zig-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
@@ -15,99 +15,63 @@
     };
   };
 
-  outputs =
-    {
-      nixpkgs,
-      zig-overlay,
-      ...
-    }:
-    let
-      overlays = [
-        zig-overlay.overlays.default
-      ];
+  outputs = {
+    nixpkgs,
+    zig,
+    ...
+  }: let
+    systems = ["x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin"];
+    forAllSystems = f: nixpkgs.lib.genAttrs systems f;
+  in {
+    devShells = forAllSystems (
+      system: let
+        pkgs = nixpkgs.legacyPackages.${system};
+        zig-pkg = zig.packages.${system}."0.15.2";
 
-      systems = [
-        "x86_64-linux"
-        "aarch64-linux"
-        "x86_64-darwin"
-        "aarch64-darwin"
-      ];
-
-      forAllSystems =
-        f:
-        nixpkgs.lib.genAttrs systems (
-          system:
-          f {
-            pkgs = import nixpkgs { inherit overlays system; };
-          }
-        );
-    in
-    {
-      devShells = forAllSystems (
-        { pkgs }:
-        let
-          zigdoc = pkgs.stdenvNoCC.mkDerivation {
-            pname = "zigdoc";
-            version = "0.1.0";
-            src = pkgs.fetchFromGitHub {
-              owner = "rockorager";
-              repo = "zigdoc";
-              rev = "v0.1.0";
-              hash = "sha256-nClG2L4ac0Bu+dGkanSFjoLHszeMoUFV9BdBEEKkdhA=";
-            };
-
-            nativeBuildInputs = [ pkgs.zigpkgs."0.15.2" ];
-
-            dontConfigure = true;
-
-            preBuild = ''
-              export HOME=$TMPDIR
-            '';
-
-            buildPhase = ''
-              runHook preBuild
-              zig build --prefix $out -Doptimize=ReleaseSafe
-              runHook postBuild
-            '';
-
-            dontInstall = true;
+        zigdoc = pkgs.stdenvNoCC.mkDerivation {
+          pname = "zigdoc";
+          version = "0.1.0";
+          src = pkgs.fetchFromGitHub {
+            owner = "rockorager";
+            repo = "zigdoc";
+            rev = "v0.1.0";
+            hash = "sha256-nClG2L4ac0Bu+dGkanSFjoLHszeMoUFV9BdBEEKkdhA=";
           };
-        in
-        {
-          default = pkgs.mkShell {
-            name = "prise-dev";
+          nativeBuildInputs = [zig-pkg];
+          dontConfigure = true;
+          preBuild = "export HOME=$TMPDIR";
+          buildPhase = ''
+            runHook preBuild
+            zig build --prefix $out -Doptimize=ReleaseSafe
+            runHook postBuild
+          '';
+          dontInstall = true;
+        };
+      in {
+        default = pkgs.mkShell {
+          name = "prise-dev";
+          packages =
+            [
+              zig-pkg
+              zigdoc
+              pkgs.stylua
+              pkgs.lua-language-server
+            ]
+            ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
+              pkgs.darwin.DarwinTools
+            ];
 
-            packages =
-              with pkgs;
-              [
-                zigpkgs."0.15.2"
-                stylua
-                zigdoc
-                lua-language-server
-              ]
-              ++ pkgs.lib.optionals pkgs.stdenv.isDarwin [
-                pkgs.darwin.DarwinTools
-              ];
+          shellHook = ''
+            ${pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
+              export PATH="/usr/bin:$PATH"
+              unset SDKROOT
+              unset DEVELOPER_DIR
+            ''}
+          '';
+        };
+      }
+    );
 
-            shellHook = ''
-              ${pkgs.lib.optionalString pkgs.stdenv.isDarwin ''
-                # Expose system xcrun and Xcode SDK for Zig
-                export PATH="/usr/bin:$PATH"
-                unset SDKROOT
-                unset DEVELOPER_DIR
-              ''}
-
-              echo "prise development environment"
-              echo "zig version: $(zig version)"
-              echo ""
-              echo "Quick start:"
-              echo "  zig build        - build the project"
-              echo "  zig build test   - run tests"
-              echo "  zig build fmt    - format code"
-              echo "  zig build run    - run prise"
-            '';
-          };
-        }
-      );
-    };
+    formatter = forAllSystems (system: nixpkgs.legacyPackages.${system}.nixfmt-rfc-style);
+  };
 }
