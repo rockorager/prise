@@ -39,6 +39,11 @@ local utils = require("utils")
 ---@field visible boolean
 ---@field input? TextInput
 
+---@class SwapWithIndexState
+---@field visible boolean
+---@field input? TextInput
+---@field target_index? number
+
 ---@class SessionPickerState
 ---@field visible boolean
 ---@field input? TextInput
@@ -62,6 +67,7 @@ local utils = require("utils")
 ---@field palette PaletteState
 ---@field rename RenameState
 ---@field rename_tab RenameState
+---@field swap_with_index? SwapWithIndexState
 ---@field session_picker SessionPickerState
 ---@field screen_cols number
 ---@field screen_rows number
@@ -245,6 +251,8 @@ local config = {
         ["<leader>r"] = "rename_tab",
         ["<leader>n"] = "next_tab",
         ["<leader>p"] = "previous_tab",
+        ["<leader>m"] = "swap_tab_left",
+        ["<leader>,"] = "swap_tab_right",
         ["<leader>d"] = "detach_session",
         ["<leader>q"] = "quit",
         ["<leader>H"] = "resize_left",
@@ -303,6 +311,8 @@ local state = {
         visible = false,
         input = nil, -- TextInput handle
     },
+    -- Swap tab with index dialog
+    swap_with_index = nil,
     -- Session switcher
     session_picker = {
         visible = false,
@@ -842,6 +852,31 @@ end
 ---Close the current tab
 local function close_current_tab()
     close_tab(state.active_tab)
+end
+
+---Swap two tabs by their indices
+---@param idx1 integer
+---@param idx2 integer
+local function swap_tabs(idx1, idx2)
+    if idx1 < 1 or idx1 > #state.tabs or idx2 < 1 or idx2 > #state.tabs then
+        return
+    end
+    if idx1 == idx2 then
+        return
+    end
+
+    -- Swap the tabs
+    state.tabs[idx1], state.tabs[idx2] = state.tabs[idx2], state.tabs[idx1]
+
+    -- Update active_tab if it was swapped
+    if state.active_tab == idx1 then
+        state.active_tab = idx2
+    elseif state.active_tab == idx2 then
+        state.active_tab = idx1
+    end
+
+    prise.request_frame()
+    prise.save()
 end
 
 ---Remove a pane by id from the appropriate tab
@@ -1426,6 +1461,46 @@ local commands = {
         end,
     },
     {
+        name = "Swap Tab Left",
+        action = function()
+            if state.active_tab > 1 then
+                swap_tabs(state.active_tab, state.active_tab - 1)
+            end
+        end,
+        visible = function()
+            return #state.tabs > 1
+        end,
+    },
+    {
+        name = "Swap Tab Right",
+        action = function()
+            if state.active_tab < #state.tabs then
+                swap_tabs(state.active_tab, state.active_tab + 1)
+            end
+        end,
+        visible = function()
+            return #state.tabs > 1
+        end,
+    },
+    {
+        name = "Swap Tab with Index",
+        action = function()
+            if #state.tabs <= 1 then
+                return
+            end
+            -- Open a text input for the user to specify the tab index
+            state.swap_with_index = {
+                visible = true,
+                input = prise.create_text_input(),
+                target_index = nil,
+            }
+            prise.request_frame()
+        end,
+        visible = function()
+            return #state.tabs > 1
+        end,
+    },
+    {
         name = "Detach Session",
         shortcut = key_prefix .. " d",
         action = function()
@@ -1669,6 +1744,16 @@ action_handlers = {
         if #state.tabs > 1 then
             local prev_idx = (state.active_tab - 2 + #state.tabs) % #state.tabs + 1
             set_active_tab_index(prev_idx)
+        end
+    end,
+    swap_tab_left = function()
+        if state.active_tab > 1 then
+            swap_tabs(state.active_tab, state.active_tab - 1)
+        end
+    end,
+    swap_tab_right = function()
+        if state.active_tab < #state.tabs then
+            swap_tabs(state.active_tab, state.active_tab + 1)
         end
     end,
     tab_1 = function()
@@ -2039,6 +2124,34 @@ function M.update(event)
                 return
             end
             handle_text_input_key(state.rename_tab.input, event.data)
+            return
+        end
+
+        -- Handle swap tab with index prompt
+        if state.swap_with_index and state.swap_with_index.visible then
+            local k = event.data.key
+
+            if k == "Escape" then
+                state.swap_with_index.visible = false
+                state.swap_with_index = nil
+                prise.request_frame()
+                return
+            elseif k == "Enter" then
+                local text = state.swap_with_index.input:text()
+                local target_idx_num = tonumber(text)
+                if target_idx_num then
+                    local target_idx = math.floor(target_idx_num)
+                    if target_idx >= 1 and target_idx <= #state.tabs and target_idx ~= state.active_tab then
+                        swap_tabs(state.active_tab, target_idx)
+                    end
+                end
+                state.swap_with_index.visible = false
+                state.swap_with_index = nil
+                prise.request_frame()
+                return
+            end
+            handle_text_input_key(state.swap_with_index.input, event.data)
+            prise.request_frame()
             return
         end
 
@@ -2898,7 +3011,46 @@ local function schedule_clock_timer()
     end)
 end
 
----@return table
+---Build the swap tab with index modal
+---@return table|nil
+local function build_swap_with_index()
+    if not state.swap_with_index or not state.swap_with_index.visible or not state.swap_with_index.input then
+        return nil
+    end
+
+    local palette_style = { bg = THEME.bg1, fg = THEME.fg_bright }
+    local input_style = { bg = THEME.bg1, fg = THEME.fg_bright }
+
+    return prise.Positioned({
+        anchor = "top_center",
+        y = 5,
+        child = prise.Box({
+            border = "none",
+            max_width = PALETTE_WIDTH,
+            style = palette_style,
+            child = prise.Padding({
+                top = 1,
+                bottom = 1,
+                left = 2,
+                right = 2,
+                child = prise.Column({
+                    cross_axis_align = "stretch",
+                    children = {
+                        prise.Text({
+                            text = "Swap Tab with Index (1-" .. #state.tabs .. ")",
+                            style = { fg = THEME.fg_dim, bg = THEME.bg1 },
+                        }),
+                        prise.TextInput({
+                            input = state.swap_with_index.input,
+                            style = input_style,
+                        }),
+                    },
+                }),
+            }),
+        }),
+    })
+end
+
 function M.view()
     local root = get_active_root()
     if not root then
@@ -2916,6 +3068,7 @@ function M.view()
     local palette = build_palette()
     local rename = build_rename()
     local rename_tab = build_rename_tab()
+    local swap_with_index = build_swap_with_index()
     local session_picker = build_session_picker()
     local tab_bar = build_tab_bar()
     prise.log.debug("view: palette.visible=" .. tostring(state.palette.visible))
@@ -2924,6 +3077,7 @@ function M.view()
     local overlay_visible = state.palette.visible
         or state.rename.visible
         or state.rename_tab.visible
+        or (state.swap_with_index and state.swap_with_index.visible)
         or state.session_picker.visible
     local content
     if state.zoomed_pane_id then
@@ -2970,7 +3124,7 @@ function M.view()
         children = main_children,
     })
 
-    local overlay = palette or rename or rename_tab or session_picker
+    local overlay = palette or rename or rename_tab or swap_with_index or session_picker
     if overlay then
         return prise.Stack({
             children = {
