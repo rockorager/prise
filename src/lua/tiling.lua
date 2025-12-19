@@ -2001,6 +2001,30 @@ function M.update(event)
                 state.session_picker.scroll_offset = 0
                 prise.request_frame()
                 return
+            elseif k == "D" and event.data.shift then
+                -- Delete the selected session (Shift+D)
+                local filtered = filter_sessions(state.session_picker.input:text())
+                if #filtered > 0 then
+                    local idx = state.session_picker.selected
+                    if idx >= 1 and idx <= #filtered then
+                        local target = filtered[idx]
+                        local current_session = prise.get_session_name()
+                        if target == current_session then
+                            -- Can't delete the current session
+                            prise.log.warn("Cannot delete the current session")
+                            return
+                        end
+                        prise.delete_session(target)
+                        -- Refresh the session list
+                        state.session_picker.sessions = prise.list_sessions() or {}
+                        state.session_picker.selected = math.min(
+                            state.session_picker.selected,
+                            math.max(1, #filter_sessions(state.session_picker.input:text()))
+                        )
+                        prise.request_frame()
+                    end
+                end
+                return
             elseif #k == 1 and not event.data.ctrl and not event.data.alt and not event.data.super then
                 state.session_picker.input:insert(k)
                 local new_filtered = filter_sessions(state.session_picker.input:text())
@@ -2655,6 +2679,10 @@ local function build_session_picker()
                     cross_axis_align = "stretch",
                     children = {
                         prise.Text({ text = "Switch Session", style = { fg = THEME.fg_dim, bg = THEME.bg1 } }),
+                        prise.Text({
+                            text = "Shift + D - delete",
+                            style = { fg = THEME.fg_dim, bg = THEME.bg1 },
+                        }),
                         prise.TextInput({
                             input = state.session_picker.input,
                             style = input_style,

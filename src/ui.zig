@@ -87,6 +87,8 @@ pub const UI = struct {
     get_session_name_ctx: *anyopaque = undefined,
     rename_session_callback: ?*const fn (ctx: *anyopaque, new_name: []const u8) anyerror!void = null,
     rename_session_ctx: *anyopaque = undefined,
+    delete_session_callback: ?*const fn (ctx: *anyopaque, session_name: []const u8) anyerror!void = null,
+    delete_session_ctx: *anyopaque = undefined,
     text_inputs: std.AutoHashMap(u32, *TextInput),
     next_text_input_id: u32 = 1,
 
@@ -257,6 +259,11 @@ pub const UI = struct {
         self.rename_session_callback = cb;
     }
 
+    pub fn setDeleteSessionCallback(self: *UI, ctx: *anyopaque, cb: *const fn (ctx: *anyopaque, session_name: []const u8) anyerror!void) void {
+        self.delete_session_ctx = ctx;
+        self.delete_session_callback = cb;
+    }
+
     pub fn getNextSessionName(self: *UI) ![]const u8 {
         const home = std.posix.getenv("HOME") orelse return self.allocator.dupe(u8, AMORY_NAMES[0]);
 
@@ -374,6 +381,10 @@ pub const UI = struct {
         // Register rename_session
         lua.pushFunction(ziglua.wrap(renameSession));
         lua.setField(-2, "rename_session");
+
+        // Register delete_session
+        lua.pushFunction(ziglua.wrap(deleteSession));
+        lua.setField(-2, "delete_session");
 
         // Register create_text_input
         lua.pushFunction(ziglua.wrap(createTextInput));
@@ -538,6 +549,30 @@ pub const UI = struct {
         if (ui.rename_session_callback) |cb| {
             cb(ui.rename_session_ctx, new_name) catch |err| {
                 lua.raiseErrorStr("Failed to rename session: %s", .{@errorName(err).ptr});
+            };
+            lua.pushBoolean(true);
+        } else {
+            lua.pushBoolean(false);
+        }
+        return 1;
+    }
+
+    fn deleteSession(lua: *ziglua.Lua) i32 {
+        _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
+        const ui = lua.toUserdata(UI, -1) catch {
+            lua.pushBoolean(false);
+            return 1;
+        };
+        lua.pop(1);
+
+        const session_name = lua.toString(1) catch {
+            lua.pushBoolean(false);
+            return 1;
+        };
+
+        if (ui.delete_session_callback) |cb| {
+            cb(ui.delete_session_ctx, session_name) catch |err| {
+                lua.raiseErrorStr("Failed to delete session: %s", .{@errorName(err).ptr});
             };
             lua.pushBoolean(true);
         } else {
