@@ -182,7 +182,7 @@ pub const ClientState = struct {
     pty_validity: ?i64 = null,
 
     pub const RequestInfo = union(enum) {
-        spawn: struct { cwd: ?[]const u8 = null },
+        spawn: struct { cwd: ?[]const u8 = null, old_pty_id: ?u32 = null },
         attach: struct { pty_id: i64, cwd: ?[]const u8 = null },
         detach,
         get_server_info,
@@ -210,9 +210,9 @@ pub const ClientState = struct {
 pub const ServerAction = union(enum) {
     none,
     send_attach: i64,
-    spawn_pty_with_cwd: struct { cwd: ?[]const u8 },
+    spawn_pty_with_cwd: struct { cwd: ?[]const u8, old_pty_id: ?u32 = null },
     redraw: msgpack.Value,
-    attached: i64,
+    attached: struct { id: i64, old_id: ?u32 = null },
     pty_exited: struct { pty_id: u32, status: u32 },
     cwd_changed: struct { pty_id: u32, cwd: []const u8 },
     detached,
@@ -270,7 +270,7 @@ pub const ClientLogic = struct {
                 const attach_info = entry.value.attach;
                 if (err_val == .string and std.mem.eql(u8, err_val.string, "PTY not found")) {
                     log.info("PTY {} not found, spawning new PTY with cwd", .{attach_info.pty_id});
-                    return .{ .spawn_pty_with_cwd = .{ .cwd = attach_info.cwd } };
+                    return .{ .spawn_pty_with_cwd = .{ .cwd = attach_info.cwd, .old_pty_id = @intCast(attach_info.pty_id) } };
                 }
             }
         }
@@ -282,17 +282,17 @@ pub const ClientLogic = struct {
         if (request_info) |entry| {
             log.info("processServerMessage: found pending request: {s}", .{@tagName(entry.value)});
             return switch (entry.value) {
-                .spawn => |spawn_info| handleSpawnResult(state, result, spawn_info.cwd),
+                .spawn => |spawn_info| handleSpawnResult(state, result, spawn_info.cwd, spawn_info.old_pty_id),
                 .attach => |attach_info| {
                     state.pty_id = attach_info.pty_id;
                     state.attached = true;
                     if (attach_info.cwd) |c| {
-                        const owned_cwd = state.allocator.dupe(u8, c) catch return .{ .attached = attach_info.pty_id };
+                        const owned_cwd = state.allocator.dupe(u8, c) catch return .{ .attached = .{ .id = attach_info.pty_id } };
                         state.cwd_map.put(attach_info.pty_id, owned_cwd) catch {
                             state.allocator.free(owned_cwd);
                         };
                     }
-                    return .{ .attached = attach_info.pty_id };
+                    return .{ .attached = .{ .id = attach_info.pty_id } };
                 },
                 .detach => .detached,
                 .get_server_info => handleServerInfoResult(state, result),
@@ -333,7 +333,7 @@ pub const ClientLogic = struct {
         return .none;
     }
 
-    fn handleSpawnResult(state: *ClientState, result: msgpack.Value, cwd: ?[]const u8) ServerAction {
+    fn handleSpawnResult(state: *ClientState, result: msgpack.Value, cwd: ?[]const u8, old_pty_id: ?u32) ServerAction {
         const id: i64 = switch (result) {
             .integer => |i| i,
             .unsigned => |u| @intCast(u),
@@ -344,12 +344,12 @@ pub const ClientLogic = struct {
             state.pty_id = id;
             state.attached = true;
             if (cwd) |c| {
-                const owned_cwd = state.allocator.dupe(u8, c) catch return .{ .attached = id };
+                const owned_cwd = state.allocator.dupe(u8, c) catch return .{ .attached = .{ .id = id, .old_id = old_pty_id } };
                 state.cwd_map.put(id, owned_cwd) catch {
                     state.allocator.free(owned_cwd);
                 };
             }
-            return .{ .attached = id };
+            return .{ .attached = .{ .id = id, .old_id = old_pty_id } };
         }
         return .none;
     }
@@ -362,7 +362,7 @@ pub const ClientLogic = struct {
                     return .{ .send_attach = i };
                 } else if (!state.attached) {
                     state.attached = true;
-                    return .{ .attached = i };
+                    return .{ .attached = .{ .id = i } };
                 }
                 return .none;
             },
@@ -370,10 +370,10 @@ pub const ClientLogic = struct {
                 if (state.pty_id == null) {
                     state.pty_id = @intCast(u);
                     state.attached = true;
-                    return .{ .attached = @intCast(u) };
+                    return .{ .attached = .{ .id = @intCast(u) } };
                 } else if (!state.attached) {
                     state.attached = true;
-                    return .{ .attached = @intCast(u) };
+                    return .{ .attached = .{ .id = @intCast(u) } };
                 }
                 return .none;
             },
@@ -648,6 +648,9 @@ pub const App = struct {
     pipe_recv_buffer: [4096]u8 = undefined,
     colors: Surface.TerminalColors = .{},
 
+    send_queue: std.ArrayListUnmanaged([]u8),
+    send_offset: usize = 0,
+
     pending_attach_ids: ?[]u32 = null,
     pending_attach_count: usize = 0,
     session_json: ?[]const u8 = null,
@@ -662,6 +665,9 @@ pub const App = struct {
     current_session_name: ?[]const u8 = null,
     // Auto-save timer for debouncing
     autosave_timer: ?io.Task = null,
+
+    /// Map old PTY IDs to new PTY IDs when server restarts during session attach
+    pty_id_map: std.AutoHashMap(u32, u32),
 
     pub const PendingColorQuery = struct {
         pty_id: u32,
@@ -697,6 +703,8 @@ pub const App = struct {
             .surfaces = std.AutoHashMap(u32, *Surface).init(allocator),
             .state = ClientState.init(allocator),
             .pending_attach_cwd = std.AutoHashMap(u32, []const u8).init(allocator),
+            .pty_id_map = std.AutoHashMap(u32, u32).init(allocator),
+            .send_queue = .{},
             .pending_color_queries = .empty,
         };
         app.parser = .{};
@@ -794,6 +802,14 @@ pub const App = struct {
             self.allocator.free(cwd.*);
         }
         self.pending_attach_cwd.deinit();
+        self.pty_id_map.deinit();
+        if (self.send_buffer) |buf| {
+            self.allocator.free(buf);
+        }
+        for (self.send_queue.items) |buf| {
+            self.allocator.free(buf);
+        }
+        self.send_queue.deinit(self.allocator);
         self.pending_color_queries.deinit(self.allocator);
         if (self.current_session_name) |name| {
             self.allocator.free(name);
@@ -1899,23 +1915,6 @@ pub const App = struct {
         self.allocator.free(msg);
     }
 
-    fn onSendComplete(_: *io.Loop, completion: io.Completion) anyerror!void {
-        const app = completion.userdataCast(@This());
-
-        if (app.send_buffer) |buf| {
-            app.allocator.free(buf);
-            app.send_buffer = null;
-        }
-
-        switch (completion.result) {
-            .send => {},
-            .err => |err| {
-                log.err("Send failed: {}", .{err});
-            },
-            else => unreachable,
-        }
-    }
-
     fn onRecv(l: *io.Loop, completion: io.Completion) anyerror!void {
         const app = completion.userdataCast(@This());
         defer _ = app.msg_arena.reset(.retain_capacity);
@@ -1960,20 +1959,23 @@ pub const App = struct {
                         switch (action) {
                             .send_attach => |pty_id| {
                                 log.info("Sending attach_pty for session {}", .{pty_id});
-                                app.send_buffer = try msgpack.encode(app.allocator, .{ 0, @intFromEnum(MsgId.attach_pty), "attach_pty", .{ pty_id, "false" } });
-                                _ = try l.send(app.fd, app.send_buffer.?, .{
-                                    .ptr = app,
-                                    .cb = onSendComplete,
-                                });
+                                const attach_msg = try msgpack.encode(app.allocator, .{ 0, @intFromEnum(MsgId.attach_pty), "attach_pty", .{ pty_id, "false" } });
+                                defer app.allocator.free(attach_msg);
+                                try app.sendDirect(attach_msg);
                             },
                             .redraw => |params| {
                                 app.handleRedraw(params) catch |err| {
                                     log.err("Failed to handle redraw: {}", .{err});
                                 };
                             },
-                            .attached => |id_i64| {
+                            .attached => |info| {
                                 log.info("Attached to session, checking for resize", .{});
-                                const pty_id = @as(u32, @intCast(id_i64));
+                                const pty_id = @as(u32, @intCast(info.id));
+                                if (info.old_id) |old_id| {
+                                    app.pty_id_map.put(old_id, pty_id) catch |err| {
+                                        log.err("Failed to store PTY ID mapping: {}", .{err});
+                                    };
+                                }
 
                                 // Ensure surface exists
                                 if (!app.surfaces.contains(pty_id)) {
@@ -2234,7 +2236,7 @@ pub const App = struct {
                                 log.info("Spawning new PTY with cwd: {s}", .{if (info.cwd) |c| c else "default"});
                                 const msgid = app.state.next_msgid;
                                 app.state.next_msgid += 1;
-                                try app.state.pending_requests.put(msgid, .{ .spawn = .{ .cwd = info.cwd } });
+                                try app.state.pending_requests.put(msgid, .{ .spawn = .{ .cwd = info.cwd, .old_pty_id = info.old_pty_id } });
 
                                 // Build env array from current process environment
                                 var env_map = try std.process.getEnvMap(app.allocator);
@@ -2402,13 +2404,64 @@ pub const App = struct {
     }
 
     fn sendDirect(self: *App, data: []const u8) !void {
-        var index: usize = 0;
-        while (index < data.len) {
-            const n = posix.write(self.fd, data[index..]) catch |err| {
-                if (err == error.WouldBlock) continue;
-                return err;
-            };
-            index += n;
+        const loop = self.io_loop orelse return error.NoLoop;
+        const buf = try self.allocator.dupe(u8, data);
+        errdefer self.allocator.free(buf);
+
+        if (self.send_task != null) {
+            try self.send_queue.append(self.allocator, buf);
+            return;
+        }
+
+        self.send_buffer = buf;
+        self.send_offset = 0;
+        self.send_task = try loop.send(self.fd, buf, .{
+            .ptr = self,
+            .cb = onSendComplete,
+        });
+    }
+
+    fn onSendComplete(l: *io.Loop, completion: io.Completion) anyerror!void {
+        const app = completion.userdataCast(@This());
+
+        switch (completion.result) {
+            .send => |n| {
+                const buf = app.send_buffer orelse return;
+                app.send_offset += n;
+
+                if (app.send_offset < buf.len) {
+                    app.send_task = try l.send(app.fd, buf[app.send_offset..], .{
+                        .ptr = app,
+                        .cb = onSendComplete,
+                    });
+                    return;
+                }
+
+                app.allocator.free(buf);
+                app.send_buffer = null;
+                app.send_offset = 0;
+                app.send_task = null;
+
+                if (app.send_queue.items.len > 0) {
+                    const next_buf = app.send_queue.orderedRemove(0);
+                    app.send_buffer = next_buf;
+                    app.send_offset = 0;
+                    app.send_task = try l.send(app.fd, next_buf, .{
+                        .ptr = app,
+                        .cb = onSendComplete,
+                    });
+                }
+            },
+            .err => |err| {
+                log.err("Send failed: {}", .{err});
+                if (app.send_buffer) |buf| {
+                    app.allocator.free(buf);
+                    app.send_buffer = null;
+                    app.send_offset = 0;
+                }
+                app.send_task = null;
+            },
+            else => unreachable,
         }
     }
 
@@ -2646,6 +2699,16 @@ pub const App = struct {
 
         log.info("Exec'ing {s} session attach '{s}'", .{ self_exe, target_session });
 
+        // NOW STOP EVERYTHING to avoid races in TTY thread during deinit
+        self.state.should_quit = true;
+        // Wake up TTY thread by sending a Device Status Report request.
+        // This causes the terminal to send a response, unblocking the read.
+        self.vx.deviceStatusReport(self.tty.writer()) catch {};
+        if (self.tty_thread) |thread| {
+            thread.join();
+            self.tty_thread = null;
+        }
+
         // Restore terminal state right before exec to minimize window of failure
         const writer = self.tty.writer();
         self.vx.deinit(self.allocator, writer);
@@ -2656,7 +2719,9 @@ pub const App = struct {
 
         // If we get here, exec failed - reinitialize terminal
         log.err("Failed to exec {s}: {}", .{ self_exe, err });
+        self.state.should_quit = false;
         self.tty = try vaxis.Tty.init(&self.tty_buffer);
+        self.tty_thread = try std.Thread.spawn(.{}, ttyThreadFn, .{self});
         self.vx = vaxis.init(self.allocator, .{
             .kitty_keyboard_flags = .{
                 .report_events = true,
@@ -2867,7 +2932,8 @@ pub const App = struct {
     fn ptyLookup(ctx: *anyopaque, id: u32) ?UI.PtyLookupResult {
         const self: *App = @ptrCast(@alignCast(ctx));
 
-        const surface = self.surfaces.get(id) orelse return null;
+        const real_id = self.pty_id_map.get(id) orelse id;
+        const surface = self.surfaces.get(real_id) orelse return null;
 
         return .{
             .surface = surface,
@@ -2875,6 +2941,7 @@ pub const App = struct {
             .send_key_fn = struct {
                 fn sendKey(app_ctx: *anyopaque, pty_id: u32, key: lua_event.KeyData) anyerror!void {
                     const app: *App = @ptrCast(@alignCast(app_ctx));
+                    const target_id = app.pty_id_map.get(pty_id) orelse pty_id;
 
                     var key_map_kv = try app.allocator.alloc(msgpack.Value.KeyValue, 6);
                     key_map_kv[0] = .{ .key = .{ .string = "key" }, .value = .{ .string = key.key } };
@@ -2887,7 +2954,7 @@ pub const App = struct {
                     const key_map_val: msgpack.Value = .{ .map = key_map_kv };
 
                     var params = try app.allocator.alloc(msgpack.Value, 2);
-                    params[0] = .{ .unsigned = @intCast(pty_id) };
+                    params[0] = .{ .unsigned = @intCast(target_id) };
                     params[1] = key_map_val;
 
                     const method: []const u8 = if (key.release) "key_release" else "key_input";
@@ -2910,6 +2977,7 @@ pub const App = struct {
             .send_mouse_fn = struct {
                 fn sendMouse(app_ctx: *anyopaque, pty_id: u32, mouse: lua_event.MouseData) anyerror!void {
                     const app: *App = @ptrCast(@alignCast(app_ctx));
+                    const target_id = app.pty_id_map.get(pty_id) orelse pty_id;
 
                     var mouse_map_kv = try app.allocator.alloc(msgpack.Value.KeyValue, 7);
                     mouse_map_kv[0] = .{ .key = .{ .string = "x" }, .value = .{ .float = mouse.x } };
@@ -2923,7 +2991,7 @@ pub const App = struct {
                     const mouse_map_val: msgpack.Value = .{ .map = mouse_map_kv };
 
                     var params = try app.allocator.alloc(msgpack.Value, 2);
-                    params[0] = .{ .unsigned = @intCast(pty_id) };
+                    params[0] = .{ .unsigned = @intCast(target_id) };
                     params[1] = mouse_map_val;
 
                     var arr = try app.allocator.alloc(msgpack.Value, 3);
@@ -2944,9 +3012,10 @@ pub const App = struct {
             .send_paste_fn = struct {
                 fn sendPaste(app_ctx: *anyopaque, pty_id: u32, data: []const u8) anyerror!void {
                     const app: *App = @ptrCast(@alignCast(app_ctx));
+                    const target_id = app.pty_id_map.get(pty_id) orelse pty_id;
 
                     var params = try app.allocator.alloc(msgpack.Value, 2);
-                    params[0] = .{ .unsigned = @intCast(pty_id) };
+                    params[0] = .{ .unsigned = @intCast(target_id) };
                     params[1] = .{ .binary = data };
 
                     var arr = try app.allocator.alloc(msgpack.Value, 3);
@@ -2961,15 +3030,16 @@ pub const App = struct {
                     app.allocator.free(params);
 
                     try app.sendDirect(encoded_msg);
-                    log.debug("Sent paste_input: {} bytes to pty {}", .{ data.len, pty_id });
+                    log.debug("Sent paste_input: {} bytes to pty {}", .{ data.len, target_id });
                 }
             }.sendPaste,
             .send_write_fn = struct {
                 fn sendWrite(app_ctx: *anyopaque, pty_id: u32, data: []const u8) anyerror!void {
                     const app: *App = @ptrCast(@alignCast(app_ctx));
+                    const target_id = app.pty_id_map.get(pty_id) orelse pty_id;
 
                     var params = try app.allocator.alloc(msgpack.Value, 2);
-                    params[0] = .{ .unsigned = @intCast(pty_id) };
+                    params[0] = .{ .unsigned = @intCast(target_id) };
                     params[1] = .{ .binary = data };
 
                     var arr = try app.allocator.alloc(msgpack.Value, 3);
@@ -2989,9 +3059,10 @@ pub const App = struct {
             .set_focus_fn = struct {
                 fn sendFocus(app_ctx: *anyopaque, pty_id: u32, focused: bool) anyerror!void {
                     const app: *App = @ptrCast(@alignCast(app_ctx));
+                    const target_id = app.pty_id_map.get(pty_id) orelse pty_id;
 
                     var params = try app.allocator.alloc(msgpack.Value, 2);
-                    params[0] = .{ .unsigned = @intCast(pty_id) };
+                    params[0] = .{ .unsigned = @intCast(target_id) };
                     params[1] = .{ .boolean = focused };
 
                     var arr = try app.allocator.alloc(msgpack.Value, 3);
@@ -3006,15 +3077,16 @@ pub const App = struct {
                     app.allocator.free(params);
 
                     try app.sendDirect(encoded_msg);
-                    log.debug("Sent focus_event: {} to pty {}", .{ focused, pty_id });
+                    log.debug("Sent focus_event: {} to pty {}", .{ focused, target_id });
                 }
             }.sendFocus,
             .close_fn = struct {
                 fn closePty(app_ctx: *anyopaque, pty_id: u32) anyerror!void {
                     const app: *App = @ptrCast(@alignCast(app_ctx));
+                    const target_id = app.pty_id_map.get(pty_id) orelse pty_id;
 
                     var params = try app.allocator.alloc(msgpack.Value, 1);
-                    params[0] = .{ .unsigned = @intCast(pty_id) };
+                    params[0] = .{ .unsigned = @intCast(target_id) };
 
                     // Use 0 for request type (it's a request, but we don't wait for response here as it's fire-and-forget from Lua perspective)
                     // Actually, let's use request type 0 and a dummy msgid, or just notification type 2?
@@ -3041,13 +3113,15 @@ pub const App = struct {
             .cwd_fn = struct {
                 fn getCwd(app_ctx: *anyopaque, pty_id: u32) ?[]const u8 {
                     const app: *App = @ptrCast(@alignCast(app_ctx));
-                    return app.state.cwd_map.get(@intCast(pty_id));
+                    const target_id = app.pty_id_map.get(pty_id) orelse pty_id;
+                    return app.state.cwd_map.get(@intCast(target_id));
                 }
             }.getCwd,
             .copy_selection_fn = struct {
                 fn copySelection(app_ctx: *anyopaque, pty_id: u32) anyerror!void {
                     const app: *App = @ptrCast(@alignCast(app_ctx));
-                    try app.requestCopySelection(pty_id);
+                    const target_id = app.pty_id_map.get(pty_id) orelse pty_id;
+                    try app.requestCopySelection(target_id);
                 }
             }.copySelection,
             .cell_size_fn = struct {

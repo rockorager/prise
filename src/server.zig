@@ -2762,6 +2762,7 @@ const Server = struct {
     fn sendCwdChanged(self: *Server, pty_instance: *Pty) !void {
         pty_instance.terminal_mutex.lock();
         defer pty_instance.terminal_mutex.unlock();
+
         if (pty_instance.cwd.items.len == 0) return;
 
         var map_items = try self.allocator.alloc(msgpack.Value.KeyValue, 2);
