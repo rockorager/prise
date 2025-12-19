@@ -12,6 +12,7 @@ const ui_mod = @import("ui.zig");
 const UI = ui_mod.UI;
 const vaxis_helper = @import("vaxis_helper.zig");
 const widget = @import("widget.zig");
+const layout = @import("layout.zig");
 const posix = std.posix;
 
 const log = std.log.scoped(.client);
@@ -623,6 +624,8 @@ pub const App = struct {
     attach_session: ?[]const u8 = null,
     /// User-specified session name for new session (passed via `prise -s <name>`)
     new_session_name: ?[]const u8 = null,
+    /// Startup layout name for new sessions (passed via `prise --layout <name>`)
+    startup_layout_name: ?[]const u8 = null,
     initial_cwd: ?[]const u8 = null,
     last_render_time: i64 = 0,
     render_timer: ?io.Task = null,
@@ -1698,13 +1701,35 @@ pub const App = struct {
             // User specified a name for new session
             self.current_session_name = try self.allocator.dupe(u8, name);
             log.info("Starting new session with user-specified name: {s}", .{name});
+            try self.applyStartupLayout();
             try self.spawnInitialPty();
         } else {
             // Generate a new session name for fresh launch
             self.current_session_name = try self.ui.getNextSessionName();
             log.info("Starting new session: {s}", .{self.current_session_name.?});
+            try self.applyStartupLayout();
             try self.spawnInitialPty();
         }
+    }
+
+    fn applyStartupLayout(self: *App) !void {
+        // Layouts only apply when creating a new session.
+        std.debug.assert(self.attach_session == null);
+
+        const cwd = self.initial_cwd orelse blk: {
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            break :blk std.posix.getcwd(&cwd_buf) catch return;
+        };
+
+        var arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena.deinit();
+
+        const plan = try layout.selectPlan(arena.allocator(), .{
+            .cwd = cwd,
+            .layout_name = self.startup_layout_name,
+        });
+
+        try self.ui.applyLayout(plan);
     }
 
     fn spawnInitialPty(self: *App) !void {
@@ -2076,6 +2101,28 @@ pub const App = struct {
                                                         log.debug("Sent paste_input: {} bytes to pty {}", .{ data.len, id });
                                                     }
                                                 }.appSendPaste,
+                                                .send_write_fn = struct {
+                                                    fn appSendWrite(ctx: *anyopaque, id: u32, data: []const u8) anyerror!void {
+                                                        const self: *App = @ptrCast(@alignCast(ctx));
+
+                                                        var params = try self.allocator.alloc(msgpack.Value, 2);
+                                                        params[0] = .{ .unsigned = @intCast(id) };
+                                                        params[1] = .{ .binary = data };
+
+                                                        var arr = try self.allocator.alloc(msgpack.Value, 3);
+                                                        arr[0] = .{ .unsigned = 2 }; // notification
+                                                        arr[1] = .{ .string = "write_pty" };
+                                                        arr[2] = .{ .array = params };
+
+                                                        const encoded_msg = try msgpack.encodeFromValue(self.allocator, .{ .array = arr });
+                                                        defer self.allocator.free(encoded_msg);
+
+                                                        self.allocator.free(arr);
+                                                        self.allocator.free(params);
+
+                                                        try self.sendDirect(encoded_msg);
+                                                    }
+                                                }.appSendWrite,
                                                 .set_focus_fn = struct {
                                                     fn appSendFocus(ctx: *anyopaque, id: u32, focused: bool) anyerror!void {
                                                         const self: *App = @ptrCast(@alignCast(ctx));
@@ -2905,6 +2952,28 @@ pub const App = struct {
                     log.debug("Sent paste_input: {} bytes to pty {}", .{ data.len, pty_id });
                 }
             }.sendPaste,
+            .send_write_fn = struct {
+                fn sendWrite(app_ctx: *anyopaque, pty_id: u32, data: []const u8) anyerror!void {
+                    const app: *App = @ptrCast(@alignCast(app_ctx));
+
+                    var params = try app.allocator.alloc(msgpack.Value, 2);
+                    params[0] = .{ .unsigned = @intCast(pty_id) };
+                    params[1] = .{ .binary = data };
+
+                    var arr = try app.allocator.alloc(msgpack.Value, 3);
+                    arr[0] = .{ .unsigned = 2 }; // notification
+                    arr[1] = .{ .string = "write_pty" };
+                    arr[2] = .{ .array = params };
+
+                    const encoded_msg = try msgpack.encodeFromValue(app.allocator, .{ .array = arr });
+                    defer app.allocator.free(encoded_msg);
+
+                    app.allocator.free(arr);
+                    app.allocator.free(params);
+
+                    try app.sendDirect(encoded_msg);
+                }
+            }.sendWrite,
             .set_focus_fn = struct {
                 fn sendFocus(app_ctx: *anyopaque, pty_id: u32, focused: bool) anyerror!void {
                     const app: *App = @ptrCast(@alignCast(app_ctx));
