@@ -954,6 +954,14 @@ pub const App = struct {
             }
         }.renameCb);
 
+        // Register delete_session callback
+        self.ui.setDeleteSessionCallback(self, struct {
+            fn deleteCb(ctx: *anyopaque, session_name: []const u8) anyerror!void {
+                const app_ptr: *App = @ptrCast(@alignCast(ctx));
+                try app_ptr.deleteSession(session_name);
+            }
+        }.deleteCb);
+
         // Register switch_session callback
         self.ui.setSwitchSessionCallback(self, struct {
             fn switchCb(ctx: *anyopaque, target_session: []const u8) anyerror!void {
@@ -2624,6 +2632,21 @@ pub const App = struct {
             log.warn("Failed to delete session file {s}: {}", .{ filename, err });
             return;
         };
+        log.info("Deleted session file: {s}", .{filename});
+    }
+
+    pub fn deleteSession(self: *App, session_name: []const u8) !void {
+        const home = std.posix.getenv("HOME") orelse return error.NoHomeDirectory;
+        const state_dir = try std.fs.path.join(self.allocator, &.{ home, ".local", "state", "prise", "sessions" });
+        defer self.allocator.free(state_dir);
+
+        const filename = try std.fmt.allocPrint(self.allocator, "{s}.json", .{session_name});
+        defer self.allocator.free(filename);
+
+        var dir = try std.fs.openDirAbsolute(state_dir, .{});
+        defer dir.close();
+
+        try dir.deleteFile(filename);
         log.info("Deleted session file: {s}", .{filename});
     }
 

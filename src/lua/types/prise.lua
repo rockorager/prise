@@ -108,6 +108,10 @@ function prise.get_session_name() end
 ---@param new_name string
 function prise.rename_session(new_name) end
 
+---Delete a session
+---@param session_name string
+function prise.delete_session(session_name) end
+
 ---List all available sessions
 ---@return string[]
 function prise.list_sessions() end
