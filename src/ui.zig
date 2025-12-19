@@ -13,6 +13,7 @@ const msgpack = @import("msgpack.zig");
 const Surface = @import("Surface.zig");
 const TextInput = @import("TextInput.zig");
 const widget = @import("widget.zig");
+const layout = @import("layout.zig");
 
 const log = std.log.scoped(.ui);
 const logger = std.log.scoped(.lua);
@@ -992,6 +993,71 @@ pub const UI = struct {
         return "false";
     }
 
+    pub fn applyLayout(self: *UI, plan: layout.Plan) !void {
+        _ = self.lua.getField(ziglua.registry_index, "prise_ui");
+        defer self.lua.pop(1);
+
+        _ = self.lua.getField(-1, "apply_layout");
+        if (self.lua.typeOf(-1) != .function) {
+            // Optional extension point: custom UIs may not support layouts.
+            self.lua.pop(1);
+            return;
+        }
+
+        pushLayoutPlan(self.lua, plan);
+
+        self.lua.protectedCall(.{ .args = 1, .results = 0, .msg_handler = 0 }) catch |err| {
+            const msg = self.lua.toString(-1) catch "Unknown Lua error";
+            log.err("Lua apply_layout error: {s}", .{msg});
+            self.lua.pop(1);
+            return err;
+        };
+    }
+
+    fn pushLayoutPlan(lua: *ziglua.Lua, plan: layout.Plan) void {
+        lua.createTable(0, 1);
+
+        lua.createTable(@intCast(plan.windows.len), 0);
+        for (plan.windows, 0..) |w, i| {
+            lua.createTable(0, 2);
+
+            if (w.name) |name| {
+                _ = lua.pushString(name);
+                lua.setField(-2, "name");
+            }
+
+            lua.createTable(@intCast(w.panes.len), 0);
+            for (w.panes, 0..) |p, j| {
+                lua.createTable(0, 3);
+
+                if (p.title) |title| {
+                    _ = lua.pushString(title);
+                    lua.setField(-2, "title");
+                }
+
+                if (p.cmd) |cmd| {
+                    _ = lua.pushString(cmd);
+                    lua.setField(-2, "cmd");
+                }
+
+                if (p.split) |split| {
+                    const split_str: []const u8 = switch (split) {
+                        .horizontal => "horizontal",
+                        .vertical => "vertical",
+                    };
+                    _ = lua.pushString(split_str);
+                    lua.setField(-2, "split");
+                }
+
+                lua.rawSetIndex(-2, @intCast(j + 1));
+            }
+            lua.setField(-2, "panes");
+
+            lua.rawSetIndex(-2, @intCast(i + 1));
+        }
+        lua.setField(-2, "windows");
+    }
+
     pub fn update(self: *UI, event: lua_event.Event) !void {
         _ = self.lua.getField(ziglua.registry_index, "prise_ui");
         defer self.lua.pop(1);
@@ -1072,6 +1138,7 @@ pub const UI = struct {
         send_key_fn: *const fn (app: *anyopaque, id: u32, key: lua_event.KeyData) anyerror!void,
         send_mouse_fn: *const fn (app: *anyopaque, id: u32, mouse: lua_event.MouseData) anyerror!void,
         send_paste_fn: *const fn (app: *anyopaque, id: u32, data: []const u8) anyerror!void,
+        send_write_fn: *const fn (app: *anyopaque, id: u32, data: []const u8) anyerror!void,
         set_focus_fn: *const fn (app: *anyopaque, id: u32, focused: bool) anyerror!void,
         close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
         cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
@@ -1125,7 +1192,7 @@ pub const UI = struct {
         const result = lookup_ctx.lookup_fn(lookup_ctx.ctx, id);
 
         if (result) |r| {
-            lua_event.pushPtyUserdata(lua, id, r.surface, r.app, r.send_key_fn, r.send_mouse_fn, r.send_paste_fn, r.set_focus_fn, r.close_fn, r.cwd_fn, r.copy_selection_fn, r.cell_size_fn) catch {
+            lua_event.pushPtyUserdata(lua, id, r.surface, r.app, r.send_key_fn, r.send_mouse_fn, r.send_paste_fn, r.send_write_fn, r.set_focus_fn, r.close_fn, r.cwd_fn, r.copy_selection_fn, r.cell_size_fn) catch {
                 lua.pushNil();
             };
         } else {

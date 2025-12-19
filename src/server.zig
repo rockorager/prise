@@ -760,6 +760,8 @@ const RedrawContext = struct {
 };
 
 fn emitTitle(builder: *redraw.RedrawBuilder, pty_instance: *Pty, mode: RenderMode) !void {
+    pty_instance.terminal_mutex.lock();
+    defer pty_instance.terminal_mutex.unlock();
     if (mode == .full or pty_instance.title_dirty) {
         try builder.title(@intCast(pty_instance.id), pty_instance.title.items);
         pty_instance.title_dirty = false;
@@ -2518,6 +2520,7 @@ const Server = struct {
             const pty_instance = entry.value_ptr.*;
             const pty_entries = try self.allocator.alloc(msgpack.Value.KeyValue, 4);
 
+            pty_instance.terminal_mutex.lock();
             pty_entries[0] = .{
                 .key = .{ .string = try self.allocator.dupe(u8, "id") },
                 .value = .{ .unsigned = @intCast(pty_instance.id) },
@@ -2534,6 +2537,7 @@ const Server = struct {
                 .key = .{ .string = try self.allocator.dupe(u8, "attached_client_count") },
                 .value = .{ .unsigned = @intCast(pty_instance.clients.items.len) },
             };
+            pty_instance.terminal_mutex.unlock();
 
             ptys_array[i] = .{ .map = pty_entries };
             i += 1;
@@ -2756,6 +2760,9 @@ const Server = struct {
     }
 
     fn sendCwdChanged(self: *Server, pty_instance: *Pty) !void {
+        pty_instance.terminal_mutex.lock();
+        defer pty_instance.terminal_mutex.unlock();
+
         if (pty_instance.cwd.items.len == 0) return;
 
         var map_items = try self.allocator.alloc(msgpack.Value.KeyValue, 2);

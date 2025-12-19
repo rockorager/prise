@@ -20,6 +20,8 @@ const ParseResult = struct {
     attach_session: ?[]const u8 = null,
     /// Session name for a new session (user-specified)
     new_session_name: ?[]const u8 = null,
+    /// Startup layout name for new sessions
+    layout_name: ?[]const u8 = null,
 };
 
 var log_file: ?std.fs.File = null;
@@ -98,6 +100,7 @@ pub fn main() !void {
     defer {
         if (result.attach_session) |s| allocator.free(s);
         if (result.new_session_name) |s| allocator.free(s);
+        if (result.layout_name) |s| allocator.free(s);
     }
     try runClient(allocator, socket_path, result);
 }
@@ -109,6 +112,7 @@ fn parseArgs(allocator: std.mem.Allocator, socket_path: []const u8) !?ParseResul
 
     var result: ParseResult = .{};
     errdefer if (result.new_session_name) |s| allocator.free(s);
+    errdefer if (result.layout_name) |s| allocator.free(s);
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v")) {
@@ -133,6 +137,12 @@ fn parseArgs(allocator: std.mem.Allocator, socket_path: []const u8) !?ParseResul
                 return error.SessionAlreadyExists;
             }
             result.new_session_name = try allocator.dupe(u8, name);
+        } else if (std.mem.eql(u8, arg, "--layout")) {
+            const name = args.next() orelse {
+                printSessionNameError("error: --layout requires a layout name\n");
+                return error.MissingArgument;
+            };
+            result.layout_name = try allocator.dupe(u8, name);
         } else if (std.mem.eql(u8, arg, "serve")) {
             initLogFile("server.log");
             try server.startServer(allocator, socket_path);
@@ -221,6 +231,7 @@ fn printHelp() !void {
         \\
         \\Options:
         \\  -s, --session <name>  Create a new session with the specified name
+        \\      --layout <name>   Apply layout when creating a new session
         \\  -h, --help            Show this help message
         \\  -v, --version         Show version
         \\
@@ -409,6 +420,7 @@ fn runClient(allocator: std.mem.Allocator, socket_path: []const u8, args: ParseR
     app.socket_path = socket_path;
     app.attach_session = args.attach_session;
     app.new_session_name = args.new_session_name;
+    app.startup_layout_name = args.layout_name;
 
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     app.initial_cwd = posix.getcwd(&cwd_buf) catch null;
@@ -766,6 +778,7 @@ test {
     _ = @import("rpc.zig");
     _ = @import("pty.zig");
     _ = @import("client.zig");
+    _ = @import("layout.zig");
     _ = @import("redraw.zig");
     _ = @import("Surface.zig");
     _ = @import("widget.zig");

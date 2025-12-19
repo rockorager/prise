@@ -20,6 +20,10 @@
             .url = "git+https://github.com/rockorager/zeit#7ac64d72dbfb1a4ad549102e7d4e232a687d32d8",
             .hash = "zeit-0.6.0-5I6bk36tAgATpSl9wjFmRPMqYN2Mn0JQHgIcRNcqDpJA",
         },
+        .yaml = .{
+            .url = "git+https://github.com/kubkon/zig-yaml#a6c2cd8760bf45c49b17a3f6259c4dfe3ded528e",
+            .hash = "zig_yaml-0.2.0-C1161pmrAgDnipDTh_4v4RQD27XN5GNaVlzzvlXf1jfW",
+        },
     },
     .paths = .{
         "build.zig",

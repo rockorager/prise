@@ -54,6 +54,12 @@ Manage sessions.
 
 # OPTIONS
 
+**-s**, **--session** *name*
+:   Create a new session with the specified name.
+
+**--layout** *name*
+:   Apply the specified layout when creating a new session. See **prise**(5) for layout configuration.
+
 **-h**, **--help**
 :   Show help message.
 
@@ -67,6 +73,12 @@ Manage sessions.
 
 *~/.config/prise/init.lua*
 :   User configuration file. See **prise**(5).
+
+*~/.config/prise/layout.yml*
+:   Global startup layout configurations.
+
+*.prise.yml*
+:   Local project startup layout configuration. Prise searches for this file in the current working directory and its parents.
 
 *~/.local/share/prise/sessions/*
 :   Session state files.

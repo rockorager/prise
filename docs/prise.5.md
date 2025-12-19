@@ -394,6 +394,129 @@ The tiling UI uses a leader key sequence. Press the leader key (default:
 
 The command palette (**Super+p**) provides fuzzy search for all commands.
 
+# STARTUP LAYOUTS
+
+Prise supports defining startup layouts in YAML files. These layouts automatically create tabs and panes with specific commands when a new session is started.
+
+## Configuration Files
+
+Prise searches for layout configurations in the following order:
+
+1.  The layout specified by the **--layout** CLI flag.
+2.  Local project configuration in **.prise.yml** (searches from current directory up to root).
+3.  Global configuration in **~/.config/prise/layout.yml**.
+4.  Built-in layouts.
+
+## Schema
+
+A layout file can contain either a single layout or a list of layouts.
+
+**layout**
+:   A single layout configuration object.
+
+**layouts**
+:   A list of layout configuration objects.
+
+**default_layout**
+:   The name of the layout to use if multiple layouts are defined and no name is specified via CLI.
+
+### Layout Configuration Object
+
+**name**
+:   The name of the layout.
+
+**vars**
+:   A map of key-value pairs for variable expansion in commands.
+
+**windows**
+:   A list of window (tab) configurations.
+
+### Window Configuration Object
+
+**name**
+:   The name/title of the tab.
+
+**panes**
+:   A list of pane configurations.
+
+### Pane Configuration Object
+
+**title**
+:   The title of the pane (optional).
+
+**cmd**
+:   The command to execute in the pane (optional).
+
+**split**
+:   The split direction for the pane. Options: **"horizontal"**, **"vertical"**. The first pane in a window must not have a split specified.
+
+## Variable Expansion
+
+The **cmd** and **vars** fields support variable expansion using the `${VAR}` syntax.
+
+**${HOME}**
+:   The user's home directory.
+
+**${EDITOR}**
+:   The user's default editor.
+
+**${SHELL}**
+:   The user's default shell.
+
+**${PROJECT_DIR}**
+:   The absolute path of the project directory (where .prise.yml was found, or current directory).
+
+**${PROJECT_NAME}**
+:   The basename of the project directory.
+
+## Examples
+
+### Global layout.yml
+
+```yaml
+default_layout: dev
+
+layouts:
+  - name: dev
+    windows:
+      - name: code
+        panes:
+          - title: editor
+            cmd: "${EDITOR}"
+          - title: server
+            cmd: "npm run dev"
+            split: horizontal
+          - title: shell
+            split: vertical
+```
+
+### Local .prise.yml
+
+```yaml
+layout:
+  name: prise-dev
+  windows:
+    - name: prise
+      panes:
+        - cmd: "zig build run"
+        - cmd: "lazygit"
+          split: horizontal
+```
+
+## Built-in Layouts
+
+**default**
+:   A single window with one pane.
+
+**horizontal-split**
+:   A single window with two panes side-by-side.
+
+**vertical-split**
+:   A single window with two panes stacked vertically.
+
+**dev**
+:   A single window with one large pane on the left, and two smaller panes stacked on the right.
+
 # SEE ALSO
 
 [prise(1)](prise.1.html), [prise(7)](prise.7.html)
