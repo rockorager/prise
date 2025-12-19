@@ -1794,9 +1794,8 @@ local function filter_commands(query)
             local cmd_name = cmd.name
             if type(cmd_name) == "function" then
                 cmd_name = cmd_name()
-            else
-                cmd_name = tostring(cmd_name)
             end
+            cmd_name = tostring(cmd_name)
             if not query or query == "" or cmd_name:lower():find(query:lower(), 1, true) then
                 table.insert(results, cmd)
             end
@@ -2532,9 +2531,8 @@ local function build_palette()
         local cmd_name = cmd.name
         if type(cmd_name) == "function" then
             cmd_name = cmd_name()
-        else
-            cmd_name = tostring(cmd_name)
         end
+        cmd_name = tostring(cmd_name)
         table.insert(items, format_palette_item(cmd_name, cmd.shortcut, PALETTE_INNER_WIDTH))
     end
 
