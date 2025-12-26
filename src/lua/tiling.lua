@@ -68,7 +68,7 @@ local utils = require("utils")
 ---@field keybind_matcher? KeybindMatcher
 
 ---@class Command
----@field name string
+---@field name string|fun(): string
 ---@field action fun()
 ---@field shortcut? string
 ---@field visible? fun(): boolean
@@ -1732,7 +1732,10 @@ local function filter_commands(query)
     for _, cmd in ipairs(commands) do
         local is_visible = not cmd.visible or cmd.visible()
         if is_visible then
-            local cmd_name = type(cmd.name) == "function" and cmd.name() or cmd.name
+            local cmd_name = cmd.name
+            if type(cmd_name) == "function" then
+                cmd_name = cmd_name()
+            end
             if not query or query == "" or cmd_name:lower():find(query:lower(), 1, true) then
                 table.insert(results, cmd)
             end
@@ -2452,7 +2455,10 @@ local function build_palette()
 
     local items = {}
     for _, cmd in ipairs(filtered) do
-        local cmd_name = type(cmd.name) == "function" and cmd.name() or cmd.name
+        local cmd_name = cmd.name
+        if type(cmd_name) == "function" then
+            cmd_name = cmd_name()
+        end
         table.insert(items, format_palette_item(cmd_name, cmd.shortcut, PALETTE_INNER_WIDTH))
     end
 
