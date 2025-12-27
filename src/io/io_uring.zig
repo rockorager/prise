@@ -12,6 +12,8 @@ const log = std.log.scoped(.io_uring);
 const RING_ENTRIES: u13 = 256;
 const CQE_BATCH_SIZE: usize = 32;
 
+fn noopSignalHandler(_: c_int) callconv(std.builtin.CallingConvention.c) void {}
+
 pub const Loop = struct {
     allocator: std.mem.Allocator,
     ring: linux.IoUring,
@@ -257,7 +259,10 @@ pub const Loop = struct {
             _ = try self.ring.submit();
 
             const wait_nr: u32 = if (mode == .once) 0 else 1;
-            const n = try self.ring.copy_cqes(&cqes, wait_nr);
+            const n = self.ring.copy_cqes(&cqes, wait_nr) catch |err| switch (err) {
+                error.SignalInterrupt => continue,
+                else => return err,
+            };
 
             if (n == 0 and mode == .once) break;
 
@@ -607,4 +612,63 @@ test "io_uring loop - cancelByFd" {
 
     try loop.run(.until_done);
     try testing.expect(canceled);
+}
+
+test "io_uring loop - ignores SignalInterrupt" {
+    const testing = std.testing;
+    var loop = Loop.init(testing.allocator) catch return;
+    defer loop.deinit();
+
+    var old_action: posix.Sigaction = undefined;
+    const action: posix.Sigaction = .{
+        .handler = .{ .handler = noopSignalHandler },
+        .mask = posix.sigemptyset(),
+        .flags = 0,
+    };
+    posix.sigaction(posix.SIG.USR1, &action, &old_action);
+    defer posix.sigaction(posix.SIG.USR1, &old_action, null);
+
+    const target_pid = linux.getpid();
+    const target_tid = linux.gettid();
+
+    var stop = std.atomic.Value(bool).init(false);
+    const SignalState = struct {
+        stop: *std.atomic.Value(bool),
+        pid: linux.pid_t,
+        tid: linux.pid_t,
+    };
+    var signal_state: SignalState = .{
+        .stop = &stop,
+        .pid = target_pid,
+        .tid = target_tid,
+    };
+
+    const signal_thread = try std.Thread.spawn(.{}, struct {
+        fn run(state: *const SignalState) void {
+            while (!state.stop.load(.acquire)) {
+                _ = linux.tgkill(state.pid, state.tid, @intCast(posix.SIG.USR1));
+                std.Thread.sleep(1 * std.time.ns_per_ms);
+            }
+        }
+    }.run, .{&signal_state});
+    defer {
+        stop.store(true, .release);
+        signal_thread.join();
+    }
+
+    var fired = false;
+    const cb = struct {
+        fn cb(_: *root.Loop, completion: root.Completion) !void {
+            const flag = completion.userdataCast(bool);
+            switch (completion.result) {
+                .timer => flag.* = true,
+                else => {},
+            }
+        }
+    }.cb;
+
+    _ = try loop.timeout(50 * std.time.ns_per_ms, .{ .ptr = &fired, .cb = cb });
+
+    try loop.run(.until_done);
+    try testing.expect(fired);
 }
