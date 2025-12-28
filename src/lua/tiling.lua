@@ -46,6 +46,8 @@ local utils = require("utils")
 ---@field scroll_offset number
 ---@field sessions string[]
 ---@field regions PaletteRegion[]
+---@field renaming boolean
+---@field rename_target? string
 
 ---@class State
 ---@field tabs Tab[]
@@ -311,6 +313,8 @@ local state = {
         scroll_offset = 0,
         sessions = {}, -- List of session names
         regions = {}, -- Click regions for items
+        renaming = false, -- Whether we're renaming a session
+        rename_target = nil, -- The session being renamed
     },
     -- Tab bar hit regions: array of {start_x, end_x, tab_index}
     tab_regions = {},
@@ -1792,7 +1796,8 @@ end
 local function execute_rename()
     local new_name = state.rename.input:text()
     if new_name and new_name ~= "" then
-        prise.rename_session(new_name)
+        local current_name = prise.get_session_name() or ""
+        prise.rename_session(current_name, new_name)
     end
     close_rename()
 end
@@ -1844,6 +1849,48 @@ local function execute_session_switch()
         close_session_picker()
         prise.switch_session(target)
     end
+end
+
+local function open_session_rename()
+    local query = state.session_picker.input:text()
+    local filtered = filter_sessions(query)
+    if #filtered == 0 then
+        return
+    end
+    local idx = state.session_picker.selected
+    if idx >= 1 and idx <= #filtered then
+        local target = filtered[idx]
+        state.session_picker.renaming = true
+        state.session_picker.rename_target = target
+        state.session_picker.input:clear()
+        state.session_picker.input:insert(target)
+        prise.request_frame()
+    end
+end
+
+local function close_session_rename()
+    state.session_picker.renaming = false
+    state.session_picker.rename_target = nil
+    state.session_picker.input:clear()
+    state.session_picker.selected = 1
+    state.session_picker.scroll_offset = 0
+    -- Refresh the session list
+    state.session_picker.sessions = prise.list_sessions() or {}
+    prise.request_frame()
+end
+
+local function execute_session_rename()
+    local new_name = state.session_picker.input:text()
+    local target = state.session_picker.rename_target
+    if new_name and new_name ~= "" and target and new_name ~= target then
+        local ok, err = pcall(function()
+            prise.rename_session(target, new_name)
+        end)
+        if not ok then
+            prise.log.warn("Failed to rename session: " .. tostring(err))
+        end
+    end
+    close_session_rename()
 end
 
 -- --- Main Functions ---
@@ -1967,6 +2014,21 @@ function M.update(event)
 
         -- Handle session picker
         if state.session_picker.visible then
+            -- Handle session rename mode
+            if state.session_picker.renaming then
+                local k = event.data.key
+
+                if k == "Escape" then
+                    close_session_rename()
+                    return
+                elseif k == "Enter" then
+                    execute_session_rename()
+                    return
+                end
+                handle_text_input_key(state.session_picker.input, event.data)
+                return
+            end
+
             local k = event.data.key
             local filtered = filter_sessions(state.session_picker.input:text())
 
@@ -2006,7 +2068,6 @@ function M.update(event)
                 return
             elseif k == "D" and event.data.shift then
                 -- Delete the selected session (Shift+D)
-                local filtered = filter_sessions(state.session_picker.input:text())
                 if #filtered > 0 then
                     local idx = state.session_picker.selected
                     if idx >= 1 and idx <= #filtered then
@@ -2027,6 +2088,10 @@ function M.update(event)
                         prise.request_frame()
                     end
                 end
+                return
+            elseif k == "R" and event.data.shift then
+                -- Rename the selected session (Shift+R)
+                open_session_rename()
                 return
             elseif #k == 1 and not event.data.ctrl and not event.data.alt and not event.data.super then
                 state.session_picker.input:insert(k)
@@ -2685,9 +2750,19 @@ local function build_session_picker()
                     cross_axis_align = "stretch",
                     children = {
                         prise.Text({ text = "Switch Session", style = { fg = THEME.fg_dim, bg = THEME.bg1 } }),
-                        prise.Text({
-                            text = "Shift + D - delete",
-                            style = { fg = THEME.fg_dim, bg = THEME.bg1 },
+                        prise.Padding({
+                            left = 38,
+                            child = prise.Text({
+                                text = "Shift + R - rename",
+                                style = { fg = THEME.fg_dim, bg = THEME.bg1 },
+                            }),
+                        }),
+                        prise.Padding({
+                            left = 38,
+                            child = prise.Text({
+                                text = "Shift + D - delete",
+                                style = { fg = THEME.fg_dim, bg = THEME.bg1 },
+                            }),
                         }),
                         prise.TextInput({
                             input = state.session_picker.input,

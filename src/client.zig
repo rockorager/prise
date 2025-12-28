@@ -948,9 +948,9 @@ pub const App = struct {
 
         // Register rename_session callback
         self.ui.setRenameSessionCallback(self, struct {
-            fn renameCb(ctx: *anyopaque, new_name: []const u8) anyerror!void {
+            fn renameCb(ctx: *anyopaque, old_name: []const u8, new_name: []const u8) anyerror!void {
                 const app_ptr: *App = @ptrCast(@alignCast(ctx));
-                try app_ptr.renameCurrentSession(new_name);
+                try app_ptr.renameSession(old_name, new_name);
             }
         }.renameCb);
 
@@ -2539,7 +2539,10 @@ pub const App = struct {
 
     pub fn renameCurrentSession(self: *App, new_name: []const u8) !void {
         const old_name = self.current_session_name orelse return error.NoCurrentSession;
+        try self.renameSession(old_name, new_name);
+    }
 
+    pub fn renameSession(self: *App, old_name: []const u8, new_name: []const u8) !void {
         const home = std.posix.getenv("HOME") orelse return error.NoHomeDirectory;
         const state_dir = try std.fs.path.join(self.allocator, &.{ home, ".local", "state", "prise", "sessions" });
         defer self.allocator.free(state_dir);
@@ -2561,9 +2564,13 @@ pub const App = struct {
             dir.rename(old_filename, new_filename) catch |rename_err| {
                 return rename_err;
             };
-            // Update current session name
-            self.allocator.free(old_name);
-            self.current_session_name = try self.allocator.dupe(u8, new_name);
+            // Update current session name if renaming the current session
+            if (self.current_session_name) |current| {
+                if (std.mem.eql(u8, current, old_name)) {
+                    self.allocator.free(current);
+                    self.current_session_name = try self.allocator.dupe(u8, new_name);
+                }
+            }
             log.info("Renamed session '{s}' to '{s}'", .{ old_name, new_name });
             return;
         };

@@ -104,9 +104,10 @@ function prise.save() end
 ---@return string?
 function prise.get_session_name() end
 
----Rename the current session
----@param new_name string
-function prise.rename_session(new_name) end
+---Rename a session
+---@param old_name string The current session name
+---@param new_name string The new session name
+function prise.rename_session(old_name, new_name) end
 
 ---Delete a session
 ---@param session_name string
