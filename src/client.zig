@@ -2640,6 +2640,11 @@ pub const App = struct {
         const state_dir = try std.fs.path.join(self.allocator, &.{ home, ".local", "state", "prise", "sessions" });
         defer self.allocator.free(state_dir);
 
+        // Validate session_name doesn't contain path separators
+        if (std.mem.indexOfAny(u8, session_name, "/\\") != null) {
+            return error.InvalidSessionName;
+        }
+
         const filename = try std.fmt.allocPrint(self.allocator, "{s}.json", .{session_name});
         defer self.allocator.free(filename);
 
