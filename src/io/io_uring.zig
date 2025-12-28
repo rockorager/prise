@@ -12,7 +12,7 @@ const log = std.log.scoped(.io_uring);
 const RING_ENTRIES: u13 = 256;
 const CQE_BATCH_SIZE: usize = 32;
 
-fn noopSignalHandler(_: c_int) callconv(std.builtin.CallingConvention.c) void {}
+fn noopSignalHandler(_: c_int) callconv(.c) void {}
 
 pub const Loop = struct {
     allocator: std.mem.Allocator,
