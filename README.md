@@ -147,11 +147,32 @@ ui.setup({
     },
     tab_bar = {
         show_single_tab = false,
+        style = "pill",  -- "pill" (rounded, default) or "bar" (flat/square)
     },
 })
 
 return ui
 ```
+
+### Tab Bar Styling
+
+Customize the appearance of the tab bar:
+
+```lua
+local ui = require("prise").tiling()
+
+ui.setup({
+    tab_bar = {
+        style = "pill",  -- "pill" (rounded, default) or "bar" (flat/square)
+    },
+})
+
+return ui
+```
+
+Available styles:
+- `"pill"` (default) - Rounded pill-shaped tabs with powerline separators, close buttons, and tab index
+- `"bar"` - Simple flat/square tabs with just the title, no separators or indices
 
 ### Pane Borders
 
