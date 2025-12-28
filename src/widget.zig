@@ -172,6 +172,11 @@ pub const Widget = struct {
                 allocator.destroy(p.child);
             },
             .separator => {},
+            .segmented_separator => |*ss| {
+                if (ss.segments.len > 0) {
+                    allocator.free(ss.segments);
+                }
+            },
         }
     }
 
@@ -203,6 +208,16 @@ pub const Widget = struct {
                     .height = constraints.max_height orelse 1,
                 },
                 // Horizontal separator: 1 cell tall, fills available width
+                .horizontal => .{
+                    .width = constraints.max_width orelse 1,
+                    .height = 1,
+                },
+            },
+            .segmented_separator => |ss| switch (ss.axis) {
+                .vertical => .{
+                    .width = 1,
+                    .height = constraints.max_height orelse 1,
+                },
                 .horizontal => .{
                     .width = constraints.max_width orelse 1,
                     .height = 1,
@@ -245,6 +260,7 @@ pub const Widget = struct {
                 try pos.child.paint();
             },
             .separator => {},
+            .segmented_separator => {},
         }
     }
 
@@ -440,6 +456,58 @@ pub const Widget = struct {
                     }
                 }
             },
+            .segmented_separator => |ss| {
+                const line_char = ss.lineChar();
+                const total_size: u16 = if (ss.axis == .horizontal) win.width else win.height;
+
+                if (total_size == 0) return;
+
+                if (ss.axis == .horizontal) {
+                    for (0..win.width) |col| {
+                        var segment_style = ss.default_style;
+                        for (ss.segments) |segment| {
+                            const actual_start: u16 = if (segment.is_ratio)
+                                @intFromFloat(@as(f32, @floatFromInt(segment.start)) / 1000.0 * @as(f32, @floatFromInt(total_size)))
+                            else
+                                segment.start;
+                            const actual_end: u16 = if (segment.is_ratio)
+                                @intFromFloat(@as(f32, @floatFromInt(segment.end)) / 1000.0 * @as(f32, @floatFromInt(total_size)))
+                            else
+                                segment.end;
+                            if (col >= actual_start and col < actual_end) {
+                                segment_style = segment.style;
+                                break;
+                            }
+                        }
+                        win.writeCell(@intCast(col), 0, .{
+                            .char = .{ .grapheme = line_char, .width = 1 },
+                            .style = segment_style,
+                        });
+                    }
+                } else {
+                    for (0..win.height) |row| {
+                        var segment_style = ss.default_style;
+                        for (ss.segments) |segment| {
+                            const actual_start: u16 = if (segment.is_ratio)
+                                @intFromFloat(@as(f32, @floatFromInt(segment.start)) / 1000.0 * @as(f32, @floatFromInt(total_size)))
+                            else
+                                segment.start;
+                            const actual_end: u16 = if (segment.is_ratio)
+                                @intFromFloat(@as(f32, @floatFromInt(segment.end)) / 1000.0 * @as(f32, @floatFromInt(total_size)))
+                            else
+                                segment.end;
+                            if (row >= actual_start and row < actual_end) {
+                                segment_style = segment.style;
+                                break;
+                            }
+                        }
+                        win.writeCell(0, @intCast(row), .{
+                            .char = .{ .grapheme = line_char, .width = 1 },
+                            .style = segment_style,
+                        });
+                    }
+                }
+            },
         }
     }
 
@@ -495,6 +563,7 @@ pub const Widget = struct {
                 try pos.child.collectHitRegionsRecursive(allocator, regions, abs_x, abs_y);
             },
             .separator => {},
+            .segmented_separator => {},
         }
     }
 
@@ -524,7 +593,7 @@ pub const Widget = struct {
                 // Count separator space (separators have width 1 in a row)
                 var sep_space: u16 = 0;
                 for (row.children) |*c| {
-                    if (c.kind == .separator) sep_space += c.width;
+                    if (c.kind == .separator or c.kind == .segmented_separator) sep_space += c.width;
                 }
 
                 // Horizontal split handles (between children in a row)
@@ -534,7 +603,7 @@ pub const Widget = struct {
 
                     // Add handle after this child (except for last child), only if resizable
                     // Skip separator widgets - the handle is on the separator itself, not after it
-                    if (row.resizable and i < row.children.len - 1 and child.kind != .separator) {
+                    if (row.resizable and i < row.children.len - 1 and child.kind != .separator and child.kind != .segmented_separator) {
                         try handles.append(allocator, .{
                             .parent_id = self.id,
                             .child_index = @intCast(i),
@@ -554,7 +623,7 @@ pub const Widget = struct {
                 // Count separator space (separators have height 1 in a column)
                 var sep_space: u16 = 0;
                 for (col.children) |*c| {
-                    if (c.kind == .separator) sep_space += c.height;
+                    if (c.kind == .separator or c.kind == .segmented_separator) sep_space += c.height;
                 }
 
                 // Vertical split handles (between children in a column)
@@ -564,7 +633,7 @@ pub const Widget = struct {
 
                     // Add handle after this child (except for last child), only if resizable
                     // Skip separator widgets - the handle is on the separator itself, not after it
-                    if (col.resizable and i < col.children.len - 1 and child.kind != .separator) {
+                    if (col.resizable and i < col.children.len - 1 and child.kind != .separator and child.kind != .segmented_separator) {
                         try handles.append(allocator, .{
                             .parent_id = self.id,
                             .child_index = @intCast(i),
@@ -592,6 +661,7 @@ pub const Widget = struct {
                 try p.child.collectSplitHandlesRecursive(allocator, handles, abs_x, abs_y);
             },
             .separator => {},
+            .segmented_separator => {},
         }
     }
 
@@ -645,6 +715,7 @@ pub const Widget = struct {
                 try pos.child.collectSurfaceResizesRecursive(allocator, resizes);
             },
             .separator => {},
+            .segmented_separator => {},
         }
     }
 };
@@ -692,6 +763,7 @@ pub const WidgetKind = union(enum) {
     stack: Stack,
     positioned: Positioned,
     separator: Separator,
+    segmented_separator: SegmentedSeparator,
 };
 
 pub const CrossAxisAlignment = enum {
@@ -793,6 +865,35 @@ pub const Separator = struct {
 
     /// Returns the line character based on border style
     pub fn lineChar(self: Separator) []const u8 {
+        return switch (self.axis) {
+            .horizontal => switch (self.border) {
+                .none => " ",
+                .single, .rounded => "─",
+                .double => "═",
+            },
+            .vertical => switch (self.border) {
+                .none => " ",
+                .single, .rounded => "│",
+                .double => "║",
+            },
+        };
+    }
+};
+
+pub const SeparatorSegment = struct {
+    start: u16,
+    end: u16,
+    style: vaxis.Style,
+    is_ratio: bool = false,
+};
+
+pub const SegmentedSeparator = struct {
+    axis: Separator.Axis,
+    segments: []const SeparatorSegment,
+    default_style: vaxis.Style = .{},
+    border: Box.Border = .single,
+
+    pub fn lineChar(self: SegmentedSeparator) []const u8 {
         return switch (self.axis) {
             .horizontal => switch (self.border) {
                 .none => " ",
@@ -1529,6 +1630,104 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
             .border = border,
             .style = style,
         } } };
+    } else if (std.mem.eql(u8, widget_type, "segmented_separator")) {
+        var axis: Separator.Axis = .vertical;
+        _ = lua.getField(index, "axis");
+        if (lua.typeOf(-1) == .string) {
+            const a = lua.toString(-1) catch "";
+            if (std.mem.eql(u8, a, "horizontal")) axis = .horizontal;
+            if (std.mem.eql(u8, a, "vertical")) axis = .vertical;
+        }
+        lua.pop(1);
+
+        var border: Box.Border = .single;
+        _ = lua.getField(index, "border");
+        if (lua.typeOf(-1) == .string) {
+            const b = lua.toString(-1) catch "";
+            if (std.mem.eql(u8, b, "none")) border = .none;
+            if (std.mem.eql(u8, b, "single")) border = .single;
+            if (std.mem.eql(u8, b, "double")) border = .double;
+            if (std.mem.eql(u8, b, "rounded")) border = .rounded;
+        }
+        lua.pop(1);
+
+        var default_style = vaxis.Style{};
+        _ = lua.getField(index, "default_style");
+        if (lua.typeOf(-1) == .table) {
+            default_style = parseStyle(lua, -1) catch .{};
+        }
+        lua.pop(1);
+
+        var segments_list: std.ArrayList(SeparatorSegment) = .empty;
+        defer segments_list.deinit(allocator);
+
+        _ = lua.getField(index, "segments");
+        if (lua.typeOf(-1) == .table) {
+            const segments_len = lua.rawLen(-1);
+            for (1..segments_len + 1) |i| {
+                _ = lua.getIndex(-1, @intCast(i));
+                if (lua.typeOf(-1) == .table) {
+                    var ratio_start: ?f32 = null;
+                    var ratio_end: ?f32 = null;
+                    var start: u16 = 0;
+                    var end: u16 = 0;
+                    var seg_style = default_style;
+
+                    _ = lua.getField(-1, "ratio_start");
+                    if (lua.typeOf(-1) == .number) {
+                        ratio_start = @floatCast(lua.toNumber(-1) catch 0.0);
+                    }
+                    lua.pop(1);
+
+                    _ = lua.getField(-1, "ratio_end");
+                    if (lua.typeOf(-1) == .number) {
+                        ratio_end = @floatCast(lua.toNumber(-1) catch 0.0);
+                    }
+                    lua.pop(1);
+
+                    _ = lua.getField(-1, "start");
+                    if (lua.typeOf(-1) == .number) {
+                        start = @intCast(lua.toInteger(-1) catch 0);
+                    }
+                    lua.pop(1);
+
+                    _ = lua.getField(-1, "end");
+                    if (lua.typeOf(-1) == .number) {
+                        end = @intCast(lua.toInteger(-1) catch 0);
+                    }
+                    lua.pop(1);
+
+                    _ = lua.getField(-1, "style");
+                    if (lua.typeOf(-1) == .table) {
+                        seg_style = parseStyle(lua, -1) catch default_style;
+                    }
+                    lua.pop(1);
+
+                    var is_ratio = false;
+                    if (ratio_start != null and ratio_end != null) {
+                        start = @intFromFloat(ratio_start.? * 1000.0);
+                        end = @intFromFloat(ratio_end.? * 1000.0);
+                        is_ratio = true;
+                    }
+
+                    try segments_list.append(allocator, .{
+                        .start = start,
+                        .end = end,
+                        .style = seg_style,
+                        .is_ratio = is_ratio,
+                    });
+                }
+                lua.pop(1);
+            }
+        }
+        lua.pop(1);
+
+        return .{ .ratio = ratio, .id = id, .focus = focus, .kind = .{ .segmented_separator = .{
+            .axis = axis,
+            .segments = try segments_list.toOwnedSlice(allocator),
+            .default_style = default_style,
+            .border = border,
+        } } };
     }
 
     return error.UnknownWidgetType;
@@ -2193,7 +2392,7 @@ fn layoutColumnImpl(col: *Column, constraints: BoxConstraints) Size {
     var nil_count: u16 = 0;
 
     for (col.children) |*child| {
-        const is_intrinsic = child.ratio == null and (child.kind == .text or child.kind == .text_input or child.kind == .list or child.kind == .separator);
+        const is_intrinsic = child.ratio == null and (child.kind == .text or child.kind == .text_input or child.kind == .list or child.kind == .separator or child.kind == .segmented_separator);
         if (is_intrinsic) {
             const remaining = if (total_height > intrinsic_height) total_height - intrinsic_height else 0;
             const child_constraints: BoxConstraints = .{
@@ -2240,7 +2439,7 @@ fn layoutColumnImpl(col: *Column, constraints: BoxConstraints) Size {
         var remaining = remaining_for_nil;
         var count = nil_count;
         for (col.children) |*child| {
-            const is_intrinsic = child.kind == .text or child.kind == .text_input or child.kind == .list or child.kind == .separator;
+            const is_intrinsic = child.kind == .text or child.kind == .text_input or child.kind == .list or child.kind == .separator or child.kind == .segmented_separator;
             if (child.ratio == null and !is_intrinsic) {
                 const share = remaining / count;
                 remaining -= share;
@@ -2302,7 +2501,7 @@ fn layoutRowImpl(row: *Row, constraints: BoxConstraints) Size {
     var nil_count: u16 = 0;
 
     for (row.children) |*child| {
-        const is_intrinsic = child.ratio == null and (child.kind == .text or child.kind == .separator);
+        const is_intrinsic = child.ratio == null and (child.kind == .text or child.kind == .separator or child.kind == .segmented_separator);
         if (is_intrinsic) {
             const remaining = if (total_width > intrinsic_width) total_width - intrinsic_width else 0;
             const child_constraints: BoxConstraints = .{
@@ -2349,7 +2548,7 @@ fn layoutRowImpl(row: *Row, constraints: BoxConstraints) Size {
         var remaining = remaining_for_nil;
         var count = nil_count;
         for (row.children) |*child| {
-            const is_intrinsic = child.kind == .text or child.kind == .separator;
+            const is_intrinsic = child.kind == .text or child.kind == .separator or child.kind == .segmented_separator;
             if (child.ratio == null and !is_intrinsic) {
                 const share = remaining / count;
                 remaining -= share;
