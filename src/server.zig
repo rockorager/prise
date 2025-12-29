@@ -2494,6 +2494,31 @@ const Server = struct {
         return msgpack.Value.nil;
     }
 
+    fn handleCapturePane(self: *Server, params: msgpack.Value) !msgpack.Value {
+        const pty_id = parsePtyId(params) catch {
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
+        };
+
+        const pty_instance = self.ptys.get(pty_id) orelse {
+            return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
+        };
+
+        pty_instance.terminal_mutex.lock();
+        defer pty_instance.terminal_mutex.unlock();
+
+        const screen = pty_instance.terminal.screens.active;
+
+        // Capture entire scrollback + active area in screen space (includes full history, not just viewport)
+        const result = screen.dumpStringAlloc(self.allocator, .{
+            .screen = .{},
+        }) catch |err| {
+            std.log.err("Failed to capture pane: {}", .{err});
+            return msgpack.Value.nil;
+        };
+
+        return msgpack.Value{ .string = result };
+    }
+
     fn handleGetServerInfo(self: *Server) !msgpack.Value {
         const entries = try self.allocator.alloc(msgpack.Value.KeyValue, 2);
         entries[0] = .{
@@ -2576,6 +2601,8 @@ const Server = struct {
             return self.handleGetSelection(params);
         } else if (std.mem.eql(u8, method, "clear_selection")) {
             return self.handleClearSelection(params);
+        } else if (std.mem.eql(u8, method, "capture_pane")) {
+            return self.handleCapturePane(params);
         } else {
             return msgpack.Value{ .string = try self.allocator.dupe(u8, "unknown method") };
         }

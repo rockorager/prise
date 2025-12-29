@@ -68,3 +68,7 @@ function Pty:close() end
 
 ---Copy the current selection to clipboard
 function Pty:copy_selection() end
+
+---Capture the current pane content and write it to a file
+---@param path string The file path to write pane content to
+function Pty:capture_pane(path) end
