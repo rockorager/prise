@@ -240,3 +240,14 @@ test "lowercase modifiers" {
     try std.testing.expect(keys[0].ctrl);
     try std.testing.expect(keys[0].alt);
 }
+
+test "multi-key sequence with modifiers" {
+    const keys = try parseKeyString(std.testing.allocator, "<D-k><C-h>");
+    defer std.testing.allocator.free(keys);
+
+    try std.testing.expectEqual(2, keys.len);
+    try std.testing.expectEqualStrings("k", keys[0].key);
+    try std.testing.expect(keys[0].super);
+    try std.testing.expectEqualStrings("h", keys[1].key);
+    try std.testing.expect(keys[1].ctrl);
+}
