@@ -159,7 +159,7 @@ pub fn build(b: *std.Build) void {
             \\if [ $status -ne 0 ]; then echo "$output"; exit $status; fi
             ,
         });
-        b.getInstallStep().dependOn(&lua_typecheck.step);
+        test_step.dependOn(&lua_typecheck.step);
     }
 
     // mdman - markdown to man page converter

@@ -2006,7 +2006,6 @@ function M.update(event)
                 return
             elseif k == "D" and event.data.shift then
                 -- Delete the selected session (Shift+D)
-                local filtered = filter_sessions(state.session_picker.input:text())
                 if #filtered > 0 then
                     local idx = state.session_picker.selected
                     if idx >= 1 and idx <= #filtered then
