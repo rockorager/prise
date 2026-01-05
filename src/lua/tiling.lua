@@ -118,7 +118,11 @@ local utils = require("utils")
 ---@field type "cwd_changed"
 ---@field data table
 
----@alias Event PtyAttachEvent|PtyExitedEvent|KeyPressEvent|KeyReleaseEvent|PasteEvent|MouseEvent|WinsizeEvent|FocusInEvent|FocusOutEvent|SplitResizeEvent|CwdChangedEvent
+---@class CapturePaneCompleteEvent
+---@field type "capture_pane_complete"
+---@field data { pty_id: number, content: string }
+
+---@alias Event PtyAttachEvent|PtyExitedEvent|KeyPressEvent|KeyReleaseEvent|PasteEvent|MouseEvent|WinsizeEvent|FocusInEvent|FocusOutEvent|SplitResizeEvent|CwdChangedEvent|CapturePaneCompleteEvent
 
 -- Powerline symbols
 local POWERLINE_SYMBOLS = {
@@ -272,6 +276,11 @@ local merge_config = utils.merge_config
 -- Convenience alias for theme access
 local THEME = config.theme
 
+---@class PendingSpawnOpts
+---@field new_tab? boolean Create in new tab instead of split
+---@field return_to_tab? integer Tab index to return to when pane closes
+---@field command? string[] Command to execute in the new pane
+
 ---@type State
 local state = {
     tabs = {},
@@ -285,8 +294,8 @@ local state = {
     clock_timer = nil,
     pending_split = nil,
     pending_new_tab = false,
-    pending_capture_cmd = nil,
-    pending_capture_return_tab = nil, -- Tab index to return to when capture tab closes
+    ---@type PendingSpawnOpts?
+    pending_spawn_opts = nil,
     next_split_id = 1,
     -- Command palette
     palette = {
@@ -1732,22 +1741,13 @@ action_handlers = {
         open_rename()
     end,
     capture_pane = function()
+        prise.log.info("capture_pane action triggered")
         local pty = get_focused_pty()
         if pty then
-            local timestamp = os.date("%Y%m%d_%H%M%S")
-            local filename = "/tmp/pane_" .. timestamp .. ".txt"
-            pty:capture_pane(filename)
-            prise.log.info("Pane captured to " .. filename)
-
-            -- Defer opening editor to allow server to send capture content
-            prise.set_timeout(500, function()
-                -- Create new tab with shell that opens editor
-                local editor = os.getenv("EDITOR") or "vim"
-                state.pending_new_tab = true
-                state.pending_capture_cmd = editor .. ' "' .. filename .. '"'
-                state.pending_capture_return_tab = state.active_tab
-                prise.spawn({ cwd = pty:cwd() })
-            end)
+            prise.log.info("Calling pty:capture_pane() on pty " .. pty:id())
+            pty:capture_pane()
+        else
+            prise.log.warn("capture_pane: no focused PTY")
         end
     end,
     quit = function()
@@ -1885,9 +1885,14 @@ function M.update(event)
         local new_pane = { type = "pane", pty = pty, id = pty:id() }
         local old_focused_id = state.focused_id
 
-        if state.pending_new_tab then
+        -- Check pending_spawn_opts for new_tab flag
+        local spawn_opts = state.pending_spawn_opts
+        state.pending_spawn_opts = nil
+        local create_new_tab = state.pending_new_tab or (spawn_opts and spawn_opts.new_tab)
+        state.pending_new_tab = false
+
+        if create_new_tab then
             -- Create a new tab with this pane
-            state.pending_new_tab = false
             local tab_id = state.next_tab_id
             state.next_tab_id = tab_id + 1
             ---@type Tab
@@ -1895,21 +1900,20 @@ function M.update(event)
                 id = tab_id,
                 root = new_pane,
                 last_focused_id = new_pane.id,
+                return_to_tab = spawn_opts and spawn_opts.return_to_tab,
             }
             table.insert(state.tabs, new_tab)
             set_active_tab_index(#state.tabs)
 
-            -- If there's a pending capture command, send it to the new PTY
-            if state.pending_capture_cmd then
-                local cmd = state.pending_capture_cmd
-                state.pending_capture_cmd = nil
-                -- Store return tab index so we go back when this tab closes
-                if state.pending_capture_return_tab then
-                    new_tab.return_to_tab = state.pending_capture_return_tab
-                    state.pending_capture_return_tab = nil
-                end
-                -- Close tab when editor exits
-                pty:send_paste(cmd .. " && exit\n")
+            -- If there's a pending command, send it to the new PTY
+            if spawn_opts and spawn_opts.command then
+                prise.log.info("Scheduling command for new PTY: " .. table.concat(spawn_opts.command, " "))
+                local cmd_str = table.concat(spawn_opts.command, " ")
+                -- Delay sending the command to allow the shell to fully initialize
+                prise.set_timeout(100, function()
+                    prise.log.info("Sending delayed command to PTY: " .. cmd_str)
+                    pty:send_paste(cmd_str .. " && exit\n")
+                end)
             end
         elseif #state.tabs == 0 then
             -- First terminal - create first tab
@@ -2380,6 +2384,16 @@ function M.update(event)
         update_cached_git_branch()
         prise.request_frame()
         prise.save() -- Auto-save on cwd change
+    elseif event.type == "capture_pane_complete" then
+        -- Pane content captured - emit to user's event handlers
+        -- User can handle this in their config to pipe to editor, fzf, clipboard, etc.
+        local pty_id = event.data.pty_id
+        local content = event.data.content
+        prise.log.info("Pane content captured for pty " .. pty_id .. " (" .. #content .. " bytes)")
+        -- Call user's on_capture_pane_complete handler if defined
+        if M.on_capture_pane_complete then
+            M.on_capture_pane_complete(pty_id, content)
+        end
     end
 end
 
@@ -3117,6 +3131,32 @@ function M.set_state(saved, pty_lookup)
     end
 
     prise.request_frame()
+end
+
+---Spawn a new pane with the given command
+---@param opts { command: string[], cwd?: string, new_tab?: boolean, return_to_tab?: boolean }
+function M.spawn(opts)
+    prise.log.info("M.spawn called with opts: new_tab=" .. tostring(opts.new_tab) .. ", return_to_tab=" .. tostring(opts.return_to_tab) .. ", command=" .. (opts.command and table.concat(opts.command, " ") or "nil"))
+    opts = opts or {}
+    local pty = get_focused_pty()
+    local cwd = opts.cwd or (pty and pty:cwd())
+
+    -- Set pending spawn options
+    state.pending_spawn_opts = {
+        new_tab = opts.new_tab,
+        return_to_tab = opts.return_to_tab and state.active_tab or nil,
+        command = opts.command,
+    }
+    prise.log.info("M.spawn: set pending_spawn_opts with new_tab=" .. tostring(state.pending_spawn_opts.new_tab))
+
+    -- If not new_tab, set pending_split direction
+    if not opts.new_tab then
+        state.pending_split = { direction = get_auto_split_direction() }
+    end
+
+    prise.log.info("M.spawn: calling prise.spawn with cwd=" .. (cwd or "nil") .. ", command=" .. (opts.command and table.concat(opts.command, " ") or "nil"))
+    prise.spawn({ cwd = cwd, command = opts.command })
+    prise.log.info("M.spawn: prise.spawn completed")
 end
 
 -- Export internal functions for testing

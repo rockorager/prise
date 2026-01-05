@@ -186,7 +186,7 @@ pub const ClientState = struct {
         detach,
         get_server_info,
         copy_selection,
-        capture_pane: struct { path: []const u8 },
+        capture_pane: struct { pty_id: u32 },
     };
 
     pub fn init(allocator: std.mem.Allocator) ClientState {
@@ -219,6 +219,7 @@ pub const ServerAction = union(enum) {
     color_query: ColorQueryTarget,
     server_info: struct { pty_validity: i64 },
     copy_to_clipboard: []const u8,
+    capture_pane_complete: struct { pty_id: u32, content: []const u8 },
 
     pub const ColorQueryTarget = struct {
         pty_id: u32,
@@ -297,7 +298,7 @@ pub const ClientLogic = struct {
                 .detach => .detached,
                 .get_server_info => handleServerInfoResult(state, result),
                 .copy_selection => handleCopySelectionResult(result),
-                .capture_pane => |capture_info| handleCapturePaneResult(result, capture_info.path),
+                .capture_pane => |capture_info| handleCapturePaneResult(result, capture_info.pty_id),
             };
         }
         return handleUnsolicitedResult(state, result);
@@ -316,20 +317,10 @@ pub const ClientLogic = struct {
         return .none;
     }
 
-    fn handleCapturePaneResult(result: msgpack.Value, path: []const u8) ServerAction {
+    fn handleCapturePaneResult(result: msgpack.Value, pty_id: u32) ServerAction {
         if (result == .string) {
-            log.info("handleCapturePaneResult: writing {} bytes to {s}", .{ result.string.len, path });
-            const file = std.fs.cwd().createFile(path, .{}) catch |err| {
-                log.err("Failed to create file {s}: {}", .{ path, err });
-                return .none;
-            };
-            defer file.close();
-            _ = file.writeAll(result.string) catch |err| {
-                log.err("Failed to write pane content to {s}: {}", .{ path, err });
-                return .none;
-            };
-            log.info("Successfully wrote pane content to {s}", .{path});
-            return .none;
+            log.info("handleCapturePaneResult: received {} bytes for pty {}", .{ result.string.len, pty_id });
+            return .{ .capture_pane_complete = .{ .pty_id = pty_id, .content = result.string } };
         }
         log.warn("handleCapturePaneResult: unexpected result type: {s}", .{@tagName(result)});
         return .none;
@@ -2158,9 +2149,9 @@ pub const App = struct {
                                                     }
                                                 }.appCopySelection,
                                                 .capture_pane_fn = struct {
-                                                    fn appCapturePane(ctx: *anyopaque, id: u32, path: []const u8) anyerror!void {
+                                                    fn appCapturePane(ctx: *anyopaque, id: u32) anyerror!void {
                                                         const self: *App = @ptrCast(@alignCast(ctx));
-                                                        try self.requestCapturePane(id, path);
+                                                        try self.requestCapturePane(id);
                                                     }
                                                 }.appCapturePane,
                                                 .cell_size_fn = struct {
@@ -2335,6 +2326,11 @@ pub const App = struct {
                             .copy_to_clipboard => |text| {
                                 app.copyToClipboard(text);
                             },
+                            .capture_pane_complete => |info| {
+                                app.ui.update(.{ .capture_pane_complete = .{ .pty_id = info.pty_id, .content = info.content } }) catch |err| {
+                                    log.err("Failed to update UI with capture_pane_complete: {}", .{err});
+                                };
+                            },
                             .none => {},
                         }
 
@@ -2411,7 +2407,23 @@ pub const App = struct {
             try env_array.append(self.allocator, .{ .string = env_str });
         }
 
-        const num_params: usize = if (opts.cwd != null) 5 else 4;
+        // Build command array if specified
+        var cmd_array = std.ArrayList(msgpack.Value).empty;
+        defer cmd_array.deinit(self.allocator);
+        if (opts.command) |command| {
+            log.info("spawnPty: building command with {} args", .{command.len});
+            for (command) |arg| {
+                log.info("spawnPty: arg = '{s}'", .{arg});
+                try cmd_array.append(self.allocator, .{ .string = arg });
+            }
+        } else {
+            log.info("spawnPty: no command in opts", .{});
+        }
+
+        var num_params: usize = 4; // rows, cols, attach, env
+        if (opts.cwd != null) num_params += 1;
+        if (opts.command != null) num_params += 1;
+
         var map_items = try self.allocator.alloc(msgpack.Value.KeyValue, num_params);
         defer self.allocator.free(map_items);
 
@@ -2419,8 +2431,14 @@ pub const App = struct {
         map_items[1] = .{ .key = .{ .string = "cols" }, .value = .{ .unsigned = opts.cols } };
         map_items[2] = .{ .key = .{ .string = "attach" }, .value = .{ .boolean = opts.attach } };
         map_items[3] = .{ .key = .{ .string = "env" }, .value = .{ .array = env_array.items } };
+
+        var idx: usize = 4;
         if (opts.cwd) |cwd| {
-            map_items[4] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = cwd } };
+            map_items[idx] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = cwd } };
+            idx += 1;
+        }
+        if (opts.command != null) {
+            map_items[idx] = .{ .key = .{ .string = "command" }, .value = .{ .array = cmd_array.items } };
         }
 
         const params = msgpack.Value{ .map = map_items };
@@ -2451,12 +2469,11 @@ pub const App = struct {
         try self.sendDirect(msg);
     }
 
-    pub fn requestCapturePane(self: *App, pty_id: u32, path: []const u8) !void {
+    pub fn requestCapturePane(self: *App, pty_id: u32) !void {
         const msgid = self.state.next_msgid;
         self.state.next_msgid += 1;
 
-        const path_copy = try self.allocator.dupe(u8, path);
-        try self.state.pending_requests.put(msgid, .{ .capture_pane = .{ .path = path_copy } });
+        try self.state.pending_requests.put(msgid, .{ .capture_pane = .{ .pty_id = pty_id } });
 
         var params = try self.allocator.alloc(msgpack.Value, 1);
         defer self.allocator.free(params);
@@ -3014,9 +3031,9 @@ pub const App = struct {
                 }
             }.copySelection,
             .capture_pane_fn = struct {
-                fn capturePane(app_ctx: *anyopaque, pty_id: u32, path: []const u8) anyerror!void {
+                fn capturePane(app_ctx: *anyopaque, pty_id: u32) anyerror!void {
                     const app: *App = @ptrCast(@alignCast(app_ctx));
-                    try app.requestCapturePane(pty_id, path);
+                    try app.requestCapturePane(pty_id);
                 }
             }.capturePane,
             .cell_size_fn = struct {

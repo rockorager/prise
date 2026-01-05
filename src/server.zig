@@ -2032,12 +2032,13 @@ const Server = struct {
     /// Timestamp (ms since epoch) when server started - used to detect server restarts
     start_time_ms: i64 = 0,
 
-    fn parseSpawnPtyParams(params: msgpack.Value) struct { size: pty.Winsize, attach: bool, cwd: ?[]const u8, env: ?[]const msgpack.Value, macos_option_as_alt: key_encode.OptionAsAlt } {
+    fn parseSpawnPtyParams(params: msgpack.Value) struct { size: pty.Winsize, attach: bool, cwd: ?[]const u8, env: ?[]const msgpack.Value, command: ?[]const msgpack.Value, macos_option_as_alt: key_encode.OptionAsAlt } {
         var rows: u16 = 24;
         var cols: u16 = 80;
         var attach: bool = false;
         var cwd: ?[]const u8 = null;
         var env: ?[]const msgpack.Value = null;
+        var command: ?[]const msgpack.Value = null;
         var macos_option_as_alt: key_encode.OptionAsAlt = .false;
 
         if (params == .map) {
@@ -2053,6 +2054,8 @@ const Server = struct {
                     cwd = kv.value.string;
                 } else if (std.mem.eql(u8, kv.key.string, "env") and kv.value == .array) {
                     env = kv.value.array;
+                } else if (std.mem.eql(u8, kv.key.string, "command") and kv.value == .array) {
+                    command = kv.value.array;
                 } else if (std.mem.eql(u8, kv.key.string, "macos_option_as_alt")) {
                     macos_option_as_alt = parseMacosOptionAsAlt(kv.value);
                 }
@@ -2069,6 +2072,7 @@ const Server = struct {
             .attach = attach,
             .cwd = cwd,
             .env = env,
+            .command = command,
             .macos_option_as_alt = macos_option_as_alt,
         };
     }
@@ -2208,7 +2212,33 @@ const Server = struct {
             }
         }
 
-        const process = try pty.Process.spawn(self.allocator, parsed.size, &.{shell}, @ptrCast(env_list.items), cwd);
+        // Build command array: use explicit command if provided, otherwise use shell
+        var cmd_list = std.ArrayList([]const u8).empty;
+        defer cmd_list.deinit(self.allocator);
+
+        if (parsed.command) |command_arr| {
+            log.info("spawn_pty: received command array with {} elements", .{command_arr.len});
+            for (command_arr) |val| {
+                if (val == .string) {
+                    log.info("spawn_pty: command arg = '{s}'", .{val.string});
+                    try cmd_list.append(self.allocator, val.string);
+                } else {
+                    log.warn("spawn_pty: non-string in command array", .{});
+                }
+            }
+        } else {
+            log.info("spawn_pty: no command array in parsed params", .{});
+        }
+
+        // Fall back to shell if no command specified or command was empty
+        if (cmd_list.items.len == 0) {
+            log.info("spawn_pty: using shell fallback: {s}", .{shell});
+            try cmd_list.append(self.allocator, shell);
+        } else {
+            log.info("spawn_pty: spawning with {} command args", .{cmd_list.items.len});
+        }
+
+        const process = try pty.Process.spawn(self.allocator, parsed.size, cmd_list.items, @ptrCast(env_list.items), cwd);
 
         const pty_id = self.next_pty_id;
         self.next_pty_id += 1;
