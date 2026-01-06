@@ -320,12 +320,19 @@ fn extractKey(lua: *ziglua.Lua, index: i32) !Key {
     lua.pop(1);
 
     _ = lua.getField(index, "shift");
-    const shift = lua.toBoolean(-1);
+    var shift = lua.toBoolean(-1);
     lua.pop(1);
 
     _ = lua.getField(index, "super");
     const super = lua.toBoolean(-1);
     lua.pop(1);
+
+    // Don't include shift modifier when matching on generated text.
+    // Shift is consumed by character generation (e.g., Shift+Comma produces '<').
+    // Only strip shift for single printable characters - keep it for special keys like <S-Enter>.
+    if (shift and key_str.len == 1 and key_str[0] >= 0x20 and key_str[0] < 0x7F) {
+        shift = false;
+    }
 
     return Key{
         .key = key_str,

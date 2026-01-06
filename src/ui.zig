@@ -85,7 +85,7 @@ pub const UI = struct {
     switch_session_ctx: *anyopaque = undefined,
     get_session_name_callback: ?*const fn (ctx: *anyopaque) ?[]const u8 = null,
     get_session_name_ctx: *anyopaque = undefined,
-    rename_session_callback: ?*const fn (ctx: *anyopaque, new_name: []const u8) anyerror!void = null,
+    rename_session_callback: ?*const fn (ctx: *anyopaque, old_name: []const u8, new_name: []const u8) anyerror!void = null,
     rename_session_ctx: *anyopaque = undefined,
     delete_session_callback: ?*const fn (ctx: *anyopaque, session_name: []const u8) anyerror!void = null,
     delete_session_ctx: *anyopaque = undefined,
@@ -254,7 +254,7 @@ pub const UI = struct {
         self.get_session_name_callback = cb;
     }
 
-    pub fn setRenameSessionCallback(self: *UI, ctx: *anyopaque, cb: *const fn (ctx: *anyopaque, new_name: []const u8) anyerror!void) void {
+    pub fn setRenameSessionCallback(self: *UI, ctx: *anyopaque, cb: *const fn (ctx: *anyopaque, old_name: []const u8, new_name: []const u8) anyerror!void) void {
         self.rename_session_ctx = ctx;
         self.rename_session_callback = cb;
     }
@@ -541,13 +541,18 @@ pub const UI = struct {
         };
         lua.pop(1);
 
-        const new_name = lua.toString(1) catch {
+        const old_name = lua.toString(1) catch {
+            lua.pushBoolean(false);
+            return 1;
+        };
+
+        const new_name = lua.toString(2) catch {
             lua.pushBoolean(false);
             return 1;
         };
 
         if (ui.rename_session_callback) |cb| {
-            cb(ui.rename_session_ctx, new_name) catch |err| {
+            cb(ui.rename_session_ctx, old_name, new_name) catch |err| {
                 lua.raiseErrorStr("Failed to rename session: %s", .{@errorName(err).ptr});
             };
             lua.pushBoolean(true);

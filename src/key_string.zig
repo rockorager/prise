@@ -77,6 +77,16 @@ fn parseBracketedKey(input: []const u8, pos: *usize) ParseError!Key {
 
     if (remaining.len == 0) return error.EmptyKey;
 
+    // Handle <lt> and <gt> as literal < and > characters (vim-style)
+    if (std.mem.eql(u8, remaining, "lt")) {
+        key.key = "<";
+        return key;
+    }
+    if (std.mem.eql(u8, remaining, "gt")) {
+        key.key = ">";
+        return key;
+    }
+
     key.key = mapSpecialKey(remaining) orelse remaining;
     return key;
 }
@@ -115,6 +125,17 @@ fn mapSpecialKey(name: []const u8) ?[]const u8 {
         .{ "F10", "F10" },
         .{ "F11", "F11" },
         .{ "F12", "F12" },
+        .{ "Comma", "Comma" },
+        .{ "Period", "Period" },
+        .{ "Minus", "Minus" },
+        .{ "Equal", "Equal" },
+        .{ "Slash", "Slash" },
+        .{ "Backslash", "Backslash" },
+        .{ "BracketLeft", "BracketLeft" },
+        .{ "BracketRight", "BracketRight" },
+        .{ "Semicolon", "Semicolon" },
+        .{ "Quote", "Quote" },
+        .{ "Backquote", "Backquote" },
     });
     return map.get(name);
 }
@@ -239,4 +260,21 @@ test "lowercase modifiers" {
     try std.testing.expectEqualStrings("s", keys[0].key);
     try std.testing.expect(keys[0].ctrl);
     try std.testing.expect(keys[0].alt);
+}
+
+test "parse lt and gt" {
+    {
+        const keys = try parseKeyString(std.testing.allocator, "<lt>");
+        defer std.testing.allocator.free(keys);
+        try std.testing.expectEqual(1, keys.len);
+        try std.testing.expectEqualStrings("<", keys[0].key);
+        try std.testing.expect(!keys[0].shift);
+    }
+    {
+        const keys = try parseKeyString(std.testing.allocator, "<gt>");
+        defer std.testing.allocator.free(keys);
+        try std.testing.expectEqual(1, keys.len);
+        try std.testing.expectEqualStrings(">", keys[0].key);
+        try std.testing.expect(!keys[0].shift);
+    }
 }
