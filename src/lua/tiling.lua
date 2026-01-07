@@ -297,6 +297,8 @@ local state = {
     ---@type PendingSpawnOpts?
     pending_spawn_opts = nil,
     next_split_id = 1,
+    ---@type PendingSpawnOpts[]
+    deferred_spawns = {},
     -- Command palette
     palette = {
         visible = false,
@@ -1877,6 +1879,15 @@ end
 
 ---@param event Event
 function M.update(event)
+    -- Process any deferred spawns from callbacks
+    if #state.deferred_spawns > 0 then
+        local spawns = state.deferred_spawns
+        state.deferred_spawns = {}
+        for _, spawn_opts in ipairs(spawns) do
+            M.spawn(spawn_opts)
+        end
+    end
+
     if event.type == "pty_attach" then
         prise.log.info("Lua: pty_attach received")
         ---@type Pty
@@ -1912,7 +1923,7 @@ function M.update(event)
                 -- Delay sending the command to allow the shell to fully initialize
                 prise.set_timeout(100, function()
                     prise.log.info("Sending delayed command to PTY: " .. cmd_str)
-                    pty:send_paste(cmd_str .. " && exit\n")
+                    pty:send_paste(cmd_str .. "\n")
                 end)
             end
         elseif #state.tabs == 0 then
@@ -3133,6 +3144,12 @@ function M.set_state(saved, pty_lookup)
     prise.request_frame()
 end
 
+---Queue a spawn for deferred execution (safe to call from event callbacks)
+---@param opts { command: string[], cwd?: string, new_tab?: boolean, return_to_tab?: boolean }
+function M.spawn_deferred(opts)
+    table.insert(state.deferred_spawns, opts)
+end
+
 ---Spawn a new pane with the given command
 ---@param opts { command: string[], cwd?: string, new_tab?: boolean, return_to_tab?: boolean }
 function M.spawn(opts)
@@ -3164,10 +3181,8 @@ function M.spawn(opts)
     prise.log.info(
         "M.spawn: calling prise.spawn with cwd="
             .. (cwd or "nil")
-            .. ", command="
-            .. (opts.command and table.concat(opts.command, " ") or "nil")
     )
-    prise.spawn({ cwd = cwd, command = opts.command })
+    prise.spawn({ cwd = cwd })
     prise.log.info("M.spawn: prise.spawn completed")
 end
 

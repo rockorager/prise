@@ -512,6 +512,7 @@ fn ptyCopySelection(lua: *ziglua.Lua) i32 {
 
 fn ptyCapturePaneRequest(lua: *ziglua.Lua) i32 {
     const pty = lua.checkUserdata(PtyHandle, 1, "PrisePty");
+    log.info("ptyCapturePaneRequest: calling capture_pane_fn for pty {}", .{pty.id});
     pty.capture_pane_fn(pty.app, pty.id) catch |err| {
         log.err("Failed to capture pane: {}", .{err});
     };

@@ -2528,6 +2528,7 @@ const Server = struct {
         const pty_id = parsePtyId(params) catch {
             return msgpack.Value{ .string = try self.allocator.dupe(u8, "invalid params") };
         };
+        log.info("handleCapturePane: capturing pane {}", .{pty_id});
 
         const pty_instance = self.ptys.get(pty_id) orelse {
             return msgpack.Value{ .string = try self.allocator.dupe(u8, "PTY not found") };
