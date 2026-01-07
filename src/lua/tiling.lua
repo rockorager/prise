@@ -256,6 +256,7 @@ local config = {
         ["<leader><lt>"] = "swap_tab_left",
         ["<leader><gt>"] = "swap_tab_right",
         ["<leader>d"] = "detach_session",
+        ["<leader>S"] = "switch_session",
         ["<leader>q"] = "quit",
         ["<leader>H"] = "resize_left",
         ["<leader>L"] = "resize_right",
@@ -1821,6 +1822,9 @@ action_handlers = {
     end,
     rename_session = function()
         open_rename()
+    end,
+    switch_session = function()
+        open_session_picker()
     end,
     quit = function()
         detach_session()
