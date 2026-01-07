@@ -2338,6 +2338,15 @@ function M.update(event)
             end
             state.pending_command = false
             prise.request_frame()
+            -- Send the unmapped key to the focused PTY
+            local root = get_active_root()
+            if root and state.focused_id then
+                local path = find_node_path(root, state.focused_id)
+                if path then
+                    local pane = path[#path]
+                    pane.pty:send_key(event.data)
+                end
+            end
             return
         end
 
