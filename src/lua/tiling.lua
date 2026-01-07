@@ -3088,6 +3088,7 @@ local function build_tab_bar_default()
 end
 
 ---Build tab bar with custom renderer
+---Calculates actual tab positions from rendered segments to ensure hover detection works correctly
 ---@return table
 local function build_tab_bar_custom()
     -- Build tab info for the custom renderer
@@ -3111,30 +3112,81 @@ local function build_tab_bar_custom()
         })
     end
 
-    -- Call the custom renderer
-    local segments = config.tab_bar.render(tab_infos, state.screen_cols, THEME)
+    -- Enhanced custom renderer wrapper that tracks tab boundaries
+    local x_pos = 0
+
+    -- First, render segments and calculate their actual widths
+    local original_segments = config.tab_bar.render(tab_infos, state.screen_cols, THEME)
 
     -- Build click regions from rendered segments
     state.tab_regions = {}
     state.tab_close_regions = {}
 
-    -- Estimate tab boundaries by dividing screen width by tab count
-    -- This is an approximation since custom renderers have full freedom
-    local tab_count = #tab_infos
-    local available_width = state.screen_cols
-
-    for i = 1, tab_count do
-        local tab_start = math.floor((i - 1) * available_width / tab_count)
-        local tab_end = math.floor(i * available_width / tab_count)
-
-        table.insert(state.tab_regions, {
-            start_x = tab_start,
-            end_x = tab_end,
-            tab_index = i,
+    -- Calculate actual segment positions
+    local segment_positions = {}
+    for _, seg in ipairs(original_segments) do
+        local width = prise.gwidth(seg.text)
+        table.insert(segment_positions, {
+            start_x = x_pos,
+            end_x = x_pos + width,
         })
+        x_pos = x_pos + width
     end
 
-    return segments
+    -- Map segments to tabs
+    -- Common pattern: custom renderers output alternating tab/separator segments
+    -- Try to detect this pattern and map accordingly
+    local tab_count = #tab_infos
+    local segment_count = #original_segments
+
+    if segment_count >= tab_count then
+        -- Assume segments are ordered: tab1, sep, tab2, sep, ..., tabN
+        -- Or just: tab1, tab2, ..., tabN if no separators
+        local segments_per_tab = segment_count / tab_count
+        local is_alternating = (segments_per_tab >= 1.5 and segments_per_tab <= 2.5)
+
+        if is_alternating then
+            -- Likely pattern: tab, separator, tab, separator, ...
+            for tab_idx = 1, tab_count do
+                local seg_idx = (tab_idx - 1) * 2 + 1
+                if seg_idx <= segment_count then
+                    local tab_start = segment_positions[seg_idx].start_x
+                    -- Include separator in the clickable region if it exists
+                    local sep_seg_idx = seg_idx + 1
+                    local tab_end
+                    if sep_seg_idx <= segment_count and tab_idx < tab_count then
+                        -- Include separator
+                        tab_end = segment_positions[sep_seg_idx].end_x
+                    else
+                        -- Last tab, no separator
+                        tab_end = segment_positions[seg_idx].end_x
+                    end
+
+                    table.insert(state.tab_regions, {
+                        start_x = tab_start,
+                        end_x = tab_end,
+                        tab_index = tab_idx,
+                    })
+                end
+            end
+        else
+            -- Fallback: divide segments proportionally
+            for tab_idx = 1, tab_count do
+                local first_seg = math.floor((tab_idx - 1) * segment_count / tab_count) + 1
+                local last_seg = math.floor(tab_idx * segment_count / tab_count)
+
+                if first_seg <= segment_count then
+                    table.insert(state.tab_regions, {
+                        start_x = segment_positions[first_seg].start_x,
+                        end_x = segment_positions[math.min(last_seg, segment_count)].end_x,
+                        tab_index = tab_idx,
+                    })
+                end
+            end
+        end
+    end
+
+    return original_segments
 end
 
 ---Build the tab bar UI
