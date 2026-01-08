@@ -28,6 +28,7 @@ pub const PtyAttachInfo = struct {
     close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
     copy_selection_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
+    capture_pane_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     cell_size_fn: *const fn (app: *anyopaque) CellSize,
 };
 
@@ -41,6 +42,11 @@ pub const CwdChangedInfo = struct {
     cwd: []const u8,
 };
 
+pub const CapturePaneCompleteInfo = struct {
+    pty_id: u32,
+    content: []const u8,
+};
+
 pub const Event = union(enum) {
     vaxis: vaxis.Event,
     mouse: MouseEvent,
@@ -49,6 +55,7 @@ pub const Event = union(enum) {
     pty_attach: PtyAttachInfo,
     pty_exited: PtyExitedInfo,
     cwd_changed: CwdChangedInfo,
+    capture_pane_complete: CapturePaneCompleteInfo,
     init: void,
 };
 
@@ -106,6 +113,7 @@ pub fn pushEvent(lua: *ziglua.Lua, event: Event) !void {
         .pty_attach => |info| pushPtyAttachEvent(lua, info),
         .pty_exited => |info| pushPtyExitedEvent(lua, info),
         .cwd_changed => |info| pushCwdChangedEvent(lua, info),
+        .capture_pane_complete => |info| pushCapturePaneCompleteEvent(lua, info),
         .paste => |data| pushPasteEvent(lua, data),
         .split_resize => |sr| pushSplitResizeEvent(lua, sr),
         .mouse => |m| pushMouseEvent(lua, m),
@@ -137,6 +145,7 @@ fn pushPtyAttachEvent(lua: *ziglua.Lua, info: PtyAttachInfo) void {
         .close_fn = info.close_fn,
         .cwd_fn = info.cwd_fn,
         .copy_selection_fn = info.copy_selection_fn,
+        .capture_pane_fn = info.capture_pane_fn,
         .cell_size_fn = info.cell_size_fn,
     };
 
@@ -170,6 +179,18 @@ fn pushCwdChangedEvent(lua: *ziglua.Lua, info: CwdChangedInfo) void {
     lua.setField(-2, "pty_id");
     _ = lua.pushString(info.cwd);
     lua.setField(-2, "cwd");
+    lua.setField(-2, "data");
+}
+
+fn pushCapturePaneCompleteEvent(lua: *ziglua.Lua, info: CapturePaneCompleteInfo) void {
+    _ = lua.pushString("capture_pane_complete");
+    lua.setField(-2, "type");
+
+    lua.createTable(0, 2);
+    lua.pushInteger(@intCast(info.pty_id));
+    lua.setField(-2, "pty_id");
+    _ = lua.pushString(info.content);
+    lua.setField(-2, "content");
     lua.setField(-2, "data");
 }
 
@@ -390,6 +411,7 @@ const PtyHandle = struct {
     close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
     copy_selection_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
+    capture_pane_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     cell_size_fn: *const fn (app: *anyopaque) CellSize,
 };
 
@@ -433,6 +455,10 @@ fn ptyIndex(lua: *ziglua.Lua) i32 {
     }
     if (std.mem.eql(u8, key, "copy_selection")) {
         lua.pushFunction(ziglua.wrap(ptyCopySelection));
+        return 1;
+    }
+    if (std.mem.eql(u8, key, "capture_pane")) {
+        lua.pushFunction(ziglua.wrap(ptyCapturePaneRequest));
         return 1;
     }
     return 0;
@@ -480,6 +506,15 @@ fn ptyCopySelection(lua: *ziglua.Lua) i32 {
     const pty = lua.checkUserdata(PtyHandle, 1, "PrisePty");
     pty.copy_selection_fn(pty.app, pty.id) catch |err| {
         log.err("Failed to copy selection: {}", .{err});
+    };
+    return 0;
+}
+
+fn ptyCapturePaneRequest(lua: *ziglua.Lua) i32 {
+    const pty = lua.checkUserdata(PtyHandle, 1, "PrisePty");
+    log.info("ptyCapturePaneRequest: calling capture_pane_fn for pty {}", .{pty.id});
+    pty.capture_pane_fn(pty.app, pty.id) catch |err| {
+        log.err("Failed to capture pane: {}", .{err});
     };
     return 0;
 }
@@ -736,6 +771,7 @@ pub fn pushPtyUserdata(
     close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
     copy_selection_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
+    capture_pane_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     cell_size_fn: *const fn (app: *anyopaque) CellSize,
 ) !void {
     const pty = lua.newUserdata(PtyHandle, @sizeOf(PtyHandle));
@@ -750,6 +786,7 @@ pub fn pushPtyUserdata(
         .close_fn = close_fn,
         .cwd_fn = cwd_fn,
         .copy_selection_fn = copy_selection_fn,
+        .capture_pane_fn = capture_pane_fn,
         .cell_size_fn = cell_size_fn,
     };
 

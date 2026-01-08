@@ -185,6 +185,16 @@ Available border styles:
 
 The focused pane uses `focused_color` (default: blue) to make it easy to identify the active terminal.
 
+### Capture Pane
+
+Capture the full scrollback history of the active pane and open it in a new tab in your editor:
+
+The `capture_pane` action (default keybind: `<leader>x`) will:
+1. Capture the entire scrollback history of the active pane
+2. Write it to a temporary file in `/tmp` (named `pane_YYYYMMDD_HHMMSS.txt`)
+3. Create a new tab and open the file in your configured `$EDITOR` (defaults to `vim`)
+4. Close the tab automatically when you quit the editor
+
 ### Default Keybinds
 
 The default leader key is `Super+k` (Cmd+k on macOS). After pressing the leader:
@@ -200,9 +210,13 @@ The default leader key is `Super+k` (Cmd+k on macOS). After pressing the leader:
 | `c` | Close tab |
 | `n/p` | Next/previous tab |
 | `d` | Detach session |
+| `x` | Capture pane |
 | `q` | Quit |
 
-Press `Super+p` to open the command palette.
+Additional keybinds:
+- `Super+p` - Open command palette
+
+Press `Super+p` to open the command palette for other available commands.
 
 ### Custom Keybinds
 

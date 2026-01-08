@@ -68,3 +68,6 @@ function Pty:close() end
 
 ---Copy the current selection to clipboard
 function Pty:copy_selection() end
+
+---Capture the current pane content (triggers capture_pane_complete event)
+function Pty:capture_pane() end

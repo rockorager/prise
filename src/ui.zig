@@ -97,6 +97,7 @@ pub const UI = struct {
         cols: u16,
         attach: bool,
         cwd: ?[]const u8 = null,
+        command: ?[]const []const u8 = null,
     };
 
     pub const InitError = struct {
@@ -479,11 +480,49 @@ pub const UI = struct {
 
             _ = lua.getField(1, "cwd");
             if (lua.isString(-1)) opts.cwd = lua.toString(-1) catch null;
-            lua.pop(1);
+            // Don't pop cwd yet - need to keep it valid for callback
+
+            // Parse command array if present
+            // Keep strings on stack until after callback to keep pointers valid
+            var command_buf: [64][]const u8 = undefined;
+            var command_len: usize = 0;
+            var stack_items_to_pop: i32 = 1; // For cwd
+
+            _ = lua.getField(1, "command");
+            stack_items_to_pop += 1; // For command table
+            if (lua.typeOf(-1) == .table) {
+                const len = lua.rawLen(-1);
+                // Remember command table position (absolute index from bottom)
+                const cmd_table_idx = lua.getTop();
+                var i: usize = 0;
+                while (i < len and i < command_buf.len) : (i += 1) {
+                    // Use absolute index to command table since stack grows
+                    _ = lua.rawGetIndex(cmd_table_idx, @intCast(i + 1));
+                    if (lua.isString(-1)) {
+                        command_buf[i] = lua.toString(-1) catch "";
+                        command_len += 1;
+                        stack_items_to_pop += 1; // Keep string on stack
+                    } else {
+                        lua.pop(1); // Pop non-string values immediately
+                    }
+                }
+            }
+
+            if (command_len > 0) {
+                opts.command = command_buf[0..command_len];
+                log.info("spawn: command has {} args", .{command_len});
+                for (command_buf[0..command_len]) |arg| {
+                    log.info("spawn: arg = '{s}'", .{arg});
+                }
+            } else {
+                log.info("spawn: no command provided", .{});
+            }
 
             cb(ui.spawn_ctx, opts) catch |err| {
+                lua.pop(stack_items_to_pop); // Clean up stack before raising error
                 lua.raiseErrorStr("Failed to spawn: %s", .{@errorName(err).ptr});
             };
+            lua.pop(stack_items_to_pop); // Clean up after successful callback
         } else {
             lua.raiseErrorStr("Spawn callback not configured", .{});
         }
@@ -1116,6 +1155,7 @@ pub const UI = struct {
         close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
         cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
         copy_selection_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
+        capture_pane_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
         cell_size_fn: *const fn (app: *anyopaque) lua_event.CellSize,
     };
 
@@ -1165,7 +1205,7 @@ pub const UI = struct {
         const result = lookup_ctx.lookup_fn(lookup_ctx.ctx, id);
 
         if (result) |r| {
-            lua_event.pushPtyUserdata(lua, id, r.surface, r.app, r.send_key_fn, r.send_mouse_fn, r.send_paste_fn, r.set_focus_fn, r.close_fn, r.cwd_fn, r.copy_selection_fn, r.cell_size_fn) catch {
+            lua_event.pushPtyUserdata(lua, id, r.surface, r.app, r.send_key_fn, r.send_mouse_fn, r.send_paste_fn, r.set_focus_fn, r.close_fn, r.cwd_fn, r.copy_selection_fn, r.capture_pane_fn, r.cell_size_fn) catch {
                 lua.pushNil();
             };
         } else {

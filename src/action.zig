@@ -60,6 +60,7 @@ pub const Action = union(enum) {
 
     // UI
     command_palette,
+    capture_pane,
 
     // Lua function reference (registry ref)
     lua_function: i32,
@@ -130,6 +131,7 @@ pub const Action = union(enum) {
             .rename_session => "Rename Session",
             .quit => "Quit",
             .command_palette => "Command Palette",
+            .capture_pane => "Capture Pane",
             .lua_function => null,
         };
     }

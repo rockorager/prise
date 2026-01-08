@@ -11,6 +11,7 @@
 ---Spawn options for creating new PTYs
 ---@class SpawnOptions
 ---@field cwd? string Working directory for the new process
+---@field command? string[] Command and arguments to run (defaults to shell)
 
 ---The prise module provides core functionality for the terminal multiplexer
 ---@class prise
