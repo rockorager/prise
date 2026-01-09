@@ -1397,16 +1397,7 @@ local function move_focus(direction)
         end
 
         if target_leaf and target_leaf.id ~= state.focused_id then
-            local old_id = state.focused_id
-            state.focused_id = target_leaf.id
-
-            -- Track that this child was focused in its parent
-            if config.navigation.remember_focus and sibling_parent then
-                ---@cast sibling_parent Split
-                sibling_parent.last_focused_child_idx = sibling_idx
-            end
-
-            update_pty_focus(old_id, state.focused_id)
+            set_focus_and_track(target_leaf.id)
             update_cached_git_branch()
             prise.request_frame()
         end
@@ -2182,7 +2173,6 @@ function M.update(event)
             -- Use set_focus_and_track to register the new pane and track parent splits
             set_focus_and_track(new_pane.id)
             state.pending_split = nil
-            update_pty_focus(old_focused_id, state.focused_id)
             prise.request_frame()
             prise.save() -- Auto-save on pane added
             return
