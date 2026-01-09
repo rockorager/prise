@@ -21,6 +21,11 @@ local utils = require("utils")
 ---@field title? string
 ---@field root? Node
 ---@field last_focused_id? number
+---@field floating? FloatingPane Floating pane for this tab (if any)
+
+---@class FloatingPane
+---@field pane Pane The actual pane
+---@field visible boolean Whether the floating pane is visible
 
 ---@class PaletteRegion
 ---@field start_y number
@@ -54,6 +59,12 @@ local utils = require("utils")
 ---@field renaming boolean
 ---@field rename_target? string
 
+---@class FloatingPaneState
+---@field visible boolean Whether the floating pane is visible
+---@field width number Width in columns (default: 100)
+---@field height number Height in rows (default: 30)
+---@field pending boolean Whether a floating pane spawn is pending
+
 ---@class State
 ---@field tabs Tab[]
 ---@field active_tab integer
@@ -74,6 +85,7 @@ local utils = require("utils")
 ---@field screen_cols number
 ---@field screen_rows number
 ---@field keybind_matcher? KeybindMatcher
+---@field floating FloatingPaneState
 
 ---@class Command
 ---@field name string|fun(): string
@@ -201,11 +213,16 @@ local POWERLINE_SYMBOLS = {
 ---@field focused_color? string Hex color for focused pane border (default: "#89b4fa")
 ---@field unfocused_color? string Hex color for unfocused borders (default: "#585b70")
 
+---@class PriseFloatingConfig
+---@field width? number Width in columns (default: 100)
+---@field height? number Height in rows (default: 30)
+
 ---@class PriseConfigOptions
 ---@field theme? PriseThemeOptions Color theme options
 ---@field borders? PriseBordersConfig Pane border options
 ---@field status_bar? PriseStatusBarConfig Status bar options
 ---@field tab_bar? PriseTabBarConfig Tab bar options
+---@field floating? PriseFloatingConfig Floating pane options
 ---@field leader? string Leader key sequence (default: "<D-k>")
 ---@field keybinds? PriseKeybinds Keybind definitions
 ---@field macos_option_as_alt? "false"|"left"|"right"|"true" macOS Option key behavior (default: "false")
@@ -215,6 +232,7 @@ local POWERLINE_SYMBOLS = {
 ---@field borders PriseBordersConfig
 ---@field status_bar PriseStatusBarConfig
 ---@field tab_bar PriseTabBarConfig
+---@field floating PriseFloatingConfig
 ---@field leader string
 ---@field keybinds PriseKeybinds
 
@@ -256,6 +274,10 @@ local config = {
         render = nil, -- Use default built-in design
         format_title = nil, -- Use titles as-is
     },
+    floating = {
+        width = 100,
+        height = 30,
+    },
     leader = "<D-k>",
     keybinds = {
         ["<D-p>"] = "command_palette",
@@ -292,6 +314,9 @@ local config = {
         ["<leader>8"] = "tab_8",
         ["<leader>9"] = "tab_9",
         ["<leader>0"] = "tab_10",
+        ["<leader>f"] = "floating_toggle",
+        ["<leader>+"] = "floating_increase_size",
+        ["<leader>-"] = "floating_decrease_size",
     },
     macos_option_as_alt = "false",
 }
@@ -364,6 +389,13 @@ local state = {
     detaching = false,
     -- Keybind matcher (initialized by init_keybinds)
     keybind_matcher = nil,
+    -- Floating pane state
+    floating = {
+        visible = false,
+        width = 120,
+        height = 80,
+        pending = false,
+    },
 }
 
 local M = {}
@@ -386,6 +418,9 @@ function M.setup(opts)
     if opts then
         merge_config(config, opts)
     end
+    -- Apply floating pane config to state
+    state.floating.width = config.floating.width
+    state.floating.height = config.floating.height
     -- Mark keybinds for re-initialization on next key event
     -- (lazy init because UI pointer may not be available during config loading)
     state.keybind_matcher = nil
@@ -1710,6 +1745,27 @@ local commands = {
             return #state.tabs >= 10
         end,
     },
+    {
+        name = "Toggle Floating Pane",
+        shortcut = key_prefix .. " f",
+        action = function()
+            local tab = get_active_tab()
+            if not tab then
+                return
+            end
+
+            if not tab.floating then
+                -- No floating pane created yet, spawn one
+                state.floating.pending = true
+                local pty = get_focused_pty()
+                prise.spawn({ cwd = pty and pty:cwd() })
+            else
+                -- Toggle visibility
+                tab.floating.visible = not tab.floating.visible
+                prise.request_frame()
+            end
+        end,
+    },
 }
 
 -- Action handlers for keybind system
@@ -1848,6 +1904,33 @@ action_handlers = {
     end,
     quit = function()
         detach_session()
+    end,
+    floating_toggle = function()
+        local tab = get_active_tab()
+        if not tab then
+            return
+        end
+
+        if not tab.floating then
+            -- No floating pane created yet, spawn one
+            state.floating.pending = true
+            local pty = get_focused_pty()
+            prise.spawn({ cwd = pty and pty:cwd() })
+        else
+            -- Toggle visibility
+            tab.floating.visible = not tab.floating.visible
+            prise.request_frame()
+        end
+    end,
+    floating_increase_size = function()
+        state.floating.width = math.min(state.floating.width + 5, 200)
+        state.floating.height = math.min(state.floating.height + 2, 50)
+        prise.request_frame()
+    end,
+    floating_decrease_size = function()
+        state.floating.width = math.max(state.floating.width - 5, 40)
+        state.floating.height = math.max(state.floating.height - 2, 10)
+        prise.request_frame()
     end,
     -- command_palette is added after open_palette is defined
 }
@@ -2027,6 +2110,17 @@ function M.update(event)
         ---@type Pane
         local new_pane = { type = "pane", pty = pty, id = pty:id() }
         local old_focused_id = state.focused_id
+
+        -- Check if this PTY should be assigned to the floating pane
+        if state.floating.pending then
+            state.floating.pending = false
+            local tab = get_active_tab()
+            if tab then
+                tab.floating = { pane = new_pane, visible = true }
+            end
+            prise.request_frame()
+            return
+        end
 
         if state.pending_new_tab then
             -- Create a new tab with this pane
@@ -2371,13 +2465,26 @@ function M.update(event)
             end
         end
 
-        -- Pass key to focused PTY
-        local root = get_active_root()
-        if root and state.focused_id then
-            local path = find_node_path(root, state.focused_id)
-            if path then
-                local pane = path[#path]
-                pane.pty:send_key(event.data)
+        -- Route to floating pane if visible, otherwise to focused pane
+        local tab = get_active_tab()
+        if tab and tab.floating and tab.floating.visible then
+            -- Check for escape key to hide floating pane
+            if event.data.key == "Escape" then
+                tab.floating.visible = false
+                prise.request_frame()
+                return
+            end
+            -- Send to floating pane
+            tab.floating.pane.pty:send_key(event.data)
+        else
+            -- Pass key to focused PTY in main layout
+            local root = get_active_root()
+            if root and state.focused_id then
+                local path = find_node_path(root, state.focused_id)
+                if path then
+                    local pane = path[#path]
+                    pane.pty:send_key(event.data)
+                end
             end
         end
     elseif event.type == "key_release" then
@@ -2413,6 +2520,22 @@ function M.update(event)
     elseif event.type == "pty_exited" then
         local id = event.data.id
         prise.log.info("Lua: pty_exited " .. id)
+
+        -- Check if this is a floating pane (check active tab first, then others)
+        local active_tab = get_active_tab()
+        if active_tab and active_tab.floating and active_tab.floating.pane.id == id then
+            active_tab.floating = nil
+            prise.request_frame()
+            return
+        end
+        for _, tab in ipairs(state.tabs) do
+            if tab ~= active_tab and tab.floating and tab.floating.pane.id == id then
+                tab.floating = nil
+                prise.request_frame()
+                return
+            end
+        end
+
         local was_last = remove_pane_by_id(id)
         if not was_last then
             prise.save()
@@ -2502,7 +2625,27 @@ function M.update(event)
                 update_pty_focus(old_id, state.focused_id)
                 prise.request_frame()
             end
+
+            -- Hide floating pane when clicking on main pane
+            local tab = get_active_tab()
+            if tab and tab.floating and tab.floating.visible and d.target ~= tab.floating.pane.id then
+                tab.floating.visible = false
+                prise.request_frame()
+            end
         end
+        -- Forward mouse events to floating pane if visible and targeted
+        local tab = get_active_tab()
+        if tab and tab.floating and tab.floating.visible and d.target == tab.floating.pane.id then
+            tab.floating.pane.pty:send_mouse({
+                x = d.target_x or 0,
+                y = d.target_y or 0,
+                button = d.button,
+                event_type = d.action,
+                mods = d.mods,
+            })
+            return
+        end
+
         -- Forward mouse events to the target PTY if there is one
         local root = get_active_root()
         if d.target and root then
@@ -3340,6 +3483,28 @@ local function build_swap_with_index()
     })
 end
 
+local function build_floating()
+    local tab = get_active_tab()
+    if not tab or not tab.floating or not tab.floating.visible then
+        return nil
+    end
+
+    -- Create positioned terminal widget with size constraints
+    return prise.Positioned({
+        anchor = "center",
+        child = prise.Box({
+            border = config.borders.style,
+            style = { fg = config.borders.focused_color },
+            max_width = state.floating.width,
+            max_height = state.floating.height,
+            child = prise.Terminal({
+                pty = tab.floating.pane.pty,
+                focus = true,
+            }),
+        }),
+    })
+end
+
 function M.view()
     local root = get_active_root()
     if not root then
@@ -3359,15 +3524,19 @@ function M.view()
     local rename_tab = build_rename_tab()
     local swap_with_index = build_swap_with_index()
     local session_picker = build_session_picker()
+    local floating = build_floating()
     local tab_bar = build_tab_bar()
     prise.log.debug("view: palette.visible=" .. tostring(state.palette.visible))
 
     -- When zoomed, render only the zoomed pane
+    local tab = get_active_tab()
+    local floating_visible = tab and tab.floating and tab.floating.visible
     local overlay_visible = state.palette.visible
         or state.rename.visible
         or state.rename_tab.visible
         or (state.swap_with_index and state.swap_with_index.visible)
         or state.session_picker.visible
+        or floating_visible
     local content
     if state.zoomed_pane_id then
         local path = find_node_path(root, state.zoomed_pane_id)
@@ -3413,13 +3582,24 @@ function M.view()
         children = main_children,
     })
 
-    local overlay = palette or rename or rename_tab or swap_with_index or session_picker
-    if overlay then
+    -- Build overlay stack: floating pane below modals, modals on top
+    local overlay_children = { main_ui }
+    if floating then
+        table.insert(overlay_children, floating)
+    end
+
+    local modal = palette or rename or rename_tab or swap_with_index or session_picker
+    if modal then
+        table.insert(overlay_children, modal)
         return prise.Stack({
-            children = {
-                main_ui,
-                overlay,
-            },
+            children = overlay_children,
+        })
+    end
+
+    -- If we only have floating pane (no modal), use Stack if floating exists
+    if floating then
+        return prise.Stack({
+            children = overlay_children,
         })
     end
 
