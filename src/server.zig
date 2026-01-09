@@ -1572,12 +1572,27 @@ const Client = struct {
                     defer pty_instance.terminal_mutex.unlock();
 
                     const screen = pty_instance.terminal.screens.active;
+                    const terminal_rows = pty_instance.terminal.rows;
+
+                    // Auto-scroll when dragging beyond viewport edges
+                    const raw_y = mouse.y;
+                    if (raw_y < 0) {
+                        pty_instance.terminal.scrollViewport(.{ .delta = -1 }) catch {};
+                    } else if (raw_y >= @as(f64, @floatFromInt(terminal_rows))) {
+                        pty_instance.terminal.scrollViewport(.{ .delta = 1 }) catch {};
+                    }
+
+                    // Clamp row to valid viewport range after scrolling
+                    const clamped_row: u16 = @intFromFloat(@max(0, @min(
+                        @floor(raw_y),
+                        @as(f64, @floatFromInt(terminal_rows -| 1)),
+                    )));
 
                     // start is already a Pin (stored during press event)
                     const start_pin = start;
                     const end_pin = screen.pages.pin(.{ .viewport = .{
                         .x = col,
-                        .y = row,
+                        .y = clamped_row,
                     } }) orelse return;
 
                     switch (pty_instance.left_click_count) {
