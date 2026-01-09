@@ -13,6 +13,7 @@ local utils = require("utils")
 ---@field direction "row"|"col"
 ---@field ratio? number
 ---@field children (Pane|Split)[]
+---@field last_focused_child_idx? number Index of the last focused child (only when remember_focus enabled)
 
 ---@alias Node Pane|Split
 
@@ -201,11 +202,15 @@ local POWERLINE_SYMBOLS = {
 ---@field focused_color? string Hex color for focused pane border (default: "#89b4fa")
 ---@field unfocused_color? string Hex color for unfocused borders (default: "#585b70")
 
+---@class PriseNavigationConfig
+---@field remember_focus? boolean Remember last-focused child when navigating into a split (default: false)
+
 ---@class PriseConfigOptions
 ---@field theme? PriseThemeOptions Color theme options
 ---@field borders? PriseBordersConfig Pane border options
 ---@field status_bar? PriseStatusBarConfig Status bar options
 ---@field tab_bar? PriseTabBarConfig Tab bar options
+---@field navigation? PriseNavigationConfig Navigation behavior options
 ---@field leader? string Leader key sequence (default: "<D-k>")
 ---@field keybinds? PriseKeybinds Keybind definitions
 ---@field macos_option_as_alt? "false"|"left"|"right"|"true" macOS Option key behavior (default: "false")
@@ -215,6 +220,7 @@ local POWERLINE_SYMBOLS = {
 ---@field borders PriseBordersConfig
 ---@field status_bar PriseStatusBarConfig
 ---@field tab_bar PriseTabBarConfig
+---@field navigation PriseNavigationConfig
 ---@field leader string
 ---@field keybinds PriseKeybinds
 
@@ -255,6 +261,9 @@ local config = {
         show_single_tab = false,
         render = nil, -- Use default built-in design
         format_title = nil, -- Use titles as-is
+    },
+    navigation = {
+        remember_focus = false, -- When true, navigating into a split remembers which child had focus
     },
     leader = "<D-k>",
     keybinds = {
@@ -604,6 +613,28 @@ local function get_last_leaf(node)
     return nil
 end
 
+---Get the leaf pane of the last-focused child in a split, or fall back to first leaf
+---@param node Node
+---@return Pane?
+local function get_preferred_leaf(node)
+    if node.type == "pane" then
+        ---@cast node Pane
+        return node
+    elseif node.type == "split" then
+        ---@cast node Split
+        -- If remember_focus is enabled and we have a last_focused_child_idx, use it
+        if config.navigation.remember_focus and node.last_focused_child_idx then
+            local child = node.children[node.last_focused_child_idx]
+            if child then
+                return get_preferred_leaf(child)
+            end
+        end
+        -- Otherwise fall back to first child (directional behavior)
+        return get_first_leaf(node)
+    end
+    return nil
+end
+
 ---Update the cached git branch for the focused pane
 local function update_cached_git_branch()
     local root = get_active_root()
@@ -778,6 +809,63 @@ local function update_pty_focus(old_id, new_id)
             end
         end
     end
+end
+
+---Check if a node subtree contains the target pane id
+---@param node Node
+---@param target_id number
+---@return boolean
+local function find_node_in_tree(node, target_id)
+    if node.type == "pane" then
+        return node.id == target_id
+    elseif node.type == "split" then
+        for _, child in ipairs(node.children) do
+            if find_node_in_tree(child, target_id) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+---Update focus and track last_focused_child_idx in parent splits when remember_focus is enabled
+---@param new_id number The pane id to focus
+local function set_focus_and_track(new_id)
+    if state.focused_id == new_id then
+        return
+    end
+
+    local root = get_active_root()
+    if not root then
+        return
+    end
+
+    local path = find_node_path(root, new_id)
+    if not path then
+        return
+    end
+
+    -- Walk up the path and mark each split's last_focused_child_idx if remember_focus is enabled
+    if config.navigation.remember_focus then
+        for i = #path - 1, 1, -1 do
+            local node = path[i]
+            if node.type == "split" then
+                ---@cast node Split
+                -- Find which child in this split contains the focused pane
+                for j, child in ipairs(node.children) do
+                    if find_node_in_tree(child, new_id) then
+                        node.last_focused_child_idx = j
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    local old_id = state.focused_id
+    state.focused_id = new_id
+    update_pty_focus(old_id, state.focused_id)
+    update_cached_git_branch()
 end
 
 ---Switch to a different tab by index
@@ -1072,13 +1160,19 @@ local function serialize_node(node, cwd_lookup)
         for _, child in ipairs(node.children) do
             table.insert(children, serialize_node(child, cwd_lookup))
         end
-        return {
+        ---@type table
+        local serialized = {
             type = "split",
             split_id = node.split_id,
             direction = node.direction,
             ratio = node.ratio,
             children = children,
         }
+        -- Only save last_focused_child_idx if remember_focus is enabled
+        if config.navigation.remember_focus and node.last_focused_child_idx then
+            serialized.last_focused_child_idx = node.last_focused_child_idx
+        end
+        return serialized
     end
     return nil
 end
@@ -1120,13 +1214,19 @@ local function deserialize_node(saved, pty_lookup)
             survivor.ratio = saved.ratio
             return survivor
         end
-        return {
+        ---@type Split
+        local split_node = {
             type = "split",
             split_id = saved.split_id,
             direction = saved.direction,
             ratio = saved.ratio,
             children = children,
         }
+        -- Restore last_focused_child_idx if it was saved and remember_focus is enabled
+        if config.navigation.remember_focus and saved.last_focused_child_idx then
+            split_node.last_focused_child_idx = saved.last_focused_child_idx
+        end
+        return split_node
     end
     return nil
 end
@@ -1294,19 +1394,25 @@ local function move_focus(direction)
     end
 
     if sibling_node then
-        -- Found a sibling tree/pane. Find the closest leaf.
+        -- Found a sibling tree/pane. Find the target leaf.
         ---@type Pane?
         local target_leaf
-        if forward then
-            target_leaf = get_first_leaf(sibling_node)
+
+        -- If remember_focus is enabled, use get_preferred_leaf which respects last_focused_child_idx
+        if config.navigation.remember_focus then
+            -- For the sibling, prefer its last-focused child
+            target_leaf = get_preferred_leaf(sibling_node)
         else
-            target_leaf = get_last_leaf(sibling_node)
+            -- Default directional behavior: use first/last leaf based on direction
+            if forward then
+                target_leaf = get_first_leaf(sibling_node)
+            else
+                target_leaf = get_last_leaf(sibling_node)
+            end
         end
 
         if target_leaf and target_leaf.id ~= state.focused_id then
-            local old_id = state.focused_id
-            state.focused_id = target_leaf.id
-            update_pty_focus(old_id, state.focused_id)
+            set_focus_and_track(target_leaf.id)
             update_cached_git_branch()
             prise.request_frame()
         end
@@ -2040,6 +2146,7 @@ function M.update(event)
                 last_focused_id = new_pane.id,
             }
             table.insert(state.tabs, new_tab)
+            state.focused_id = new_pane.id
             set_active_tab_index(#state.tabs)
         elseif #state.tabs == 0 then
             -- First terminal - create first tab
@@ -2081,8 +2188,12 @@ function M.update(event)
                 end
             end
 
-            state.focused_id = new_pane.id
+            -- Use set_focus_and_track to register the new pane and track parent splits
+            set_focus_and_track(new_pane.id)
             state.pending_split = nil
+            prise.request_frame()
+            prise.save() -- Auto-save on pane added
+            return
         end
         update_pty_focus(old_focused_id, state.focused_id)
         prise.request_frame()
@@ -2497,9 +2608,7 @@ function M.update(event)
 
             -- Focus the clicked pane
             if d.target and d.target ~= state.focused_id then
-                local old_id = state.focused_id
-                state.focused_id = d.target
-                update_pty_focus(old_id, state.focused_id)
+                set_focus_and_track(d.target)
                 prise.request_frame()
             end
         end

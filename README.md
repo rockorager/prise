@@ -185,6 +185,51 @@ Available border styles:
 
 The focused pane uses `focused_color` (default: blue) to make it easy to identify the active terminal.
 
+### Navigation Behavior
+
+Control how focus navigation works when moving between splits:
+
+```lua
+local ui = require("prise").tiling()
+
+ui.setup({
+    navigation = {
+        remember_focus = false,  -- Enable to remember last-focused child in splits
+    },
+})
+
+return ui
+```
+
+#### Default Behavior (remember_focus = false)
+
+When navigating into a split, focus moves to the edge pane based on direction:
+
+```
+Split [ A | B ]
+  ├─ Pane A
+  └─ Pane B
+
+From A: move right → focus goes to B (first pane of right split)
+From B: move left  → focus goes to A (last pane of left split)
+```
+
+#### With remember_focus = true
+
+Navigation remembers which child was last focused in each split. When you move into a split, focus returns to the pane that was previously focused there:
+
+```
+Split [ A [nested] | B ]
+  ├─ Split [nested]
+  │  ├─ Pane X
+  │  └─ Pane Y (was last focused)
+  └─ Pane B
+
+From B: move left → focus goes to Y (remembers last-focused child)
+```
+
+This is useful if you prefer tmux/vim-like behavior where navigating into a split restores your previous position in that subtree. By default, directional navigation is used for predictability.
+
 ### Default Keybinds
 
 The default leader key is `Super+k` (Cmd+k on macOS). After pressing the leader:
