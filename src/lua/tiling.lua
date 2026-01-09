@@ -64,6 +64,7 @@ local utils = require("utils")
 ---@field width number Width in columns (default: 100)
 ---@field height number Height in rows (default: 30)
 ---@field pending boolean Whether a floating pane spawn is pending
+---@field resize_mode boolean Whether resize mode is active (shows size indicator)
 
 ---@class State
 ---@field tabs Tab[]
@@ -392,8 +393,8 @@ local state = {
     -- Floating pane state
     floating = {
         visible = false,
-        width = 120,
-        height = 80,
+        width = 100,
+        height = 30,
         pending = false,
         resize_mode = false,
     },
@@ -436,6 +437,14 @@ end
 local RESIZE_STEP = 0.05 -- 5% step for keyboard resize
 local PALETTE_WIDTH = 60 -- Total width of command palette
 local PALETTE_INNER_WIDTH = 56 -- Inner width (PALETTE_WIDTH - 4 for padding)
+
+-- Floating pane size bounds
+local FLOATING_MIN_WIDTH = 40
+local FLOATING_MAX_WIDTH = 200
+local FLOATING_MIN_HEIGHT = 10
+local FLOATING_MAX_HEIGHT = 50
+local FLOATING_WIDTH_STEP = 5
+local FLOATING_HEIGHT_STEP = 2
 
 -- --- Helpers ---
 
@@ -1750,21 +1759,7 @@ local commands = {
         name = "Toggle Floating Pane",
         shortcut = key_prefix .. " f",
         action = function()
-            local tab = get_active_tab()
-            if not tab then
-                return
-            end
-
-            if not tab.floating then
-                -- No floating pane created yet, spawn one
-                state.floating.pending = true
-                local pty = get_focused_pty()
-                prise.spawn({ cwd = pty and pty:cwd() })
-            else
-                -- Toggle visibility
-                tab.floating.visible = not tab.floating.visible
-                prise.request_frame()
-            end
+            action_handlers.floating_toggle()
         end,
     },
 }
@@ -1924,14 +1919,14 @@ action_handlers = {
         end
     end,
     floating_increase_size = function()
-        state.floating.width = math.min(state.floating.width + 5, 200)
-        state.floating.height = math.min(state.floating.height + 2, 50)
+        state.floating.width = math.min(state.floating.width + FLOATING_WIDTH_STEP, FLOATING_MAX_WIDTH)
+        state.floating.height = math.min(state.floating.height + FLOATING_HEIGHT_STEP, FLOATING_MAX_HEIGHT)
         state.floating.resize_mode = true
         prise.request_frame()
     end,
     floating_decrease_size = function()
-        state.floating.width = math.max(state.floating.width - 5, 40)
-        state.floating.height = math.max(state.floating.height - 2, 10)
+        state.floating.width = math.max(state.floating.width - FLOATING_WIDTH_STEP, FLOATING_MIN_WIDTH)
+        state.floating.height = math.max(state.floating.height - FLOATING_HEIGHT_STEP, FLOATING_MIN_HEIGHT)
         state.floating.resize_mode = true
         prise.request_frame()
     end,
@@ -2495,7 +2490,9 @@ function M.update(event)
                 return
             end
             -- Send to floating pane
-            tab.floating.pane.pty:send_key(event.data)
+            if tab.floating.pane and tab.floating.pane.pty then
+                tab.floating.pane.pty:send_key(event.data)
+            end
         else
             -- Pass key to focused PTY in main layout
             local root = get_active_root()
@@ -2648,21 +2645,29 @@ function M.update(event)
 
             -- Hide floating pane when clicking on main pane
             local tab = get_active_tab()
-            if tab and tab.floating and tab.floating.visible and d.target ~= tab.floating.pane.id then
+            if
+                tab
+                and tab.floating
+                and tab.floating.visible
+                and tab.floating.pane
+                and d.target ~= tab.floating.pane.id
+            then
                 tab.floating.visible = false
                 prise.request_frame()
             end
         end
         -- Forward mouse events to floating pane if visible and targeted
         local tab = get_active_tab()
-        if tab and tab.floating and tab.floating.visible and d.target == tab.floating.pane.id then
-            tab.floating.pane.pty:send_mouse({
-                x = d.target_x or 0,
-                y = d.target_y or 0,
-                button = d.button,
-                event_type = d.action,
-                mods = d.mods,
-            })
+        if tab and tab.floating and tab.floating.visible and tab.floating.pane and d.target == tab.floating.pane.id then
+            if tab.floating.pane.pty then
+                tab.floating.pane.pty:send_mouse({
+                    x = d.target_x or 0,
+                    y = d.target_y or 0,
+                    button = d.button,
+                    event_type = d.action,
+                    mods = d.mods,
+                })
+            end
             return
         end
 
