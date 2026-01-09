@@ -2493,6 +2493,7 @@ function M.update(event)
             if tab.floating.pane and tab.floating.pane.pty then
                 tab.floating.pane.pty:send_key(event.data)
             end
+            return
         else
             -- Pass key to focused PTY in main layout
             local root = get_active_root()
@@ -2657,10 +2658,16 @@ function M.update(event)
             end
         end
         -- Forward mouse events to floating pane if visible and targeted
-        local tab = get_active_tab()
-        if tab and tab.floating and tab.floating.visible and tab.floating.pane and d.target == tab.floating.pane.id then
-            if tab.floating.pane.pty then
-                tab.floating.pane.pty:send_mouse({
+        local floating_tab = get_active_tab()
+        if
+            floating_tab
+            and floating_tab.floating
+            and floating_tab.floating.visible
+            and floating_tab.floating.pane
+            and d.target == floating_tab.floating.pane.id
+        then
+            if floating_tab.floating.pane.pty then
+                floating_tab.floating.pane.pty:send_mouse({
                     x = d.target_x or 0,
                     y = d.target_y or 0,
                     button = d.button,
@@ -3519,7 +3526,13 @@ end
 
 local function build_floating()
     local tab = get_active_tab()
-    if not tab or not tab.floating or not tab.floating.visible then
+    if
+        not tab
+        or not tab.floating
+        or not tab.floating.visible
+        or not tab.floating.pane
+        or not tab.floating.pane.pty
+    then
         return nil
     end
 
