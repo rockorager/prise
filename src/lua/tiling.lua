@@ -127,15 +127,187 @@ local utils = require("utils")
 
 ---@alias Event PtyAttachEvent|PtyExitedEvent|KeyPressEvent|KeyReleaseEvent|PasteEvent|MouseEvent|WinsizeEvent|FocusInEvent|FocusOutEvent|SplitResizeEvent|CwdChangedEvent
 
--- Powerline symbols
+-- Powerline symbols (using \u{} escape for Private Use Area chars)
 local POWERLINE_SYMBOLS = {
-    right_solid = "",
-    right_thin = "",
-    left_solid = "",
-    left_thin = "",
+    right_solid = "\u{E0B0}",
+    right_thin = "\u{E0B1}",
+    left_solid = "\u{E0B2}",
+    left_thin = "\u{E0B3}",
     left_round = "\u{E0B6}",
     right_round = "\u{E0B4}",
 }
+
+-- ============================================================================
+-- STATUS BAR WIDGET SYSTEM
+-- ============================================================================
+
+---@class WidgetResult
+---@field text string The text to display
+---@field style table Style with bg, fg, bold, etc.
+
+---@class WidgetDefinition
+---@field render fun(state: State, theme: PriseTheme): WidgetResult|nil Render function returns segment or nil to hide
+---@field interval? number Optional refresh interval in ms
+
+---@class ShellWidgetConfig
+---@field type "shell"
+---@field command string Shell command to execute
+---@field interval? number Refresh interval in ms (default: 60000)
+---@field timeout? number Command timeout in ms (default: 5000)
+---@field icon? string Prefix icon
+---@field style? table Custom styling
+
+-- Forward declaration for widget state (initialized later with state table)
+local widget_state = {
+    timers = {},      -- { widget_id = timer_handle }
+    shell_cache = {}, -- { command = { result = "...", expires_at = timestamp } }
+}
+
+---Built-in widget definitions
+---@type table<string, WidgetDefinition>
+local BUILTIN_WIDGETS = {}
+
+-- Deferred initialization of widgets (need THEME which is defined after config)
+---@diagnostic disable-next-line: unused-local
+local function init_builtin_widgets(theme, get_state)
+    BUILTIN_WIDGETS = {
+        mode = {
+            render = function(st, th)
+                local mode_color = st.pending_command and th.mode_command or th.mode_normal
+                local session_name = (prise.get_session_name() or "prise"):upper()
+                local mode_text = st.pending_command and " CMD " or (" " .. session_name .. " ")
+                return { text = mode_text, style = { bg = mode_color, fg = th.fg_dark, bold = true } }
+            end,
+            -- No interval, updates on state change
+        },
+        git = {
+            render = function(st, th)
+                if not st.cached_git_branch then return nil end
+                local branch_text = " \u{F062C} " .. st.cached_git_branch .. " "
+                return { text = branch_text, style = { bg = th.bg2, fg = th.fg_bright } }
+            end,
+            -- Updates via cwd_changed events
+        },
+        zoom = {
+            render = function(st, th)
+                if not st.zoomed_pane_id then return nil end
+                return { text = " ZOOM ", style = { bg = th.yellow, fg = th.fg_dark, bold = true } }
+            end,
+            -- No interval, updates on state change
+        },
+        time = {
+            render = function(st, th)
+                local time_str = prise.get_time()
+                return { text = " " .. time_str .. " ", style = { bg = th.bg3, fg = th.fg_dim } }
+            end,
+            interval = 60000, -- 60 seconds
+        },
+        battery = {
+            render = function(st, th)
+                local bat = prise.get_battery()
+                if not bat then return nil end -- Auto-hide on desktop
+                local icon = bat.charging and "\u{F0084}" or "\u{F007A}" -- 󰂄 charging, 󰁺 discharging
+                local text = " " .. icon .. " " .. bat.percent .. "% "
+                return { text = text, style = { bg = th.bg3, fg = th.fg_dim } }
+            end,
+            interval = 30000, -- 30 seconds
+        },
+        hostname = {
+            render = function(st, th)
+                local hostname = prise.get_hostname()
+                if not hostname then return nil end
+                return { text = " " .. hostname .. " ", style = { bg = th.bg2, fg = th.fg_bright } }
+            end,
+            -- No interval, hostname doesn't change
+        },
+    }
+end
+
+---Create a shell widget from config
+---@param spec ShellWidgetConfig
+---@return WidgetDefinition
+local function create_shell_widget(spec)
+    return {
+        render = function(st, th)
+            local now = os.time() * 1000
+            local cached = widget_state.shell_cache[spec.command]
+
+            -- Use cached result if still valid
+            if cached and cached.expires_at > now then
+                local text = spec.icon and (" " .. spec.icon .. " " .. cached.result .. " ") or (" " .. cached.result .. " ")
+                return { text = text, style = spec.style or { bg = th.bg3, fg = th.fg_dim } }
+            end
+
+            -- Fetch new result
+            local result = prise.exec({ command = spec.command, timeout = spec.timeout or 5000 })
+            if result then
+                widget_state.shell_cache[spec.command] = {
+                    result = result,
+                    expires_at = now + (spec.interval or 60000)
+                }
+                local text = spec.icon and (" " .. spec.icon .. " " .. result .. " ") or (" " .. result .. " ")
+                return { text = text, style = spec.style or { bg = th.bg3, fg = th.fg_dim } }
+            end
+
+            return nil -- Hide widget if command fails
+        end,
+        interval = spec.interval or 60000,
+    }
+end
+
+---Normalize a widget specification to a WidgetDefinition
+---@param widget_spec string|table Widget name string or full config table
+---@return WidgetDefinition|nil
+local function normalize_widget(widget_spec)
+    if type(widget_spec) == "string" then
+        return BUILTIN_WIDGETS[widget_spec]
+    elseif type(widget_spec) == "table" then
+        if widget_spec.type == "shell" then
+            return create_shell_widget(widget_spec)
+        elseif widget_spec.render then
+            -- Custom widget with render function
+            return widget_spec
+        end
+    end
+    return nil
+end
+
+---Schedule a timer for widget refresh
+---@param widget_id string Unique identifier for the widget
+---@param interval number Interval in milliseconds
+local function schedule_widget_timer(widget_id, interval)
+    if widget_state.timers[widget_id] then return end
+    widget_state.timers[widget_id] = prise.set_timeout(interval, function()
+        widget_state.timers[widget_id] = nil
+        prise.request_frame()
+        -- Reschedule if not detaching
+        if not state.detaching then
+            schedule_widget_timer(widget_id, interval)
+        end
+    end)
+end
+
+---Cancel all widget timers (reserved for future use)
+---@diagnostic disable-next-line: unused-local
+local function cancel_widget_timers()
+    -- Collect timer IDs first to avoid modifying table while iterating
+    local ids = {}
+    for id, _ in pairs(widget_state.timers) do
+        table.insert(ids, id)
+    end
+    -- Now cancel and clear each timer
+    for _, id in ipairs(ids) do
+        local timer = widget_state.timers[id]
+        if timer then
+            pcall(function() timer:cancel() end)
+        end
+        widget_state.timers[id] = nil
+    end
+end
+
+-- ============================================================================
+-- END WIDGET SYSTEM
+-- ============================================================================
 
 ---@class PriseThemeOptions
 ---@field mode_normal? string Color for normal mode indicator
@@ -165,8 +337,14 @@ local POWERLINE_SYMBOLS = {
 ---@field green string
 ---@field yellow string
 
+---@class StatusBarWidgetsConfig
+---@field left? (string|table)[] Widgets for left section
+---@field center? (string|table)[] Widgets for center section
+---@field right? (string|table)[] Widgets for right section
+
 ---@class PriseStatusBarConfig
 ---@field enabled? boolean Show the status bar (default: true)
+---@field widgets? StatusBarWidgetsConfig Widget configuration for left/center/right sections
 
 ---Tab info passed to custom render function
 ---@class TabInfo
@@ -250,6 +428,7 @@ local config = {
     },
     status_bar = {
         enabled = true,
+        widgets = nil, -- nil means use legacy hardcoded layout for backwards compat
     },
     tab_bar = {
         show_single_tab = false,
@@ -489,6 +668,8 @@ local function detach_session()
         state.timer:cancel()
         state.timer = nil
     end
+    -- Note: widget timers are cleaned up when Lua state is destroyed
+    -- Calling cancel_widget_timers() here was causing issues
     prise.detach(prise.get_session_name())
 end
 
@@ -3221,69 +3402,208 @@ local function build_tab_bar()
     end
 end
 
+---Build a section of widgets (left, center, or right)
+---@param widget_specs (string|table)[] Array of widget specs
+---@param side "left"|"center"|"right" Which side we're building
+---@return table[] segments Array of text segments
+---@return number width Total width of the section
+---@return string|nil last_bg Last background color used
+local function build_widget_section(widget_specs, side)
+    local segments = {}
+    local total_width = 0
+    local last_bg = nil
+    local is_first = true
+
+    for i, widget_spec in ipairs(widget_specs or {}) do
+        local widget = normalize_widget(widget_spec)
+        if widget then
+            local result = widget.render(state, THEME)
+            if result then -- nil means widget should be hidden
+                -- Add powerline separator between widgets (not before first)
+                if not is_first and last_bg then
+                    if side == "right" then
+                        -- Right side: arrow points left
+                        table.insert(segments, {
+                            text = POWERLINE_SYMBOLS.left_solid,
+                            style = { fg = result.style.bg, bg = last_bg }
+                        })
+                    else
+                        -- Left/center: arrow points right
+                        table.insert(segments, {
+                            text = POWERLINE_SYMBOLS.right_solid,
+                            style = { fg = last_bg, bg = result.style.bg }
+                        })
+                    end
+                    total_width = total_width + 1
+                end
+
+                table.insert(segments, result)
+                total_width = total_width + prise.gwidth(result.text)
+                last_bg = result.style.bg
+                is_first = false
+
+                -- Schedule timer if widget has interval
+                if widget.interval then
+                    local widget_id = type(widget_spec) == "string" and widget_spec or ("custom_" .. i .. "_" .. side)
+                    schedule_widget_timer(widget_id, widget.interval)
+                end
+            end
+        end
+    end
+
+    return segments, total_width, last_bg
+end
+
 ---Build the powerline-style status bar
 ---@return table
 local function build_status_bar()
-    local mode_color = state.pending_command and THEME.mode_command or THEME.mode_normal
-    local session_name = (prise.get_session_name() or "prise"):upper()
-    local mode_text = state.pending_command and " CMD " or (" " .. session_name .. " ")
-
-    -- Use cached git branch (updated on cwd_changed and focus change)
-    local git_branch = state.cached_git_branch
-
-    -- Get current time
-    local time_str = prise.get_time()
-
-    -- Build segments and track width
-    local segments = {}
-    local left_width = 0
-
-    -- Mode indicator
-    table.insert(segments, { text = mode_text, style = { bg = mode_color, fg = THEME.fg_dark, bold = true } })
-    left_width = left_width + prise.gwidth(mode_text)
-
-    -- Track the last background color for proper powerline transitions
-    local last_bg = mode_color
-
-    -- Git branch
-    if git_branch then
-        local branch_text = " \u{F062C} " .. git_branch .. " "
-        table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = last_bg, bg = THEME.bg2 } })
-        table.insert(segments, { text = branch_text, style = { bg = THEME.bg2, fg = THEME.fg_bright } })
-        left_width = left_width + 1 + prise.gwidth(branch_text)
-        last_bg = THEME.bg2
+    -- Initialize builtin widgets if not already done
+    if not BUILTIN_WIDGETS.mode then
+        init_builtin_widgets(THEME, function() return state end)
     end
 
-    -- Zoom indicator
-    if state.zoomed_pane_id then
-        table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = last_bg, bg = THEME.yellow } })
-        table.insert(segments, { text = " ZOOM ", style = { bg = THEME.yellow, fg = THEME.fg_dark, bold = true } })
-        left_width = left_width + 1 + 6
-        last_bg = THEME.yellow
+    -- Check if using new widget system or legacy hardcoded layout
+    local widget_config = config.status_bar.widgets
+
+    if widget_config then
+        -- New widget-based system
+        local left_widgets = widget_config.left or {}
+        local center_widgets = widget_config.center or {}
+        local right_widgets = widget_config.right or {}
+
+        local segments = {}
+        local left_width = 0
+
+        -- Build left section
+        local left_segs, left_seg_width, left_last_bg = build_widget_section(left_widgets, "left")
+        for _, seg in ipairs(left_segs) do
+            table.insert(segments, seg)
+        end
+        left_width = left_seg_width
+
+        -- End left side with powerline arrow
+        if left_last_bg then
+            table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = left_last_bg, bg = THEME.bg1 } })
+            left_width = left_width + 1
+        end
+
+        -- Build right section - calculate total width including all content
+        local right_segs, right_seg_width, _ = build_widget_section(right_widgets, "right")
+        local right_width = right_seg_width
+        -- Account for the starting powerline arrow on right side
+        if #right_segs > 0 then
+            right_width = right_width + 1
+        end
+
+        -- For center widgets (if any)
+        local center_segs, center_seg_width, center_last_bg = build_widget_section(center_widgets, "center")
+        local center_width = center_seg_width
+        if #center_segs > 0 and center_last_bg then
+            center_width = center_width + 1 -- ending arrow
+        end
+
+        -- Calculate padding: screen - left - center - right
+        local padding = state.screen_cols - left_width - center_width - right_width
+        if padding < 0 then
+            padding = 0
+        end
+
+        if #center_segs > 0 then
+            -- Split padding around center
+            local left_padding = math.floor(padding / 2)
+            local right_padding = padding - left_padding
+
+            -- Add left padding
+            table.insert(segments, { text = string.rep(" ", left_padding), style = { bg = THEME.bg1 } })
+
+            -- Add center section with ending arrow
+            for _, seg in ipairs(center_segs) do
+                table.insert(segments, seg)
+            end
+            if center_last_bg then
+                table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = center_last_bg, bg = THEME.bg1 } })
+            end
+
+            -- Add right padding
+            table.insert(segments, { text = string.rep(" ", right_padding), style = { bg = THEME.bg1 } })
+        else
+            -- No center section - all padding in middle
+            table.insert(segments, { text = string.rep(" ", padding), style = { bg = THEME.bg1 } })
+        end
+
+        -- Add right side with powerline start
+        if #right_segs > 0 then
+            local first_right_bg = right_segs[1] and right_segs[1].style and right_segs[1].style.bg or THEME.bg3
+            table.insert(segments, { text = POWERLINE_SYMBOLS.left_solid, style = { fg = first_right_bg, bg = THEME.bg1 } })
+            for _, seg in ipairs(right_segs) do
+                table.insert(segments, seg)
+            end
+        end
+
+        return prise.Text(segments)
+    else
+        -- Legacy hardcoded layout (backwards compatibility)
+        local mode_color = state.pending_command and THEME.mode_command or THEME.mode_normal
+        local session_name = (prise.get_session_name() or "prise"):upper()
+        local mode_text = state.pending_command and " CMD " or (" " .. session_name .. " ")
+
+        -- Use cached git branch (updated on cwd_changed and focus change)
+        local git_branch = state.cached_git_branch
+
+        -- Get current time
+        local time_str = prise.get_time()
+
+        -- Build segments and track width
+        local segments = {}
+        local left_width = 0
+
+        -- Mode indicator
+        table.insert(segments, { text = mode_text, style = { bg = mode_color, fg = THEME.fg_dark, bold = true } })
+        left_width = left_width + prise.gwidth(mode_text)
+
+        -- Track the last background color for proper powerline transitions
+        local last_bg = mode_color
+
+        -- Git branch
+        if git_branch then
+            local branch_text = " \u{F062C} " .. git_branch .. " "
+            table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = last_bg, bg = THEME.bg2 } })
+            table.insert(segments, { text = branch_text, style = { bg = THEME.bg2, fg = THEME.fg_bright } })
+            left_width = left_width + 1 + prise.gwidth(branch_text)
+            last_bg = THEME.bg2
+        end
+
+        -- Zoom indicator
+        if state.zoomed_pane_id then
+            table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = last_bg, bg = THEME.yellow } })
+            table.insert(segments, { text = " ZOOM ", style = { bg = THEME.yellow, fg = THEME.fg_dark, bold = true } })
+            left_width = left_width + 1 + 6
+            last_bg = THEME.yellow
+        end
+
+        -- End left side
+        table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = last_bg, bg = THEME.bg1 } })
+        left_width = left_width + 1
+
+        -- Right side content
+        local right_text = " " .. time_str .. " "
+        local right_width = 1 + prise.gwidth(right_text) -- powerline symbol + time
+
+        -- Calculate padding to fill the middle
+        local padding = state.screen_cols - left_width - right_width
+        if padding < 0 then
+            padding = 0
+        end
+
+        -- Add padding
+        table.insert(segments, { text = string.rep(" ", padding), style = { bg = THEME.bg1 } })
+
+        -- Add right side
+        table.insert(segments, { text = POWERLINE_SYMBOLS.left_solid, style = { fg = THEME.bg3, bg = THEME.bg1 } })
+        table.insert(segments, { text = right_text, style = { bg = THEME.bg3, fg = THEME.fg_dim } })
+
+        return prise.Text(segments)
     end
-
-    -- End left side
-    table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = last_bg, bg = THEME.bg1 } })
-    left_width = left_width + 1
-
-    -- Right side content
-    local right_text = " " .. time_str .. " "
-    local right_width = 1 + prise.gwidth(right_text) -- powerline symbol + time
-
-    -- Calculate padding to fill the middle
-    local padding = state.screen_cols - left_width - right_width
-    if padding < 0 then
-        padding = 0
-    end
-
-    -- Add padding
-    table.insert(segments, { text = string.rep(" ", padding), style = { bg = THEME.bg1 } })
-
-    -- Add right side
-    table.insert(segments, { text = POWERLINE_SYMBOLS.left_solid, style = { fg = THEME.bg3, bg = THEME.bg1 } })
-    table.insert(segments, { text = right_text, style = { bg = THEME.bg3, fg = THEME.fg_dim } })
-
-    return prise.Text(segments)
 end
 
 ---Schedule a clock timer to refresh the display every minute
