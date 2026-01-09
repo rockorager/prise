@@ -159,7 +159,7 @@ local POWERLINE_SYMBOLS = {
 
 -- Forward declaration for widget state (initialized later with state table)
 local widget_state = {
-    timers = {},      -- { widget_id = timer_handle }
+    timers = {}, -- { widget_id = timer_handle }
     shell_cache = {}, -- { command = { result = "...", expires_at = timestamp } }
 }
 
@@ -182,7 +182,9 @@ local function init_builtin_widgets(theme, get_state)
         },
         git = {
             render = function(st, th)
-                if not st.cached_git_branch then return nil end
+                if not st.cached_git_branch then
+                    return nil
+                end
                 local branch_text = " \u{F062C} " .. st.cached_git_branch .. " "
                 return { text = branch_text, style = { bg = th.bg2, fg = th.fg_bright } }
             end,
@@ -190,7 +192,9 @@ local function init_builtin_widgets(theme, get_state)
         },
         zoom = {
             render = function(st, th)
-                if not st.zoomed_pane_id then return nil end
+                if not st.zoomed_pane_id then
+                    return nil
+                end
                 return { text = " ZOOM ", style = { bg = th.yellow, fg = th.fg_dark, bold = true } }
             end,
             -- No interval, updates on state change
@@ -205,8 +209,49 @@ local function init_builtin_widgets(theme, get_state)
         battery = {
             render = function(st, th)
                 local bat = prise.get_battery()
-                if not bat then return nil end -- Auto-hide on desktop
-                local icon = bat.charging and "\u{F0084}" or "\u{F007A}" -- 󰂄 charging, 󰁺 discharging
+                if not bat then
+                    return nil
+                end -- Auto-hide on desktop
+                local icon
+                if bat.charging then
+                    -- Charging icons based on level
+                    if bat.percent >= 90 then
+                        icon = "\u{F0085}" -- 󰂅 charging-100
+                    elseif bat.percent >= 70 then
+                        icon = "\u{F0084}" -- 󰂄 charging-80
+                    elseif bat.percent >= 50 then
+                        icon = "\u{F0083}" -- 󰂃 charging-60
+                    elseif bat.percent >= 30 then
+                        icon = "\u{F0082}" -- 󰂂 charging-40
+                    elseif bat.percent >= 10 then
+                        icon = "\u{F0081}" -- 󰂁 charging-20
+                    else
+                        icon = "\u{F0080}" -- 󰂀 charging-10
+                    end
+                else
+                    -- Discharging icons based on level
+                    if bat.percent >= 90 then
+                        icon = "\u{F0079}" -- 󰁹 100
+                    elseif bat.percent >= 80 then
+                        icon = "\u{F0082}" -- 󰂂 90
+                    elseif bat.percent >= 70 then
+                        icon = "\u{F0081}" -- 󰂁 80
+                    elseif bat.percent >= 60 then
+                        icon = "\u{F0080}" -- 󰂀 70
+                    elseif bat.percent >= 50 then
+                        icon = "\u{F007F}" -- 󰁿 60
+                    elseif bat.percent >= 40 then
+                        icon = "\u{F007E}" -- 󰁾 50
+                    elseif bat.percent >= 30 then
+                        icon = "\u{F007D}" -- 󰁽 40
+                    elseif bat.percent >= 20 then
+                        icon = "\u{F007C}" -- 󰁼 30
+                    elseif bat.percent >= 10 then
+                        icon = "\u{F007B}" -- 󰁻 20
+                    else
+                        icon = "\u{F007A}" -- 󰁺 10 (low)
+                    end
+                end
                 local text = " " .. icon .. " " .. bat.percent .. "% "
                 return { text = text, style = { bg = th.bg3, fg = th.fg_dim } }
             end,
@@ -215,7 +260,9 @@ local function init_builtin_widgets(theme, get_state)
         hostname = {
             render = function(st, th)
                 local hostname = prise.get_hostname()
-                if not hostname then return nil end
+                if not hostname then
+                    return nil
+                end
                 return { text = " " .. hostname .. " ", style = { bg = th.bg2, fg = th.fg_bright } }
             end,
             -- No interval, hostname doesn't change
@@ -234,7 +281,8 @@ local function create_shell_widget(spec)
 
             -- Use cached result if still valid
             if cached and cached.expires_at > now then
-                local text = spec.icon and (" " .. spec.icon .. " " .. cached.result .. " ") or (" " .. cached.result .. " ")
+                local text = spec.icon and (" " .. spec.icon .. " " .. cached.result .. " ")
+                    or (" " .. cached.result .. " ")
                 return { text = text, style = spec.style or { bg = th.bg3, fg = th.fg_dim } }
             end
 
@@ -243,7 +291,7 @@ local function create_shell_widget(spec)
             if result then
                 widget_state.shell_cache[spec.command] = {
                     result = result,
-                    expires_at = now + (spec.interval or 60000)
+                    expires_at = now + (spec.interval or 60000),
                 }
                 local text = spec.icon and (" " .. spec.icon .. " " .. result .. " ") or (" " .. result .. " ")
                 return { text = text, style = spec.style or { bg = th.bg3, fg = th.fg_dim } }
@@ -276,7 +324,9 @@ end
 ---@param widget_id string Unique identifier for the widget
 ---@param interval number Interval in milliseconds
 local function schedule_widget_timer(widget_id, interval)
-    if widget_state.timers[widget_id] then return end
+    if widget_state.timers[widget_id] then
+        return
+    end
     widget_state.timers[widget_id] = prise.set_timeout(interval, function()
         widget_state.timers[widget_id] = nil
         prise.request_frame()
@@ -299,7 +349,9 @@ local function cancel_widget_timers()
     for _, id in ipairs(ids) do
         local timer = widget_state.timers[id]
         if timer then
-            pcall(function() timer:cancel() end)
+            pcall(function()
+                timer:cancel()
+            end)
         end
         widget_state.timers[id] = nil
     end
@@ -3425,13 +3477,13 @@ local function build_widget_section(widget_specs, side)
                         -- Right side: arrow points left
                         table.insert(segments, {
                             text = POWERLINE_SYMBOLS.left_solid,
-                            style = { fg = result.style.bg, bg = last_bg }
+                            style = { fg = result.style.bg, bg = last_bg },
                         })
                     else
                         -- Left/center: arrow points right
                         table.insert(segments, {
                             text = POWERLINE_SYMBOLS.right_solid,
-                            style = { fg = last_bg, bg = result.style.bg }
+                            style = { fg = last_bg, bg = result.style.bg },
                         })
                     end
                     total_width = total_width + 1
@@ -3459,7 +3511,9 @@ end
 local function build_status_bar()
     -- Initialize builtin widgets if not already done
     if not BUILTIN_WIDGETS.mode then
-        init_builtin_widgets(THEME, function() return state end)
+        init_builtin_widgets(THEME, function()
+            return state
+        end)
     end
 
     -- Check if using new widget system or legacy hardcoded layout
@@ -3483,7 +3537,10 @@ local function build_status_bar()
 
         -- End left side with powerline arrow
         if left_last_bg then
-            table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = left_last_bg, bg = THEME.bg1 } })
+            table.insert(
+                segments,
+                { text = POWERLINE_SYMBOLS.right_solid, style = { fg = left_last_bg, bg = THEME.bg1 } }
+            )
             left_width = left_width + 1
         end
 
@@ -3521,7 +3578,10 @@ local function build_status_bar()
                 table.insert(segments, seg)
             end
             if center_last_bg then
-                table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = center_last_bg, bg = THEME.bg1 } })
+                table.insert(
+                    segments,
+                    { text = POWERLINE_SYMBOLS.right_solid, style = { fg = center_last_bg, bg = THEME.bg1 } }
+                )
             end
 
             -- Add right padding
@@ -3534,7 +3594,10 @@ local function build_status_bar()
         -- Add right side with powerline start
         if #right_segs > 0 then
             local first_right_bg = right_segs[1] and right_segs[1].style and right_segs[1].style.bg or THEME.bg3
-            table.insert(segments, { text = POWERLINE_SYMBOLS.left_solid, style = { fg = first_right_bg, bg = THEME.bg1 } })
+            table.insert(
+                segments,
+                { text = POWERLINE_SYMBOLS.left_solid, style = { fg = first_right_bg, bg = THEME.bg1 } }
+            )
             for _, seg in ipairs(right_segs) do
                 table.insert(segments, seg)
             end
@@ -3575,7 +3638,10 @@ local function build_status_bar()
 
         -- Zoom indicator
         if state.zoomed_pane_id then
-            table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = last_bg, bg = THEME.yellow } })
+            table.insert(
+                segments,
+                { text = POWERLINE_SYMBOLS.right_solid, style = { fg = last_bg, bg = THEME.yellow } }
+            )
             table.insert(segments, { text = " ZOOM ", style = { bg = THEME.yellow, fg = THEME.fg_dark, bold = true } })
             left_width = left_width + 1 + 6
             last_bg = THEME.yellow
