@@ -1341,8 +1341,6 @@ local function move_focus(direction)
     local forward = (direction == "right" or direction == "down")
 
     local sibling_node = nil
-    local sibling_parent = nil
-    local sibling_idx = nil
 
     -- Traverse up the path to find a split of the correct type where we can move
     -- path is [root, ..., parent, leaf]
@@ -1363,15 +1361,11 @@ local function move_focus(direction)
             if forward then
                 if idx < #node.children then
                     sibling_node = node.children[idx + 1]
-                    sibling_parent = node
-                    sibling_idx = idx + 1
                     break
                 end
             else
                 if idx > 1 then
                     sibling_node = node.children[idx - 1]
-                    sibling_parent = node
-                    sibling_idx = idx - 1
                     break
                 end
             end
