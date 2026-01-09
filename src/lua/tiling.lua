@@ -395,6 +395,7 @@ local state = {
         width = 120,
         height = 80,
         pending = false,
+        resize_mode = false,
     },
 }
 
@@ -1925,11 +1926,13 @@ action_handlers = {
     floating_increase_size = function()
         state.floating.width = math.min(state.floating.width + 5, 200)
         state.floating.height = math.min(state.floating.height + 2, 50)
+        state.floating.resize_mode = true
         prise.request_frame()
     end,
     floating_decrease_size = function()
         state.floating.width = math.max(state.floating.width - 5, 40)
         state.floating.height = math.max(state.floating.height - 2, 10)
+        state.floating.resize_mode = true
         prise.request_frame()
     end,
     -- command_palette is added after open_palette is defined
@@ -2377,6 +2380,23 @@ function M.update(event)
             handle_text_input_key(state.swap_with_index.input, event.data)
             prise.request_frame()
             return
+        end
+
+        -- Handle floating pane resize mode
+        if state.floating.resize_mode then
+            local k = event.data.key
+            if k == "+" or (k == "=" and event.data.shift) then
+                action_handlers.floating_increase_size()
+                return
+            elseif k == "-" then
+                action_handlers.floating_decrease_size()
+                return
+            else
+                -- Exit resize mode on any other key
+                state.floating.resize_mode = false
+                prise.request_frame()
+                -- Don't return - let the key be processed normally
+            end
         end
 
         -- Handle keybinds via matcher
@@ -3403,6 +3423,15 @@ local function build_status_bar()
         table.insert(segments, { text = " ZOOM ", style = { bg = THEME.yellow, fg = THEME.fg_dark, bold = true } })
         left_width = left_width + 1 + 6
         last_bg = THEME.yellow
+    end
+
+    -- Floating resize mode indicator
+    if state.floating.resize_mode then
+        local resize_text = " RESIZE " .. state.floating.width .. "x" .. state.floating.height .. " "
+        table.insert(segments, { text = POWERLINE_SYMBOLS.right_solid, style = { fg = last_bg, bg = THEME.accent } })
+        table.insert(segments, { text = resize_text, style = { bg = THEME.accent, fg = THEME.fg_dark, bold = true } })
+        left_width = left_width + 1 + prise.gwidth(resize_text)
+        last_bg = THEME.accent
     end
 
     -- End left side
