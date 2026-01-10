@@ -1176,6 +1176,53 @@ local function deserialize_node(saved, pty_lookup)
     return nil
 end
 
+---Serialize a floating pane for session persistence
+---@param floating? FloatingPane
+---@param cwd_lookup? fun(pty_id: number): string?
+---@return table?
+local function serialize_floating(floating, cwd_lookup)
+    if not floating or not floating.pane or not floating.pane.pty then
+        return nil
+    end
+    local pty_id = floating.pane.pty:id()
+    ---@type string?
+    local cwd = nil
+    if cwd_lookup then
+        cwd = cwd_lookup(pty_id)
+    end
+    return {
+        pane = {
+            type = "pane",
+            id = floating.pane.id,
+            pty_id = pty_id,
+            cwd = cwd,
+        },
+        visible = floating.visible,
+    }
+end
+
+---Deserialize a floating pane, looking up PTY by id
+---@param saved? table
+---@param pty_lookup fun(id: number): Pty?
+---@return FloatingPane?
+local function deserialize_floating(saved, pty_lookup)
+    if not saved or not saved.pane then
+        return nil
+    end
+    local pty = pty_lookup(saved.pane.pty_id)
+    if not pty then
+        return nil
+    end
+    return {
+        pane = {
+            type = "pane",
+            id = saved.pane.id,
+            pty = pty,
+        },
+        visible = saved.visible or false,
+    }
+end
+
 local MIN_PANE_SHARE = 0.05
 
 ---Get the effective ratio for a child in a split
@@ -3664,6 +3711,7 @@ function M.get_state(cwd_lookup)
             title = tab.title,
             root = serialize_node(tab.root, cwd_lookup),
             last_focused_id = tab.last_focused_id,
+            floating = serialize_floating(tab.floating, cwd_lookup),
         })
     end
 
@@ -3673,6 +3721,10 @@ function M.get_state(cwd_lookup)
         next_tab_id = state.next_tab_id,
         focused_id = state.focused_id,
         next_split_id = state.next_split_id,
+        floating_settings = {
+            width = state.floating.width,
+            height = state.floating.height,
+        },
     }
 end
 
@@ -3712,6 +3764,7 @@ function M.set_state(saved, pty_lookup)
                     title = tab_data.title,
                     root = restored_root,
                     last_focused_id = tab_data.last_focused_id,
+                    floating = deserialize_floating(tab_data.floating, pty_lookup),
                 })
             end
         end
@@ -3719,6 +3772,12 @@ function M.set_state(saved, pty_lookup)
         state.next_tab_id = saved.next_tab_id or (#state.tabs + 1)
         state.focused_id = saved.focused_id
         state.next_split_id = saved.next_split_id or 1
+
+        -- Restore floating pane settings
+        if saved.floating_settings then
+            state.floating.width = saved.floating_settings.width or state.floating.width
+            state.floating.height = saved.floating_settings.height or state.floating.height
+        end
 
         -- Ensure active_tab is valid
         if state.active_tab > #state.tabs then
