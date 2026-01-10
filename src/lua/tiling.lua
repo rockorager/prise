@@ -2519,9 +2519,17 @@ function M.update(event)
                 is_copy = (event.data.ctrl == true) and (event.data.shift == true) and not event.data.super
             end
             if is_copy then
-                local pty = get_focused_pty()
-                if pty then
-                    pty:copy_selection()
+                -- Route to floating pane if visible, otherwise to focused pane
+                local tab = get_active_tab()
+                if tab and tab.floating and tab.floating.visible then
+                    if tab.floating.pane and tab.floating.pane.pty then
+                        tab.floating.pane.pty:copy_selection()
+                    end
+                else
+                    local pty = get_focused_pty()
+                    if pty then
+                        pty:copy_selection()
+                    end
                 end
                 return
             end
@@ -2530,12 +2538,6 @@ function M.update(event)
         -- Route to floating pane if visible, otherwise to focused pane
         local tab = get_active_tab()
         if tab and tab.floating and tab.floating.visible then
-            -- Check for escape key to hide floating pane
-            if event.data.key == "Escape" then
-                tab.floating.visible = false
-                prise.request_frame()
-                return
-            end
             -- Send to floating pane
             if tab.floating.pane and tab.floating.pane.pty then
                 tab.floating.pane.pty:send_key(event.data)
@@ -2572,13 +2574,21 @@ function M.update(event)
             state.palette.selected = 1
             prise.request_frame()
         else
-            local root = get_active_root()
-            if root and state.focused_id then
-                -- Forward paste to focused PTY
-                local path = find_node_path(root, state.focused_id)
-                if path then
-                    local pane = path[#path]
-                    pane.pty:send_paste(event.data.text)
+            -- Route to floating pane if visible, otherwise to focused pane
+            local tab = get_active_tab()
+            if tab and tab.floating and tab.floating.visible then
+                if tab.floating.pane and tab.floating.pane.pty then
+                    tab.floating.pane.pty:send_paste(event.data.text)
+                end
+            else
+                local root = get_active_root()
+                if root and state.focused_id then
+                    -- Forward paste to focused PTY
+                    local path = find_node_path(root, state.focused_id)
+                    if path then
+                        local pane = path[#path]
+                        pane.pty:send_paste(event.data.text)
+                    end
                 end
             end
         end
