@@ -1542,9 +1542,12 @@ const Client = struct {
                 defer pty_instance.terminal_mutex.unlock();
 
                 const screen = pty_instance.terminal.screens.active;
+                const terminal_cols = pty_instance.terminal.cols;
+                const clamped_col: u16 = @min(col, terminal_cols -| 1);
+                const clamped_row: u16 = @min(row, pty_instance.terminal.rows -| 1);
                 const pin = screen.pages.pin(.{ .viewport = .{
-                    .x = col,
-                    .y = row,
+                    .x = clamped_col,
+                    .y = clamped_row,
                 } }) orelse return;
 
                 // Store the pin so it survives viewport scrolling during drag
@@ -1572,12 +1575,33 @@ const Client = struct {
                     defer pty_instance.terminal_mutex.unlock();
 
                     const screen = pty_instance.terminal.screens.active;
+                    const terminal_rows = pty_instance.terminal.rows;
+                    const terminal_cols = pty_instance.terminal.cols;
+
+                    // Auto-scroll when dragging beyond viewport edges
+                    const raw_y = mouse.y;
+                    if (raw_y < 0) {
+                        pty_instance.terminal.scrollViewport(.{ .delta = -1 }) catch |err| {
+                            log.err("Failed to scroll viewport: {}", .{err});
+                        };
+                    } else if (raw_y >= @as(f64, @floatFromInt(terminal_rows))) {
+                        pty_instance.terminal.scrollViewport(.{ .delta = 1 }) catch |err| {
+                            log.err("Failed to scroll viewport: {}", .{err});
+                        };
+                    }
+
+                    // Clamp to valid viewport range after scrolling
+                    const clamped_col: u16 = @min(col, terminal_cols -| 1);
+                    const clamped_row: u16 = @intFromFloat(@max(0, @min(
+                        @floor(raw_y),
+                        @as(f64, @floatFromInt(terminal_rows -| 1)),
+                    )));
 
                     // start is already a Pin (stored during press event)
                     const start_pin = start;
                     const end_pin = screen.pages.pin(.{ .viewport = .{
-                        .x = col,
-                        .y = row,
+                        .x = clamped_col,
+                        .y = clamped_row,
                     } }) orelse return;
 
                     switch (pty_instance.left_click_count) {

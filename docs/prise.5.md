@@ -158,6 +158,27 @@ The **tab_bar** table configures the tab bar.
 **show_single_tab**
 :   Show the tab bar even with only one tab. Default: **false**
 
+# FLOATING PANE
+
+The **floating** table configures the floating terminal pane.
+
+**width**
+:   Width in columns. Default: **100**
+
+**height**
+:   Height in rows. Default: **30**
+
+Example:
+
+```lua
+ui.setup({
+    floating = {
+        width = 120,
+        height = 40,
+    },
+})
+```
+
 # MACOS OPTION KEY
 
 **macos_option_as_alt**
@@ -342,6 +363,17 @@ The following actions can be used as values in the **keybinds** table.
 **command_palette**
 :   Open the command palette
 
+## Floating Pane
+
+**floating_toggle**
+:   Toggle the floating terminal pane
+
+**floating_increase_size**
+:   Increase floating pane size
+
+**floating_decrease_size**
+:   Decrease floating pane size
+
 # DEFAULT KEYBINDS
 
 The tiling UI uses a leader key sequence. Press the leader key (default:
@@ -391,6 +423,15 @@ The tiling UI uses a leader key sequence. Press the leader key (default:
 
 **0**
 :   Switch to tab 10
+
+**f**
+:   Toggle floating pane
+
+**+**
+:   Increase floating pane size
+
+**-**
+:   Decrease floating pane size
 
 The command palette (**Super+p**) provides fuzzy search for all commands.
 

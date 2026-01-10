@@ -638,6 +638,10 @@ pub const App = struct {
     // Drag state for split resizing
     drag_state: ?DragState = null,
 
+    // Selection drag state: tracks PTY where left-button selection started
+    // to allow scrolling while selecting beyond viewport bounds
+    selection_drag_pty: ?u32 = null,
+
     pipe_read_fd: posix.fd_t = undefined,
     pipe_write_fd: posix.fd_t = undefined,
     parser: vaxis.Parser = undefined,
@@ -1189,9 +1193,22 @@ pub const App = struct {
                 return;
             } else {
                 // Not on a split handle
-                const target = widget.hitTest(self.hit_regions, x, y);
+                var target = widget.hitTest(self.hit_regions, x, y);
                 var target_x: ?f64 = null;
                 var target_y: ?f64 = null;
+
+                // Track selection drag: on left press, remember the target PTY
+                if (mouse.button == .left and mouse.type == .press) {
+                    self.selection_drag_pty = target;
+                } else if (mouse.button == .left and mouse.type == .release) {
+                    self.selection_drag_pty = null;
+                }
+
+                // During drag, use selection_drag_pty to continue forwarding to
+                // the PTY where selection started, even if mouse is outside its region
+                if (mouse.type == .drag and self.selection_drag_pty != null) {
+                    target = self.selection_drag_pty;
+                }
 
                 if (target) |pty_id| {
                     if (widget.findRegion(self.hit_regions, pty_id)) |region| {
