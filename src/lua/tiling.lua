@@ -193,6 +193,17 @@ local POWERLINE_SYMBOLS = {
 ---Example: ["<leader>v"] = "split_horizontal"
 ---@alias PriseKeybinds table<string, string|function>
 
+---@class PrisePluginSpec
+---@field [1] string "user/repo" GitHub repository, or local path (./path, ../path, ~/path, /path)
+---@field name? string Logical name for the plugin (default: repo name or directory name)
+---@field branch? string Git branch or tag for remote plugins (default: HEAD)
+---@field enabled? boolean|fun(): boolean Whether plugin is enabled (default: true)
+---@field lazy? boolean Load lazily (default: true)
+---@field event? string|string[] Events that trigger lazy loading
+---@field keys? string|string[] Keys that trigger lazy loading
+---@field opts? table Options passed to plugin.setup()
+---@field config? fun(plugin: table, opts: table) Custom config function
+
 ---@class PriseBordersConfig
 ---@field enabled? boolean Show pane borders (default: false)
 ---@field show_single_pane? boolean Show border when only one pane exists (default: false)
@@ -209,6 +220,7 @@ local POWERLINE_SYMBOLS = {
 ---@field leader? string Leader key sequence (default: "<D-k>")
 ---@field keybinds? PriseKeybinds Keybind definitions
 ---@field macos_option_as_alt? "false"|"left"|"right"|"true" macOS Option key behavior (default: "false")
+---@field plugins? PrisePluginSpec[] List of plugins to load
 
 ---@class PriseConfig
 ---@field theme PriseTheme
@@ -217,6 +229,7 @@ local POWERLINE_SYMBOLS = {
 ---@field tab_bar PriseTabBarConfig
 ---@field leader string
 ---@field keybinds PriseKeybinds
+---@field plugins? PrisePluginSpec[]
 
 -- Default configuration
 ---@type PriseConfig
@@ -389,6 +402,13 @@ function M.setup(opts)
     -- Mark keybinds for re-initialization on next key event
     -- (lazy init because UI pointer may not be available during config loading)
     state.keybind_matcher = nil
+
+    -- Initialize plugin system
+    if config.plugins then
+        local plugins = require("prise.plugins")
+        plugins.setup(config.plugins)
+        plugins.emit("ui_setup", { config = config })
+    end
 end
 
 ---Get the macos_option_as_alt setting
@@ -2018,8 +2038,27 @@ end
 
 -- --- Main Functions ---
 
+local plugins_loaded = false
+
+---Get the plugins module if available
+---@return table?
+local function get_plugins()
+    local ok, plugins = pcall(require, "prise.plugins")
+    if ok then
+        return plugins
+    end
+    return nil
+end
+
 ---@param event Event
 function M.update(event)
+    local plugins = get_plugins()
+
+    -- Emit before_update hook
+    if plugins then
+        plugins.emit("before_update", { event = event, state = state })
+    end
+
     if event.type == "pty_attach" then
         prise.log.info("Lua: pty_attach received")
         ---@type Pty
@@ -2291,6 +2330,14 @@ function M.update(event)
         -- Ignore modifier-only key presses (Shift, Ctrl, Alt, Super)
         if is_modifier_key(event.data.key) then
             return
+        end
+
+        -- Trigger key-based plugin lazy loading
+        if plugins then
+            local key_str = state.keybind_matcher:key_to_string(event.data)
+            if key_str then
+                plugins.load_for_key(key_str)
+            end
         end
 
         local result = state.keybind_matcher:handle_key(event.data)
@@ -2591,6 +2638,26 @@ function M.update(event)
         update_cached_git_branch()
         prise.request_frame()
         prise.save() -- Auto-save on cwd change
+    end
+
+    -- Emit after_update hook
+    if plugins then
+        plugins.emit("after_update", { event = event, state = state })
+    end
+
+    -- Emit UI_READY event on first pty_attach (plugins can lazy load on this)
+    if event.type == "pty_attach" and not plugins_loaded and plugins then
+        plugins_loaded = true
+        plugins.load_for_event("UI_READY")
+        plugins.emit("ui_ready", { state = state })
+
+        -- Schedule VeryLazy loading
+        prise.set_timeout(100, function()
+            local p = get_plugins()
+            if p then
+                p.load_for_event("VeryLazy")
+            end
+        end)
     end
 end
 

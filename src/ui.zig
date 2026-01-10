@@ -19,6 +19,7 @@ const logger = std.log.scoped(.lua);
 
 const prise_module = @embedFile("lua/prise.lua");
 const tiling_ui_module = @embedFile("lua/tiling.lua");
+const plugins_module = @embedFile("lua/plugins.lua");
 const fallback_init = "return require('prise').tiling()";
 
 const TimerContext = struct {
@@ -145,6 +146,37 @@ pub const UI = struct {
         lua.setField(-2, "path");
         lua.pop(1);
 
+        // Set up plugin directory and store path in registry
+        const plugin_root = std.fmt.allocPrint(
+            allocator,
+            "{s}/.local/share/prise/plugins",
+            .{home},
+        ) catch |err| {
+            return .{ .err = .{ .err = err, .lua_msg = null } };
+        };
+
+        // Ensure plugin directory exists
+        std.fs.makeDirAbsolute(plugin_root) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => {
+                // Try to create parent directories
+                const parent = std.fs.path.dirname(plugin_root) orelse {
+                    allocator.free(plugin_root);
+                    return .{ .err = .{ .err = err, .lua_msg = null } };
+                };
+                std.fs.makeDirAbsolute(parent) catch {};
+                std.fs.makeDirAbsolute(plugin_root) catch |e| {
+                    allocator.free(plugin_root);
+                    return .{ .err = .{ .err = e, .lua_msg = null } };
+                };
+            },
+        };
+
+        // Store plugin root in registry for Lua access
+        _ = lua.pushString(plugin_root);
+        lua.setField(ziglua.registry_index, "prise_plugin_root");
+        allocator.free(plugin_root);
+
         // Register prise module loader (always use embedded for API stability)
         _ = lua.getGlobal("package") catch |err| {
             return .{ .err = .{ .err = err, .lua_msg = null } };
@@ -157,6 +189,10 @@ pub const UI = struct {
         // (installed to disk only for LSP completion support)
         lua.pushFunction(ziglua.wrap(loadTilingUiModule));
         lua.setField(-2, "prise_tiling_ui");
+
+        // Register plugins module
+        lua.pushFunction(ziglua.wrap(loadPluginsModule));
+        lua.setField(-2, "prise.plugins");
         lua.pop(2);
 
         // Try to load ~/.config/prise/init.lua
@@ -340,6 +376,14 @@ pub const UI = struct {
         return 1;
     }
 
+    fn loadPluginsModule(lua: *ziglua.Lua) i32 {
+        lua.doString(plugins_module) catch {
+            lua.pushNil();
+            return 1;
+        };
+        return 1;
+    }
+
     fn loadPriseModule(lua: *ziglua.Lua) i32 {
         lua.doString(prise_module) catch {
             lua.pushNil();
@@ -438,6 +482,13 @@ pub const UI = struct {
         // Register get_git_branch
         lua.pushFunction(ziglua.wrap(getGitBranch));
         lua.setField(-2, "get_git_branch");
+
+        // Register plugin functions
+        lua.pushFunction(ziglua.wrap(getPluginRoot));
+        lua.setField(-2, "get_plugin_root");
+
+        lua.pushFunction(ziglua.wrap(ensurePlugin));
+        lua.setField(-2, "ensure_plugin");
 
         registerTimerMetatable(lua);
 
@@ -884,6 +935,162 @@ pub const UI = struct {
         }
 
         _ = lua.pushString(branch);
+        return 1;
+    }
+
+    fn getPluginRoot(lua: *ziglua.Lua) i32 {
+        _ = lua.getField(ziglua.registry_index, "prise_plugin_root");
+        if (lua.typeOf(-1) != .string) {
+            lua.pop(1);
+            lua.pushNil();
+        }
+        return 1;
+    }
+
+    fn ensurePlugin(lua: *ziglua.Lua) i32 {
+        _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
+        const ui = lua.toUserdata(UI, -1) catch {
+            lua.pushNil();
+            _ = lua.pushString("UI not initialized");
+            return 2;
+        };
+        lua.pop(1);
+
+        const repo = lua.toString(1) catch {
+            lua.pushNil();
+            _ = lua.pushString("repo argument required");
+            return 2;
+        };
+
+        const branch = lua.toString(2) catch "HEAD";
+
+        // Parse user/repo
+        const slash_idx = std.mem.indexOfScalar(u8, repo, '/') orelse {
+            lua.pushNil();
+            _ = lua.pushString("Invalid repo format, expected 'user/repo'");
+            return 2;
+        };
+
+        const user = repo[0..slash_idx];
+        const repo_name = repo[slash_idx + 1 ..];
+        if (user.len == 0 or repo_name.len == 0) {
+            lua.pushNil();
+            _ = lua.pushString("Invalid repo format, expected 'user/repo'");
+            return 2;
+        }
+
+        // Get plugin root from registry
+        _ = lua.getField(ziglua.registry_index, "prise_plugin_root");
+        const plugin_root = lua.toString(-1) catch {
+            lua.pop(1);
+            lua.pushNil();
+            _ = lua.pushString("Plugin root not configured");
+            return 2;
+        };
+        lua.pop(1);
+
+        // Build target directory: plugin_root/user__repo
+        var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const target_dir = std.fmt.bufPrint(&dir_buf, "{s}/{s}__{s}", .{ plugin_root, user, repo_name }) catch {
+            lua.pushNil();
+            _ = lua.pushString("Path too long");
+            return 2;
+        };
+
+        // Check if directory exists
+        const dir_exists = blk: {
+            std.fs.accessAbsolute(target_dir, .{}) catch {
+                break :blk false;
+            };
+            break :blk true;
+        };
+
+        if (dir_exists) {
+            // Directory exists - do git fetch and checkout if branch specified
+            if (!std.mem.eql(u8, branch, "HEAD")) {
+                const fetch_result = std.process.Child.run(.{
+                    .allocator = ui.allocator,
+                    .argv = &.{ "git", "fetch", "origin", branch },
+                    .cwd = target_dir,
+                }) catch {
+                    // Fetch failed, but directory exists - continue anyway
+                    _ = lua.pushString(target_dir);
+                    return 1;
+                };
+                ui.allocator.free(fetch_result.stdout);
+                ui.allocator.free(fetch_result.stderr);
+
+                const checkout_result = std.process.Child.run(.{
+                    .allocator = ui.allocator,
+                    .argv = &.{ "git", "checkout", branch },
+                    .cwd = target_dir,
+                }) catch {
+                    _ = lua.pushString(target_dir);
+                    return 1;
+                };
+                ui.allocator.free(checkout_result.stdout);
+                ui.allocator.free(checkout_result.stderr);
+            }
+            _ = lua.pushString(target_dir);
+            return 1;
+        }
+
+        // Directory doesn't exist - clone the repo
+        var url_buf: [512]u8 = undefined;
+        const clone_url = std.fmt.bufPrint(&url_buf, "https://github.com/{s}.git", .{repo}) catch {
+            lua.pushNil();
+            _ = lua.pushString("URL too long");
+            return 2;
+        };
+
+        var clone_args: [6][]const u8 = undefined;
+        var arg_count: usize = 0;
+        clone_args[arg_count] = "git";
+        arg_count += 1;
+        clone_args[arg_count] = "clone";
+        arg_count += 1;
+        clone_args[arg_count] = "--depth";
+        arg_count += 1;
+        clone_args[arg_count] = "1";
+        arg_count += 1;
+        if (!std.mem.eql(u8, branch, "HEAD")) {
+            clone_args[arg_count] = "-b";
+            arg_count += 1;
+            clone_args[arg_count] = branch;
+            arg_count += 1;
+        }
+
+        // We need to add url and target_dir to argv
+        // Since we can't easily extend, let's just do a simple clone
+        const clone_result = std.process.Child.run(.{
+            .allocator = ui.allocator,
+            .argv = if (std.mem.eql(u8, branch, "HEAD"))
+                &.{ "git", "clone", "--depth", "1", clone_url, target_dir }
+            else
+                &.{ "git", "clone", "--depth", "1", "-b", branch, clone_url, target_dir },
+            .cwd = plugin_root,
+        }) catch |err| {
+            lua.pushNil();
+            var err_buf: [256]u8 = undefined;
+            const err_msg = std.fmt.bufPrint(&err_buf, "git clone failed: {s}", .{@errorName(err)}) catch "git clone failed";
+            _ = lua.pushString(err_msg);
+            return 2;
+        };
+        defer ui.allocator.free(clone_result.stdout);
+        defer ui.allocator.free(clone_result.stderr);
+
+        if (clone_result.term.Exited != 0) {
+            lua.pushNil();
+            if (clone_result.stderr.len > 0) {
+                const trimmed = std.mem.trimRight(u8, clone_result.stderr, "\n\r");
+                _ = lua.pushString(trimmed);
+            } else {
+                _ = lua.pushString("git clone failed");
+            }
+            return 2;
+        }
+
+        _ = lua.pushString(target_dir);
         return 1;
     }
 
