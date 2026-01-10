@@ -433,9 +433,6 @@ The tiling UI uses a leader key sequence. Press the leader key (default:
 **-**
 :   Decrease floating pane size
 
-**Escape**
-:   Hide floating pane (when visible)
-
 The command palette (**Super+p**) provides fuzzy search for all commands.
 
 # SEE ALSO
