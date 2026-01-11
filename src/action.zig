@@ -67,6 +67,9 @@ pub const Action = union(enum) {
     floating_increase_size,
     floating_decrease_size,
 
+    // Layouts
+    layout_picker,
+
     // Lua function reference (registry ref)
     lua_function: i32,
 
@@ -140,6 +143,7 @@ pub const Action = union(enum) {
             .floating_toggle => "Toggle Floating Pane",
             .floating_increase_size => "Floating Pane: Increase Size",
             .floating_decrease_size => "Floating Pane: Decrease Size",
+            .layout_picker => "Layouts",
             .lua_function => null,
         };
     }

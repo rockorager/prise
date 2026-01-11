@@ -10,7 +10,7 @@ local utils = require("utils")
 ---@class Split
 ---@field type "split"
 ---@field split_id number
----@field direction "row"|"col"
+---@field direction "horizontal"|"vertical"
 ---@field ratio? number
 ---@field children (Pane|Split)[]
 
@@ -66,6 +66,43 @@ local utils = require("utils")
 ---@field pending boolean Whether a floating pane spawn is pending
 ---@field resize_mode boolean Whether resize mode is active (shows size indicator)
 
+-- Layout definitions for predefined pane arrangements
+---@class PriseLayoutPane
+---@field type "pane"
+---@field ratio? number Relative size (0-1)
+---@field cwd? string Working directory for the shell
+---@field cmd? string Command to run after shell starts
+
+---@class PriseLayoutSplit
+---@field type "split"
+---@field direction "horizontal"|"vertical"
+---@field ratio? number Relative size of this split
+---@field children (PriseLayoutPane|PriseLayoutSplit)[]
+
+---@alias PriseLayoutNode PriseLayoutPane|PriseLayoutSplit
+
+---@class PriseLayoutFloating
+---@field pane PriseLayoutPane The floating pane definition
+---@field visible? boolean Start visible (default: true)
+---@field width? number Override default floating width
+---@field height? number Override default floating height
+
+---@class PriseLayoutTab
+---@field title? string Tab title
+---@field root PriseLayoutNode The pane/split tree
+---@field floating? PriseLayoutFloating Optional floating pane for this tab
+
+---@class PriseLayout
+---@field name string Layout identifier
+---@field tabs PriseLayoutTab[] Tabs in the layout
+---@field active_tab? integer Which tab to focus (default: 1)
+
+---@class LayoutPickerState
+---@field visible boolean
+---@field selected number
+---@field scroll_offset number
+---@field regions PaletteRegion[]
+
 ---@class State
 ---@field tabs Tab[]
 ---@field active_tab integer
@@ -75,7 +112,7 @@ local utils = require("utils")
 ---@field pending_command boolean
 ---@field timer? Timer
 ---@field clock_timer? Timer
----@field pending_split? { direction: "row"|"col" }
+---@field pending_split? { direction: "horizontal"|"vertical" }
 ---@field pending_new_tab? boolean
 ---@field next_split_id number
 ---@field palette PaletteState
@@ -87,6 +124,8 @@ local utils = require("utils")
 ---@field screen_rows number
 ---@field keybind_matcher? KeybindMatcher
 ---@field floating FloatingPaneState
+---@field layout_picker LayoutPickerState
+---@field pending_layout? table
 
 ---@class Command
 ---@field name string|fun(): string
@@ -227,6 +266,8 @@ local POWERLINE_SYMBOLS = {
 ---@field leader? string Leader key sequence (default: "<D-k>")
 ---@field keybinds? PriseKeybinds Keybind definitions
 ---@field macos_option_as_alt? "false"|"left"|"right"|"true" macOS Option key behavior (default: "false")
+---@field layouts? table<string, PriseLayout> Named layout definitions
+---@field default_layout? string Layout to apply on startup (if no session exists)
 
 ---@class PriseConfig
 ---@field theme PriseTheme
@@ -236,6 +277,8 @@ local POWERLINE_SYMBOLS = {
 ---@field floating PriseFloatingConfig
 ---@field leader string
 ---@field keybinds PriseKeybinds
+---@field layouts table<string, PriseLayout>
+---@field default_layout? string
 
 -- Default configuration
 ---@type PriseConfig
@@ -318,8 +361,11 @@ local config = {
         ["<leader>f"] = "floating_toggle",
         ["<leader>+"] = "floating_increase_size",
         ["<leader>-"] = "floating_decrease_size",
+        ["<leader>o"] = "layout_picker",
     },
     macos_option_as_alt = "false",
+    layouts = {},
+    default_layout = nil,
 }
 
 local merge_config = utils.merge_config
@@ -398,6 +444,15 @@ local state = {
         pending = false,
         resize_mode = false,
     },
+    -- Layout picker state
+    layout_picker = {
+        visible = false,
+        selected = 1,
+        scroll_offset = 0,
+        regions = {},
+    },
+    -- Pending layout to apply (layout node definitions waiting for PTY spawns)
+    pending_layout = nil,
 }
 
 local M = {}
@@ -670,7 +725,7 @@ end
 ---@param node Node
 ---@param target_id number
 ---@param new_pane Pane
----@param direction "row"|"col"
+---@param direction "horizontal"|"vertical"
 ---@return Node
 local function insert_split_recursive(node, target_id, new_pane, direction)
     if is_pane(node) then
@@ -803,12 +858,12 @@ local function get_auto_split_direction()
             wider = size.cols > size.rows
         end
         if wider then
-            return "row"
+            return "horizontal"
         else
-            return "col"
+            return "vertical"
         end
     end
-    return "row"
+    return "horizontal"
 end
 
 local function update_pty_focus(old_id, new_id)
@@ -1233,6 +1288,375 @@ local function deserialize_floating(saved, pty_lookup)
     }
 end
 
+-- --- Layout Functions ---
+
+---Count the number of panes in a layout node definition
+---@param node PriseLayoutNode
+---@return number
+local function count_layout_panes(node)
+    if node.type == "pane" then
+        return 1
+    elseif node.type == "split" then
+        local count = 0
+        for _, child in ipairs(node.children) do
+            count = count + count_layout_panes(child)
+        end
+        return count
+    end
+    return 0
+end
+
+---Count total panes in a layout (all tabs + floating panes)
+---@param layout PriseLayout
+---@return number
+local function count_layout_total_panes(layout)
+    local count = 0
+    for _, tab in ipairs(layout.tabs) do
+        count = count + count_layout_panes(tab.root)
+        if tab.floating and tab.floating.pane then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+---Build a pending layout structure from a layout definition
+---@param layout PriseLayout
+---@return table pending_layout
+local function build_pending_layout(layout)
+    local pending = {
+        layout = layout,
+        panes_needed = count_layout_total_panes(layout),
+        panes_received = 0,
+        pty_queue = {},
+        tabs_built = {},
+    }
+    return pending
+end
+
+---Assign a PTY to the next slot in a layout node, building the tree
+---@param node PriseLayoutNode
+---@param pty_queue Pty[]
+---@param queue_idx number
+---@return Node?, number new_queue_idx, string? error
+local function build_node_from_layout(node, pty_queue, queue_idx)
+    assert(node and type(node) == "table", "build_node_from_layout: node must be a table")
+    assert(
+        node.type == "pane" or node.type == "split",
+        "build_node_from_layout: invalid node.type: " .. tostring(node.type)
+    )
+
+    if node.type == "pane" then
+        local pty = pty_queue[queue_idx]
+        if not pty then
+            return nil, queue_idx, "no_pty_for_pane"
+        end
+        ---@type Pane
+        local pane = {
+            type = "pane",
+            id = pty:id(),
+            pty = pty,
+            ratio = node.ratio,
+        }
+        return pane, queue_idx + 1, nil
+    end
+
+    -- node.type == "split"
+    ---@type Node[]
+    local children = {}
+    local idx = queue_idx
+    for _, child_def in ipairs(node.children or {}) do
+        local child_node, new_idx, err = build_node_from_layout(child_def, pty_queue, idx)
+        if not child_node then
+            return nil, idx, err or "failed_child"
+        end
+        table.insert(children, child_node)
+        idx = new_idx
+    end
+    if #children == 0 then
+        return nil, idx, "empty_split"
+    elseif #children == 1 then
+        children[1].ratio = node.ratio
+        return children[1], idx, nil
+    end
+    local split_id = state.next_split_id
+    state.next_split_id = state.next_split_id + 1
+    ---@type Split
+    local split = {
+        type = "split",
+        split_id = split_id,
+        direction = node.direction,
+        ratio = node.ratio,
+        children = children,
+    }
+    return split, idx, nil
+end
+
+---Close newly spawned PTYs on layout failure
+---@param pty_queue Pty[]
+---@param start_idx number
+local function cleanup_new_ptys(pty_queue, start_idx)
+    for i = start_idx, #pty_queue do
+        local pty = pty_queue[i]
+        if pty and pty.close then
+            pty:close()
+        end
+    end
+end
+
+---Finalize a pending layout once all PTYs have been received
+---@param pending table
+local function finalize_layout(pending)
+    assert(pending and pending.layout, "finalize_layout: missing pending layout")
+    local layout = pending.layout
+    local pty_queue = pending.pty_queue or {}
+
+    -- Validate pane count before any destructive operations
+    local needed = count_layout_total_panes(layout)
+    if needed ~= #pty_queue then
+        prise.log.error(string.format("Layout: pane count mismatch (layout=%d, ptys=%d)", needed, #pty_queue))
+        cleanup_new_ptys(pty_queue, 1)
+        state.pending_layout = nil
+        return
+    end
+
+    -- Build new tab structures in memory first (before destroying old state)
+    local new_tabs = {}
+    local queue_idx = 1
+    local new_floating_width = state.floating.width
+    local new_floating_height = state.floating.height
+    local new_floating_visible = state.floating.visible
+
+    for tab_index, tab_def in ipairs(layout.tabs) do
+        local root, new_idx, err = build_node_from_layout(tab_def.root, pty_queue, queue_idx)
+        if not root then
+            prise.log.error(string.format("Layout: failed to build tab %d: %s", tab_index, err or "unknown"))
+            cleanup_new_ptys(pty_queue, queue_idx)
+            state.pending_layout = nil
+            return
+        end
+        queue_idx = new_idx
+
+        ---@type Tab
+        local tab = {
+            id = tab_index,
+            title = tab_def.title,
+            root = root,
+            last_focused_id = root and (is_pane(root) and root.id or get_first_leaf(root) and get_first_leaf(root).id),
+        }
+
+        -- Handle floating pane for this tab
+        if tab_def.floating and tab_def.floating.pane then
+            local floating_pty = pty_queue[queue_idx]
+            if floating_pty then
+                queue_idx = queue_idx + 1
+                local float_visible = tab_def.floating.visible ~= false
+                tab.floating = {
+                    pane = {
+                        type = "pane",
+                        id = floating_pty:id(),
+                        pty = floating_pty,
+                    },
+                    visible = float_visible,
+                }
+                if tab_def.floating.width then
+                    new_floating_width = tab_def.floating.width
+                end
+                if tab_def.floating.height then
+                    new_floating_height = tab_def.floating.height
+                end
+                new_floating_visible = float_visible
+            end
+        end
+
+        table.insert(new_tabs, tab)
+    end
+
+    -- Verify we used all PTYs
+    if queue_idx ~= #pty_queue + 1 then
+        prise.log.error(string.format("Layout: PTY mismatch after build (used %d of %d)", queue_idx - 1, #pty_queue))
+        cleanup_new_ptys(pty_queue, queue_idx)
+        state.pending_layout = nil
+        return
+    end
+
+    -- Build succeeded - now safely close old PTYs/tabs
+    for _, tab in ipairs(state.tabs) do
+        local panes = collect_panes(tab.root, {})
+        for _, pane in ipairs(panes) do
+            if pane.pty and pane.pty.close then
+                pane.pty:close()
+            end
+        end
+        if tab.floating and tab.floating.pane and tab.floating.pane.pty then
+            tab.floating.pane.pty:close()
+        end
+    end
+
+    -- Swap in new state
+    state.tabs = new_tabs
+    state.next_tab_id = #new_tabs + 1
+    state.floating.width = new_floating_width
+    state.floating.height = new_floating_height
+    state.floating.visible = new_floating_visible
+    state.zoomed_pane_id = nil
+
+    -- Set active tab
+    state.active_tab = layout.active_tab or 1
+    if state.active_tab > #state.tabs then
+        state.active_tab = #state.tabs
+    end
+    if state.active_tab < 1 and #state.tabs > 0 then
+        state.active_tab = 1
+    end
+
+    -- Set focus to first pane in active tab
+    local active_tab = state.tabs[state.active_tab]
+    if active_tab and active_tab.root then
+        local first = get_first_leaf(active_tab.root)
+        if first then
+            state.focused_id = first.id
+            update_pty_focus(nil, state.focused_id)
+        end
+    end
+
+    state.pending_layout = nil
+    prise.request_frame()
+    prise.save()
+end
+
+---Expand ~ to home directory in a path and validate it exists
+---@param path? string
+---@return string?
+local function expand_path(path)
+    if path == nil then
+        return nil
+    end
+    assert(type(path) == "string", "expand_path: path must be a string")
+
+    local expanded = path
+    if path:sub(1, 1) == "~" then
+        local home = os.getenv("HOME")
+        if home then
+            expanded = home .. path:sub(2)
+        else
+            prise.log.warn("Layout: HOME not set, cannot expand ~")
+            return nil
+        end
+    end
+
+    -- Check if path exists as a file
+    local f = io.open(expanded, "r")
+    if f then
+        f:close()
+        return expanded
+    end
+
+    -- Check if it's a directory without using shell (avoids command injection)
+    local dir_probe = io.open(expanded .. "/.", "r")
+    if dir_probe then
+        dir_probe:close()
+        return expanded
+    end
+
+    prise.log.warn("Layout: cwd does not exist: " .. expanded)
+    return nil
+end
+
+---Spawn PTYs for a layout node recursively
+---@param node PriseLayoutNode
+local function spawn_for_layout_node(node)
+    assert(node and type(node) == "table", "spawn_for_layout_node: node must be a table")
+    if node.type == "pane" then
+        prise.spawn({ cwd = expand_path(node.cwd), cmd = node.cmd })
+    elseif node.type == "split" then
+        for _, child in ipairs(node.children or {}) do
+            spawn_for_layout_node(child)
+        end
+    end
+end
+
+---Apply a layout by name
+---@param layout_name string
+local function apply_layout(layout_name)
+    assert(type(layout_name) == "string", "apply_layout: layout_name must be a string")
+
+    local layout = config.layouts[layout_name]
+    if not layout then
+        prise.log.warn("Layout not found: " .. layout_name)
+        return
+    end
+
+    -- Validate layout structure
+    assert(type(layout) == "table", "Layout must be a table")
+    assert(layout.tabs and #layout.tabs > 0, "Layout must have at least one tab")
+
+    local total_panes = count_layout_total_panes(layout)
+    if total_panes == 0 then
+        prise.log.warn("Layout has no panes: " .. layout_name)
+        return
+    end
+
+    -- Build pending layout state
+    state.pending_layout = build_pending_layout(layout)
+
+    -- Spawn all needed PTYs
+    for _, tab_def in ipairs(layout.tabs) do
+        assert(tab_def.root, "Layout tab must have a root node")
+        spawn_for_layout_node(tab_def.root)
+
+        -- Spawn floating pane if defined
+        if tab_def.floating and tab_def.floating.pane then
+            prise.spawn({
+                cwd = expand_path(tab_def.floating.pane.cwd),
+                cmd = tab_def.floating.pane.cmd,
+            })
+        end
+    end
+end
+
+---Get sorted list of layout names
+---@return string[]
+local function get_layout_names()
+    local names = {}
+    for name, _ in pairs(config.layouts) do
+        table.insert(names, name)
+    end
+    table.sort(names)
+    return names
+end
+
+---Open the layout picker
+local function open_layout_picker()
+    local names = get_layout_names()
+    if #names == 0 then
+        prise.log.warn("No layouts defined")
+        return
+    end
+    state.layout_picker.visible = true
+    state.layout_picker.selected = 1
+    state.layout_picker.scroll_offset = 0
+    state.layout_picker.regions = {}
+    prise.request_frame()
+end
+
+---Close the layout picker
+local function close_layout_picker()
+    state.layout_picker.visible = false
+    prise.request_frame()
+end
+
+---Execute the selected layout
+local function execute_selected_layout()
+    local names = get_layout_names()
+    local idx = state.layout_picker.selected
+    if idx >= 1 and idx <= #names then
+        local layout_name = names[idx]
+        close_layout_picker()
+        apply_layout(layout_name)
+    end
+end
+
 local MIN_PANE_SHARE = 0.05
 
 ---Get the effective ratio for a child in a split
@@ -1287,7 +1711,7 @@ local function resize_pane(dimension, delta_ratio)
         return
     end
 
-    local target_split_dir = (dimension == "width") and "row" or "col"
+    local target_split_dir = (dimension == "width") and "horizontal" or "vertical"
 
     -- Traverse up to find a split of the correct direction
     local parent_split = nil
@@ -1358,9 +1782,9 @@ local function move_focus(direction)
         return
     end
 
-    -- "left"/"right" implies moving along "row"
-    -- "up"/"down" implies moving along "col"
-    local target_split_type = (direction == "left" or direction == "right") and "row" or "col"
+    -- "left"/"right" implies moving along "horizontal"
+    -- "up"/"down" implies moving along "vertical"
+    local target_split_type = (direction == "left" or direction == "right") and "horizontal" or "vertical"
     local forward = (direction == "right" or direction == "down")
 
     local sibling_node = nil
@@ -1480,7 +1904,7 @@ local commands = {
         shortcut = key_prefix .. " v",
         action = function()
             local pty = get_focused_pty()
-            state.pending_split = { direction = "row" }
+            state.pending_split = { direction = "horizontal" }
             prise.spawn({ cwd = pty and pty:cwd() })
         end,
     },
@@ -1489,7 +1913,7 @@ local commands = {
         shortcut = key_prefix .. " s",
         action = function()
             local pty = get_focused_pty()
-            state.pending_split = { direction = "col" }
+            state.pending_split = { direction = "vertical" }
             prise.spawn({ cwd = pty and pty:cwd() })
         end,
     },
@@ -1662,6 +2086,16 @@ local commands = {
         end,
     },
     {
+        name = "Layouts",
+        shortcut = key_prefix .. " o",
+        action = function()
+            open_layout_picker()
+        end,
+        visible = function()
+            return next(config.layouts) ~= nil
+        end,
+    },
+    {
         name = "Quit",
         shortcut = key_prefix .. " q",
         action = function()
@@ -1826,12 +2260,12 @@ local commands = {
 action_handlers = {
     split_horizontal = function()
         local pty = get_focused_pty()
-        state.pending_split = { direction = "row" }
+        state.pending_split = { direction = "horizontal" }
         prise.spawn({ cwd = pty and pty:cwd() })
     end,
     split_vertical = function()
         local pty = get_focused_pty()
-        state.pending_split = { direction = "col" }
+        state.pending_split = { direction = "vertical" }
         prise.spawn({ cwd = pty and pty:cwd() })
     end,
     split_auto = function()
@@ -1986,6 +2420,9 @@ action_handlers = {
         state.floating.height = math.max(state.floating.height - FLOATING_HEIGHT_STEP, FLOATING_MIN_HEIGHT)
         state.floating.resize_mode = true
         prise.request_frame()
+    end,
+    layout_picker = function()
+        open_layout_picker()
     end,
     -- command_palette is added after open_palette is defined
 }
@@ -2166,6 +2603,16 @@ function M.update(event)
         local new_pane = { type = "pane", pty = pty, id = pty:id() }
         local old_focused_id = state.focused_id
 
+        -- Check if we're building a layout
+        if state.pending_layout then
+            table.insert(state.pending_layout.pty_queue, pty)
+            state.pending_layout.panes_received = state.pending_layout.panes_received + 1
+            if state.pending_layout.panes_received >= state.pending_layout.panes_needed then
+                finalize_layout(state.pending_layout)
+            end
+            return
+        end
+
         -- Check if this PTY should be assigned to the floating pane
         if state.floating.pending then
             state.floating.pending = false
@@ -2210,7 +2657,7 @@ function M.update(event)
                 return
             end
 
-            local direction = (state.pending_split and state.pending_split.direction) or "row"
+            local direction = (state.pending_split and state.pending_split.direction) or "horizontal"
 
             if state.focused_id then
                 tab.root = insert_split_recursive(tab.root, state.focused_id, new_pane, direction)
@@ -2370,6 +2817,40 @@ function M.update(event)
                 local new_filtered = filter_sessions(state.session_picker.input:text())
                 state.session_picker.selected = math.min(state.session_picker.selected, math.max(1, #new_filtered))
                 state.session_picker.scroll_offset = 0
+                prise.request_frame()
+                return
+            end
+            return
+        end
+
+        -- Handle layout picker
+        if state.layout_picker.visible then
+            local k = event.data.key
+            local names = get_layout_names()
+
+            if k == "Escape" then
+                close_layout_picker()
+                return
+            elseif k == "Enter" then
+                execute_selected_layout()
+                return
+            elseif k == "ArrowUp" or (k == "p" and event.data.ctrl) then
+                if state.layout_picker.selected > 1 then
+                    state.layout_picker.selected = state.layout_picker.selected - 1
+                    if state.layout_picker.selected <= state.layout_picker.scroll_offset then
+                        state.layout_picker.scroll_offset = state.layout_picker.selected - 1
+                    end
+                end
+                prise.request_frame()
+                return
+            elseif k == "ArrowDown" or (k == "n" and event.data.ctrl) then
+                if state.layout_picker.selected < #names then
+                    state.layout_picker.selected = state.layout_picker.selected + 1
+                    local visible_height = math.max(1, state.screen_rows - 15)
+                    if state.layout_picker.selected > state.layout_picker.scroll_offset + visible_height then
+                        state.layout_picker.scroll_offset = state.layout_picker.selected - visible_height
+                    end
+                end
                 prise.request_frame()
                 return
             end
@@ -3169,6 +3650,81 @@ local function build_session_picker()
     })
 end
 
+---Build the layout picker modal
+---@return table?
+local function build_layout_picker()
+    if not state.layout_picker.visible then
+        state.layout_picker.regions = {}
+        return nil
+    end
+
+    local names = get_layout_names()
+    if #names == 0 then
+        close_layout_picker()
+        return nil
+    end
+
+    local items = {}
+    for _, name in ipairs(names) do
+        local layout = config.layouts[name]
+        local tab_count = #layout.tabs
+        local pane_count = count_layout_total_panes(layout)
+        local desc = string.format("%s (%d tabs, %d panes)", name, tab_count, pane_count)
+        table.insert(items, desc)
+    end
+
+    local palette_style = { bg = THEME.bg1, fg = THEME.fg_bright }
+    local selected_style = { bg = THEME.accent, fg = THEME.fg_dark }
+
+    local items_start_y = 5 + 1 + 1 + 1
+    state.layout_picker.regions = {}
+    local available_height = state.screen_rows - items_start_y - 1
+    local visible_count = math.min(#items - state.layout_picker.scroll_offset, available_height)
+    for display_row = 1, visible_count do
+        local item_index = state.layout_picker.scroll_offset + display_row
+        table.insert(state.layout_picker.regions, {
+            start_y = items_start_y + (display_row - 1),
+            end_y = items_start_y + display_row,
+            index = item_index,
+        })
+    end
+
+    return prise.Positioned({
+        anchor = "top_center",
+        y = 5,
+        focus = true,
+        child = prise.Box({
+            border = "none",
+            max_width = PALETTE_WIDTH,
+            style = palette_style,
+            focus = true,
+            child = prise.Padding({
+                top = 1,
+                bottom = 1,
+                left = 2,
+                right = 2,
+                child = prise.Column({
+                    cross_axis_align = "stretch",
+                    children = {
+                        prise.Text({ text = "Layouts", style = { fg = THEME.fg_dim, bg = THEME.bg1 } }),
+                        prise.Text({
+                            text = string.rep("─", PALETTE_WIDTH),
+                            style = { fg = THEME.bg3, bg = THEME.bg1 },
+                        }),
+                        prise.List({
+                            items = items,
+                            selected = state.layout_picker.selected,
+                            scroll_offset = state.layout_picker.scroll_offset,
+                            style = palette_style,
+                            selected_style = selected_style,
+                        }),
+                    },
+                }),
+            }),
+        }),
+    })
+end
+
 ---Resolve the display title for a tab
 ---@param tab Tab
 ---@param is_active boolean
@@ -3612,6 +4168,7 @@ function M.view()
     local rename_tab = build_rename_tab()
     local swap_with_index = build_swap_with_index()
     local session_picker = build_session_picker()
+    local layout_picker = build_layout_picker()
     local floating = build_floating()
     local tab_bar = build_tab_bar()
     prise.log.debug("view: palette.visible=" .. tostring(state.palette.visible))
@@ -3624,6 +4181,7 @@ function M.view()
         or state.rename_tab.visible
         or (state.swap_with_index and state.swap_with_index.visible)
         or state.session_picker.visible
+        or state.layout_picker.visible
         or floating_visible
     local content
     if state.zoomed_pane_id then
@@ -3676,7 +4234,7 @@ function M.view()
         table.insert(overlay_children, floating)
     end
 
-    local modal = palette or rename or rename_tab or swap_with_index or session_picker
+    local modal = palette or rename or rename_tab or swap_with_index or session_picker or layout_picker
     if modal then
         table.insert(overlay_children, modal)
         return prise.Stack({
