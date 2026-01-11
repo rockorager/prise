@@ -10,7 +10,7 @@ local utils = require("utils")
 ---@class Split
 ---@field type "split"
 ---@field split_id number
----@field direction "horizontal"|"vertical"
+---@field direction "row"|"col"
 ---@field ratio? number
 ---@field children (Pane|Split)[]
 
@@ -75,7 +75,7 @@ local utils = require("utils")
 
 ---@class PriseLayoutSplit
 ---@field type "split"
----@field direction "horizontal"|"vertical"
+---@field direction "row"|"col"
 ---@field ratio? number Relative size of this split
 ---@field children (PriseLayoutPane|PriseLayoutSplit)[]
 
@@ -112,7 +112,7 @@ local utils = require("utils")
 ---@field pending_command boolean
 ---@field timer? Timer
 ---@field clock_timer? Timer
----@field pending_split? { direction: "horizontal"|"vertical" }
+---@field pending_split? { direction: "row"|"col" }
 ---@field pending_new_tab? boolean
 ---@field next_split_id number
 ---@field palette PaletteState
@@ -725,7 +725,7 @@ end
 ---@param node Node
 ---@param target_id number
 ---@param new_pane Pane
----@param direction "horizontal"|"vertical"
+---@param direction "row"|"col"
 ---@return Node
 local function insert_split_recursive(node, target_id, new_pane, direction)
     if is_pane(node) then
@@ -858,12 +858,12 @@ local function get_auto_split_direction()
             wider = size.cols > size.rows
         end
         if wider then
-            return "horizontal"
+            return "row"
         else
-            return "vertical"
+            return "col"
         end
     end
-    return "horizontal"
+    return "row"
 end
 
 local function update_pty_focus(old_id, new_id)
@@ -1578,13 +1578,19 @@ end
 
 ---Apply a layout by name
 ---@param layout_name string
+---@return boolean
 local function apply_layout(layout_name)
     assert(type(layout_name) == "string", "apply_layout: layout_name must be a string")
+
+    if state.pending_layout then
+        prise.log.warn("Layout already pending")
+        return false
+    end
 
     local layout = config.layouts[layout_name]
     if not layout then
         prise.log.warn("Layout not found: " .. layout_name)
-        return
+        return false
     end
 
     -- Validate layout structure
@@ -1594,7 +1600,7 @@ local function apply_layout(layout_name)
     local total_panes = count_layout_total_panes(layout)
     if total_panes == 0 then
         prise.log.warn("Layout has no panes: " .. layout_name)
-        return
+        return false
     end
 
     -- Build pending layout state
@@ -1613,6 +1619,8 @@ local function apply_layout(layout_name)
             })
         end
     end
+
+    return true
 end
 
 ---Get sorted list of layout names
@@ -1711,7 +1719,7 @@ local function resize_pane(dimension, delta_ratio)
         return
     end
 
-    local target_split_dir = (dimension == "width") and "horizontal" or "vertical"
+    local target_split_dir = (dimension == "width") and "row" or "col"
 
     -- Traverse up to find a split of the correct direction
     local parent_split = nil
@@ -1784,7 +1792,7 @@ local function move_focus(direction)
 
     -- "left"/"right" implies moving along "horizontal"
     -- "up"/"down" implies moving along "vertical"
-    local target_split_type = (direction == "left" or direction == "right") and "horizontal" or "vertical"
+    local target_split_type = (direction == "left" or direction == "right") and "row" or "col"
     local forward = (direction == "right" or direction == "down")
 
     local sibling_node = nil
@@ -1904,7 +1912,7 @@ local commands = {
         shortcut = key_prefix .. " v",
         action = function()
             local pty = get_focused_pty()
-            state.pending_split = { direction = "horizontal" }
+            state.pending_split = { direction = "row" }
             prise.spawn({ cwd = pty and pty:cwd() })
         end,
     },
@@ -1913,7 +1921,7 @@ local commands = {
         shortcut = key_prefix .. " s",
         action = function()
             local pty = get_focused_pty()
-            state.pending_split = { direction = "vertical" }
+            state.pending_split = { direction = "col" }
             prise.spawn({ cwd = pty and pty:cwd() })
         end,
     },
@@ -2260,12 +2268,12 @@ local commands = {
 action_handlers = {
     split_horizontal = function()
         local pty = get_focused_pty()
-        state.pending_split = { direction = "horizontal" }
+        state.pending_split = { direction = "row" }
         prise.spawn({ cwd = pty and pty:cwd() })
     end,
     split_vertical = function()
         local pty = get_focused_pty()
-        state.pending_split = { direction = "vertical" }
+        state.pending_split = { direction = "col" }
         prise.spawn({ cwd = pty and pty:cwd() })
     end,
     split_auto = function()
@@ -2603,6 +2611,17 @@ function M.update(event)
         local new_pane = { type = "pane", pty = pty, id = pty:id() }
         local old_focused_id = state.focused_id
 
+        -- Apply default layout on first attach (no session restore)
+        if #state.tabs == 0 and config.default_layout and not state.pending_layout then
+            local applied = apply_layout(config.default_layout)
+            if applied then
+                if pty and pty.close then
+                    pty:close()
+                end
+                return
+            end
+        end
+
         -- Check if we're building a layout
         if state.pending_layout then
             table.insert(state.pending_layout.pty_queue, pty)
@@ -2657,7 +2676,7 @@ function M.update(event)
                 return
             end
 
-            local direction = (state.pending_split and state.pending_split.direction) or "horizontal"
+            local direction = (state.pending_split and state.pending_split.direction) or "row"
 
             if state.focused_id then
                 tab.root = insert_split_recursive(tab.root, state.focused_id, new_pane, direction)
