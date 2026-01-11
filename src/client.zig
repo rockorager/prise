@@ -181,7 +181,7 @@ pub const ClientState = struct {
     pty_validity: ?i64 = null,
 
     pub const RequestInfo = union(enum) {
-        spawn: struct { cwd: ?[]const u8 = null },
+        spawn: struct { cwd: ?[]const u8 = null, cmd: ?[]const u8 = null },
         attach: struct { pty_id: i64, cwd: ?[]const u8 = null },
         detach,
         get_server_info,
@@ -2395,7 +2395,7 @@ pub const App = struct {
         self.state.next_msgid += 1;
 
         log.info("spawnPty: sending request msgid={}", .{msgid});
-        try self.state.pending_requests.put(msgid, .{ .spawn = .{ .cwd = opts.cwd } });
+        try self.state.pending_requests.put(msgid, .{ .spawn = .{ .cwd = opts.cwd, .cmd = opts.cmd } });
 
         // Build env array from current process environment
         var env_map = try std.process.getEnvMap(self.allocator);
@@ -2409,7 +2409,9 @@ pub const App = struct {
             try env_array.append(self.allocator, .{ .string = env_str });
         }
 
-        const num_params: usize = if (opts.cwd != null) 5 else 4;
+        var num_params: usize = 4;
+        if (opts.cwd != null) num_params += 1;
+        if (opts.cmd != null) num_params += 1;
         var map_items = try self.allocator.alloc(msgpack.Value.KeyValue, num_params);
         defer self.allocator.free(map_items);
 
@@ -2417,8 +2419,13 @@ pub const App = struct {
         map_items[1] = .{ .key = .{ .string = "cols" }, .value = .{ .unsigned = opts.cols } };
         map_items[2] = .{ .key = .{ .string = "attach" }, .value = .{ .boolean = opts.attach } };
         map_items[3] = .{ .key = .{ .string = "env" }, .value = .{ .array = env_array.items } };
+        var idx: usize = 4;
         if (opts.cwd) |cwd| {
-            map_items[4] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = cwd } };
+            map_items[idx] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = cwd } };
+            idx += 1;
+        }
+        if (opts.cmd) |cmd| {
+            map_items[idx] = .{ .key = .{ .string = "cmd" }, .value = .{ .string = cmd } };
         }
 
         const params = msgpack.Value{ .map = map_items };

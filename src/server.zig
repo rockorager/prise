@@ -2056,13 +2056,14 @@ const Server = struct {
     /// Timestamp (ms since epoch) when server started - used to detect server restarts
     start_time_ms: i64 = 0,
 
-    fn parseSpawnPtyParams(params: msgpack.Value) struct { size: pty.Winsize, attach: bool, cwd: ?[]const u8, env: ?[]const msgpack.Value, macos_option_as_alt: key_encode.OptionAsAlt } {
+    fn parseSpawnPtyParams(params: msgpack.Value) struct { size: pty.Winsize, attach: bool, cwd: ?[]const u8, env: ?[]const msgpack.Value, macos_option_as_alt: key_encode.OptionAsAlt, cmd: ?[]const u8 } {
         var rows: u16 = 24;
         var cols: u16 = 80;
         var attach: bool = false;
         var cwd: ?[]const u8 = null;
         var env: ?[]const msgpack.Value = null;
         var macos_option_as_alt: key_encode.OptionAsAlt = .false;
+        var cmd: ?[]const u8 = null;
 
         if (params == .map) {
             for (params.map) |kv| {
@@ -2079,6 +2080,8 @@ const Server = struct {
                     env = kv.value.array;
                 } else if (std.mem.eql(u8, kv.key.string, "macos_option_as_alt")) {
                     macos_option_as_alt = parseMacosOptionAsAlt(kv.value);
+                } else if (std.mem.eql(u8, kv.key.string, "cmd") and kv.value == .string) {
+                    cmd = kv.value.string;
                 }
             }
         }
@@ -2094,6 +2097,7 @@ const Server = struct {
             .cwd = cwd,
             .env = env,
             .macos_option_as_alt = macos_option_as_alt,
+            .cmd = cmd,
         };
     }
 
@@ -2259,6 +2263,16 @@ const Server = struct {
             const msg = try buildRedrawMessageFromPty(self.allocator, pty_instance, .full);
             defer self.allocator.free(msg);
             try self.sendRedraw(self.loop, pty_instance, msg, client);
+        }
+
+        // Write initial command to PTY if specified
+        if (parsed.cmd) |cmd| {
+            log.info("Writing initial command to PTY {}: {s}", .{ pty_id, cmd });
+            const cmd_with_newline = try std.fmt.allocPrint(self.allocator, "{s}\n", .{cmd});
+            defer self.allocator.free(cmd_with_newline);
+            _ = posix.write(process.master, cmd_with_newline) catch |err| {
+                log.warn("Failed to write initial command to PTY {}: {}", .{ pty_id, err });
+            };
         }
 
         log.info("Created PTY {} with PID {}", .{ pty_id, process.pid });

@@ -97,6 +97,7 @@ pub const UI = struct {
         cols: u16,
         attach: bool,
         cwd: ?[]const u8 = null,
+        cmd: ?[]const u8 = null,
     };
 
     pub const InitError = struct {
@@ -479,6 +480,10 @@ pub const UI = struct {
 
             _ = lua.getField(1, "cwd");
             if (lua.isString(-1)) opts.cwd = lua.toString(-1) catch null;
+            lua.pop(1);
+
+            _ = lua.getField(1, "cmd");
+            if (lua.isString(-1)) opts.cmd = lua.toString(-1) catch null;
             lua.pop(1);
 
             cb(ui.spawn_ctx, opts) catch |err| {
