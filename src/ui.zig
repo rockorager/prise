@@ -155,21 +155,10 @@ pub const UI = struct {
             return .{ .err = .{ .err = err, .lua_msg = null } };
         };
 
-        // Ensure plugin directory exists
-        std.fs.makeDirAbsolute(plugin_root) catch |err| switch (err) {
-            error.PathAlreadyExists => {},
-            else => {
-                // Try to create parent directories
-                const parent = std.fs.path.dirname(plugin_root) orelse {
-                    allocator.free(plugin_root);
-                    return .{ .err = .{ .err = err, .lua_msg = null } };
-                };
-                std.fs.makeDirAbsolute(parent) catch {};
-                std.fs.makeDirAbsolute(plugin_root) catch |e| {
-                    allocator.free(plugin_root);
-                    return .{ .err = .{ .err = e, .lua_msg = null } };
-                };
-            },
+        // Ensure plugin directory exists (create parent directories recursively)
+        std.fs.cwd().makePath(plugin_root) catch |err| {
+            allocator.free(plugin_root);
+            return .{ .err = .{ .err = err, .lua_msg = null } };
         };
 
         // Store plugin root in registry for Lua access
@@ -948,13 +937,9 @@ pub const UI = struct {
     }
 
     fn ensurePlugin(lua: *ziglua.Lua) i32 {
-        _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
-        const ui = lua.toUserdata(UI, -1) catch {
-            lua.pushNil();
-            _ = lua.pushString("UI not initialized");
-            return 2;
-        };
-        lua.pop(1);
+        // Use page_allocator for git operations since this may be called
+        // before UI is fully initialized (during config loading)
+        const alloc = std.heap.page_allocator;
 
         const repo = lua.toString(1) catch {
             lua.pushNil();
@@ -981,10 +966,19 @@ pub const UI = struct {
 
         // Get plugin root from registry
         _ = lua.getField(ziglua.registry_index, "prise_plugin_root");
-        const plugin_root = lua.toString(-1) catch {
+        const plugin_root_lua = lua.toString(-1) catch {
             lua.pop(1);
             lua.pushNil();
             _ = lua.pushString("Plugin root not configured");
+            return 2;
+        };
+
+        // Copy plugin_root before popping (Lua string becomes invalid after pop)
+        var plugin_root_buf: [std.fs.max_path_bytes]u8 = undefined;
+        const plugin_root = std.fmt.bufPrint(&plugin_root_buf, "{s}", .{plugin_root_lua}) catch {
+            lua.pop(1);
+            lua.pushNil();
+            _ = lua.pushString("Plugin root path too long");
             return 2;
         };
         lua.pop(1);
@@ -1009,7 +1003,7 @@ pub const UI = struct {
             // Directory exists - do git fetch and checkout if branch specified
             if (!std.mem.eql(u8, branch, "HEAD")) {
                 const fetch_result = std.process.Child.run(.{
-                    .allocator = ui.allocator,
+                    .allocator = alloc,
                     .argv = &.{ "git", "fetch", "origin", branch },
                     .cwd = target_dir,
                 }) catch {
@@ -1017,19 +1011,19 @@ pub const UI = struct {
                     _ = lua.pushString(target_dir);
                     return 1;
                 };
-                ui.allocator.free(fetch_result.stdout);
-                ui.allocator.free(fetch_result.stderr);
+                alloc.free(fetch_result.stdout);
+                alloc.free(fetch_result.stderr);
 
                 const checkout_result = std.process.Child.run(.{
-                    .allocator = ui.allocator,
+                    .allocator = alloc,
                     .argv = &.{ "git", "checkout", branch },
                     .cwd = target_dir,
                 }) catch {
                     _ = lua.pushString(target_dir);
                     return 1;
                 };
-                ui.allocator.free(checkout_result.stdout);
-                ui.allocator.free(checkout_result.stderr);
+                alloc.free(checkout_result.stdout);
+                alloc.free(checkout_result.stderr);
             }
             _ = lua.pushString(target_dir);
             return 1;
@@ -1043,27 +1037,8 @@ pub const UI = struct {
             return 2;
         };
 
-        var clone_args: [6][]const u8 = undefined;
-        var arg_count: usize = 0;
-        clone_args[arg_count] = "git";
-        arg_count += 1;
-        clone_args[arg_count] = "clone";
-        arg_count += 1;
-        clone_args[arg_count] = "--depth";
-        arg_count += 1;
-        clone_args[arg_count] = "1";
-        arg_count += 1;
-        if (!std.mem.eql(u8, branch, "HEAD")) {
-            clone_args[arg_count] = "-b";
-            arg_count += 1;
-            clone_args[arg_count] = branch;
-            arg_count += 1;
-        }
-
-        // We need to add url and target_dir to argv
-        // Since we can't easily extend, let's just do a simple clone
         const clone_result = std.process.Child.run(.{
-            .allocator = ui.allocator,
+            .allocator = alloc,
             .argv = if (std.mem.eql(u8, branch, "HEAD"))
                 &.{ "git", "clone", "--depth", "1", clone_url, target_dir }
             else
@@ -1076,10 +1051,15 @@ pub const UI = struct {
             _ = lua.pushString(err_msg);
             return 2;
         };
-        defer ui.allocator.free(clone_result.stdout);
-        defer ui.allocator.free(clone_result.stderr);
+        defer alloc.free(clone_result.stdout);
+        defer alloc.free(clone_result.stderr);
 
-        if (clone_result.term.Exited != 0) {
+        const success = switch (clone_result.term) {
+            .Exited => |code| code == 0,
+            else => false,
+        };
+
+        if (!success) {
             lua.pushNil();
             if (clone_result.stderr.len > 0) {
                 const trimmed = std.mem.trimRight(u8, clone_result.stderr, "\n\r");

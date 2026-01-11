@@ -1,5 +1,5 @@
 ---@class PrisePluginsManager
----Plugin manager for prise with lazy.nvim-style configuration
+---Plugin manager for prise
 local M = {}
 
 ---@type table<string, table> Normalized specs indexed by name
@@ -16,6 +16,9 @@ M.key_triggers = {}
 
 ---@type table<string, string[]> Plugin names indexed by trigger event
 M.event_triggers = {}
+
+---@type table? Reference to user's tiling config
+M.user_config = nil
 
 ---Check if a table contains a value
 ---@param tbl table
@@ -135,7 +138,10 @@ end
 
 ---Initialize plugin manager with specs
 ---@param raw_specs PrisePluginSpec[]?
-function M.setup(raw_specs)
+---@param user_cfg table? Reference to user's config for plugins that need it
+function M.setup(raw_specs, user_cfg)
+    M.user_config = user_cfg
+
     if not raw_specs then
         return
     end
@@ -181,7 +187,14 @@ local function get_plugin_dir(spec)
 
     local prise = require("prise")
     if prise.ensure_plugin then
-        return prise.ensure_plugin(spec.repo, spec.branch)
+        print("[prise.plugins] cloning/updating " .. spec.repo .. " branch=" .. tostring(spec.branch))
+        local dir, err = prise.ensure_plugin(spec.repo, spec.branch)
+        if dir then
+            print("[prise.plugins] plugin dir: " .. dir)
+        else
+            print("[prise.plugins] ensure_plugin error: " .. tostring(err))
+        end
+        return dir, err
     end
     return nil, "ensure_plugin not available"
 end
@@ -218,9 +231,13 @@ function M.load(name)
         return nil
     end
 
-    local dir = get_plugin_dir(spec)
+    local dir, dir_err = get_plugin_dir(spec)
     if dir then
         add_plugin_paths(dir)
+    elseif dir_err then
+        print("[prise.plugins] failed to get plugin dir for '" .. name .. "': " .. tostring(dir_err))
+        M.loaded[name] = false
+        return nil
     end
 
     local ok, plugin_or_err = pcall(require, spec.name)
@@ -234,12 +251,12 @@ function M.load(name)
     M.loaded[name] = plugin or true
 
     if type(spec.config) == "function" then
-        local config_ok, config_err = pcall(spec.config, plugin, spec.opts)
+        local config_ok, config_err = pcall(spec.config, plugin, spec.opts, M.user_config)
         if not config_ok then
             print("[prise.plugins] config error for '" .. name .. "': " .. tostring(config_err))
         end
     elseif plugin and type(plugin.setup) == "function" then
-        local setup_ok, setup_err = pcall(plugin.setup, spec.opts)
+        local setup_ok, setup_err = pcall(plugin.setup, spec.opts, M.user_config)
         if not setup_ok then
             print("[prise.plugins] setup error for '" .. name .. "': " .. tostring(setup_err))
         end

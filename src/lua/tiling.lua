@@ -424,6 +424,7 @@ local function init_keybinds()
     if state.keybind_matcher then
         return
     end
+
     state.keybind_matcher = prise.keybind.compile(config.keybinds, config.leader)
 end
 
@@ -443,7 +444,7 @@ function M.setup(opts)
     -- Initialize plugin system
     if config.plugins then
         local plugins = require("prise.plugins")
-        plugins.setup(config.plugins)
+        plugins.setup(config.plugins, config)
         plugins.emit("ui_setup", { config = config })
     end
 end
