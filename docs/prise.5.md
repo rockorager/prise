@@ -30,7 +30,10 @@ ui.setup({
     theme = { ... },
     status_bar = { ... },
     tab_bar = { ... },
+    floating = { ... },
     keybinds = { ... },
+    layouts = { ... },
+    default_layout = "...",
 })
 
 return ui
@@ -157,6 +160,60 @@ The **tab_bar** table configures the tab bar.
 
 **show_single_tab**
 :   Show the tab bar even with only one tab. Default: **false**
+
+# LAYOUTS
+
+The **layouts** table defines named layout presets for tabs and panes.
+
+Each layout has:
+
+**tabs**
+:   List of tabs. Each tab needs a **root** node and can set **title** or **floating**.
+
+**root**
+:   A pane or split definition.
+
+**pane**
+:   `{ type = "pane", cwd = "...", cmd = "...", ratio = 0.5 }`
+
+**split**
+:   `{ type = "split", direction = "horizontal"|"vertical", ratio = 0.5, children = { ... } }`
+
+**floating**
+:   Optional floating pane for a tab. `{ pane = { ... }, visible = true, width = 120, height = 40 }`
+
+**default_layout**
+:   Name of a layout to apply on startup when no session exists.
+
+Example:
+
+```lua
+ui.setup({
+    layouts = {
+        work = {
+            name = "work",
+            tabs = {
+                {
+                    title = "editor",
+                    root = {
+                        type = "split",
+                        direction = "horizontal",
+                        children = {
+                            { type = "pane", cwd = "~/code" },
+                            { type = "pane", cmd = "git status" },
+                        },
+                    },
+                    floating = {
+                        pane = { type = "pane", cmd = "htop" },
+                        visible = false,
+                    },
+                },
+            },
+        },
+    },
+    default_layout = "work",
+})
+```
 
 # FLOATING PANE
 
@@ -360,6 +417,9 @@ The following actions can be used as values in the **keybinds** table.
 
 ## Other
 
+**layout_picker**
+:   Open the layout picker
+
 **command_palette**
 :   Open the command palette
 
@@ -426,6 +486,9 @@ The tiling UI uses a leader key sequence. Press the leader key (default:
 
 **f**
 :   Toggle floating pane
+
+**o**
+:   Open layout picker
 
 **+**
 :   Increase floating pane size
