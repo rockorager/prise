@@ -171,7 +171,8 @@ pub const ClientState = struct {
     pty_id: ?i64 = null,
     response_received: bool = false,
     attached: bool = false,
-    should_quit: bool = false,
+    /// Thread-safe quit flag - accessed from both main thread and TTY thread
+    should_quit: std.atomic.Value(bool) = std.atomic.Value(bool).init(false),
     connection_refused: bool = false,
     next_msgid: u32 = 1,
     pending_requests: std.AutoHashMap(u32, RequestInfo),
@@ -528,7 +529,7 @@ pub const ClientLogic = struct {
             };
             return .{ .send_resize = .{ .rows = rows, .cols = cols } };
         } else if (std.mem.eql(u8, msg_type.string, "quit")) {
-            state.should_quit = true;
+            state.should_quit.store(true, .release);
             return .quit;
         }
         return .none;
@@ -734,9 +735,8 @@ pub const App = struct {
     }
 
     pub fn deinit(self: *App) void {
-        log.info("deinit: starting", .{});
         self.ui.deinit();
-        self.state.should_quit = true;
+        self.state.should_quit.store(true, .release);
 
         // Wake up TTY thread by sending a Device Status Report request.
         // This causes the terminal to send a response, unblocking the read.
@@ -779,6 +779,7 @@ pub const App = struct {
         if (self.tty_thread) |thread| {
             thread.join();
         }
+
         var surface_it = self.surfaces.valueIterator();
         while (surface_it.next()) |surface| {
             surface.*.deinit();
@@ -823,7 +824,7 @@ pub const App = struct {
                 }
                 // Delete session (it's empty)
                 app.deleteCurrentSession();
-                app.state.should_quit = true;
+                app.state.should_quit.store(true, .release);
                 if (app.connected) {
                     posix.close(app.fd);
                     app.connected = false;
@@ -983,7 +984,7 @@ pub const App = struct {
         log.info("TTY thread started", .{});
 
         var buf: [1024]u8 = undefined;
-        while (!self.state.should_quit) {
+        while (!self.state.should_quit.load(.acquire)) {
             const n = posix.read(self.tty.fd, &buf) catch |err| {
                 log.err("TTY read failed: {}", .{err});
                 break;
@@ -1048,7 +1049,7 @@ pub const App = struct {
                 }
 
                 // Keep reading unless we're quitting
-                if (!app.state.should_quit) {
+                if (!app.state.should_quit.load(.acquire)) {
                     app.pipe_read_task = try l.read(app.pipe_read_fd, &app.pipe_recv_buffer, .{
                         .ptr = app,
                         .cb = onPipeRead,
@@ -1676,7 +1677,7 @@ pub const App = struct {
                 app.connected = true;
                 log.info("Connected! fd={}", .{app.fd});
 
-                if (!app.state.should_quit) {
+                if (!app.state.should_quit.load(.acquire)) {
                     // Start receiving from the server
                     app.recv_task = try l.recv(fd, &app.recv_buffer, .{
                         .ptr = app,
@@ -1925,7 +1926,7 @@ pub const App = struct {
             .recv => |initial_bytes_read| {
                 if (initial_bytes_read == 0) {
                     log.info("Server closed connection", .{});
-                    app.state.should_quit = true;
+                    app.state.should_quit.store(true, .release);
                     if (app.connected) {
                         posix.close(app.fd);
                         app.connected = false;
@@ -2262,7 +2263,7 @@ pub const App = struct {
                                     log.err("Failed to update UI with pty_exited: {}", .{err});
                                 };
                                 // Delete session file when last PTY exits (if quit wasn't already called)
-                                if (app.surfaces.count() == 0 and !app.state.should_quit) {
+                                if (app.surfaces.count() == 0 and !app.state.should_quit.load(.acquire)) {
                                     // Cancel autosave timer to prevent it from recreating the file
                                     if (app.autosave_timer) |*task| {
                                         if (app.io_loop) |loop| task.cancel(loop) catch {};
@@ -2289,40 +2290,31 @@ pub const App = struct {
                                 log.info("Cleared surfaces", .{});
                                 app.surfaces.clearRetainingCapacity();
 
-                                app.state.should_quit = true;
+                                app.state.should_quit.store(true, .release);
 
-                                // Cancel pending tasks before closing fd
-                                if (app.recv_task) |*task| {
-                                    task.cancel(l) catch {};
-                                    app.recv_task = null;
-                                }
-                                if (app.render_timer) |*task| {
-                                    task.cancel(l) catch {};
-                                    app.render_timer = null;
-                                }
-                                if (app.autosave_timer) |*task| {
-                                    task.cancel(l) catch {};
-                                    app.autosave_timer = null;
-                                }
-                                if (app.pipe_read_task) |*task| {
-                                    task.cancel(l) catch {};
-                                    app.pipe_read_task = null;
-                                }
-                                if (app.send_task) |*task| {
-                                    task.cancel(l) catch {};
-                                    app.send_task = null;
-                                }
-
-                                log.info("Closing connection", .{});
+                                // Close the socket fd
                                 if (app.connected) {
                                     posix.close(app.fd);
                                     app.connected = false;
                                 }
+
+                                // Cancel all pending io_uring operations and clear the pending map.
+                                // This is necessary because individual task.cancel() calls only queue
+                                // cancel SQEs - they don't complete synchronously. The cancelled ops
+                                // would need to complete before pending count reaches 0, but some ops
+                                // (like recv on a closed fd) may never complete. By clearing the
+                                // pending map directly, we allow the io loop to exit immediately.
+                                l.cancelAll();
+
+                                // Clear task references
+                                app.recv_task = null;
+                                app.render_timer = null;
+                                app.autosave_timer = null;
+                                app.pipe_read_task = null;
+                                app.send_task = null;
+
                                 // Wake up TTY thread so it can exit
-                                log.info("Waking TTY thread", .{});
                                 app.vx.deviceStatusReport(app.tty.writer()) catch {};
-                                log.info("Returning from detach handler", .{});
-                                return;
                             },
                             .color_query => |query| {
                                 try app.handleColorQuery(query);
@@ -2343,7 +2335,7 @@ pub const App = struct {
                     }
 
                     // Try to read more (but not if we're quitting - fd may be closed)
-                    if (app.state.should_quit) break;
+                    if (app.state.should_quit.load(.acquire)) break;
                     const n = posix.recv(app.fd, &app.recv_buffer, 0) catch |err| {
                         if (err == error.WouldBlock) break;
                         return err;
@@ -2351,7 +2343,7 @@ pub const App = struct {
 
                     if (n == 0) {
                         log.info("Server closed connection", .{});
-                        app.state.should_quit = true;
+                        app.state.should_quit.store(true, .release);
                         if (app.connected) {
                             posix.close(app.fd);
                             app.connected = false;
@@ -2363,7 +2355,7 @@ pub const App = struct {
                 }
 
                 // Keep receiving unless we're quitting
-                if (!app.state.should_quit) {
+                if (!app.state.should_quit.load(.acquire)) {
                     app.recv_task = try l.recv(app.fd, &app.recv_buffer, .{
                         .ptr = app,
                         .cb = onRecv,
@@ -3161,7 +3153,7 @@ test "ClientLogic - processPipeMessage" {
         defer quit_val.deinit(allocator);
 
         const action = try ClientLogic.processPipeMessage(&state, quit_val);
-        try testing.expect(state.should_quit);
+        try testing.expect(state.should_quit.load(.acquire));
         try testing.expectEqual(std.meta.Tag(PipeAction).quit, std.meta.activeTag(action));
     }
 
