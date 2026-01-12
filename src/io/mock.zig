@@ -22,6 +22,7 @@ pub const Loop = struct {
         kind: OpKind,
         fd: posix.socket_t = undefined,
         buf: []u8 = &.{},
+        pid: posix.pid_t = undefined,
     };
 
     const QueuedCompletion = struct {
@@ -38,6 +39,7 @@ pub const Loop = struct {
         send,
         close,
         timer,
+        waitpid,
     };
 
     pub fn init(allocator: std.mem.Allocator) !Loop {
@@ -236,6 +238,37 @@ pub const Loop = struct {
         return .{ .id = id, .ctx = ctx };
     }
 
+    pub fn waitpid(
+        self: *Loop,
+        pid: posix.pid_t,
+        ctx: root.Context,
+    ) !root.Task {
+        const id = self.next_id;
+        self.next_id += 1;
+
+        try self.pending.put(id, .{
+            .ctx = ctx,
+            .kind = .waitpid,
+            .pid = pid,
+        });
+
+        return .{ .id = id, .ctx = ctx };
+    }
+
+    /// Test helper: complete a pending waitpid operation
+    pub fn completeWaitpid(self: *Loop, pid: posix.pid_t, status: u32) !void {
+        var it = self.pending.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.kind == .waitpid and entry.value_ptr.pid == pid) {
+                try self.completions.append(self.allocator, .{
+                    .id = entry.key_ptr.*,
+                    .result = .{ .waitpid = .{ .pid = pid, .status = status } },
+                });
+                return;
+            }
+        }
+    }
+
     pub fn cancel(self: *Loop, id: usize) !void {
         _ = self.pending.remove(id);
         var i: usize = 0;
@@ -254,7 +287,8 @@ pub const Loop = struct {
 
         var it = self.pending.iterator();
         while (it.next()) |entry| {
-            if (entry.value_ptr.kind != .timer and entry.value_ptr.fd == fd) {
+            const kind = entry.value_ptr.kind;
+            if (kind != .timer and kind != .waitpid and entry.value_ptr.fd == fd) {
                 ids_to_cancel.append(self.allocator, entry.key_ptr.*) catch {};
             }
         }
@@ -683,4 +717,49 @@ test "mock loop - cancelByFd operation" {
 
     try loop.run(.until_done);
     try testing.expect(!completed);
+}
+
+test "mock loop - waitpid operation" {
+    const testing = std.testing;
+
+    var loop = try Loop.init(testing.allocator);
+    defer loop.deinit();
+
+    var wait_result: ?root.WaitPidResult = null;
+
+    const State = struct {
+        result: *?root.WaitPidResult,
+    };
+
+    var state: State = .{
+        .result = &wait_result,
+    };
+
+    const callback = struct {
+        fn cb(l: *Loop, completion: root.Completion) !void {
+            _ = l;
+            const s = completion.userdataCast(State);
+            switch (completion.result) {
+                .waitpid => |r| s.result.* = r,
+                .err => |err| return err,
+                else => unreachable,
+            }
+        }
+    }.cb;
+
+    const pid: posix.pid_t = 12345;
+    _ = try loop.waitpid(pid, .{
+        .ptr = &state,
+        .cb = callback,
+    });
+
+    try testing.expectEqual(@as(usize, 1), loop.pending.count());
+
+    // Simulate the process exiting with status 0
+    try loop.completeWaitpid(pid, 0);
+    try loop.run(.until_done);
+
+    try testing.expect(wait_result != null);
+    try testing.expectEqual(pid, wait_result.?.pid);
+    try testing.expectEqual(@as(u32, 0), wait_result.?.status);
 }

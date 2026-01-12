@@ -24,6 +24,7 @@ pub const Loop = struct {
         buf: []u8 = &.{},
         addr: *const posix.sockaddr = undefined,
         addr_len: posix.socklen_t = 0,
+        pid: posix.pid_t = undefined,
     };
 
     const OpKind = enum {
@@ -35,6 +36,7 @@ pub const Loop = struct {
         send,
         close,
         timer,
+        waitpid,
     };
 
     pub fn init(allocator: std.mem.Allocator) !Loop {
@@ -315,6 +317,33 @@ pub const Loop = struct {
         return root.Task{ .id = id, .ctx = ctx };
     }
 
+    pub fn waitpid(
+        self: *Loop,
+        pid: posix.pid_t,
+        ctx: root.Context,
+    ) !root.Task {
+        const id = self.next_id;
+        self.next_id += 1;
+
+        try self.pending.put(id, .{
+            .ctx = ctx,
+            .kind = .waitpid,
+            .pid = pid,
+        });
+
+        var changes = [_]posix.Kevent{.{
+            .ident = @intCast(pid),
+            .filter = c.EVFILT.PROC,
+            .flags = c.EV.ADD | c.EV.ENABLE | c.EV.ONESHOT,
+            .fflags = c.NOTE.EXIT,
+            .data = 0,
+            .udata = id,
+        }};
+        _ = try posix.kevent(self.kq, &changes, &[_]posix.Kevent{}, null);
+
+        return root.Task{ .id = id, .ctx = ctx };
+    }
+
     pub fn cancel(self: *Loop, id: usize) !void {
         const op = self.pending.get(id) orelse {
             return;
@@ -322,13 +351,18 @@ pub const Loop = struct {
 
         // Try to remove from kqueue by sending EV_DELETE
         // Note: may fail if event was ONESHOT and already fired
-        const ident: usize = if (op.kind == .timer) id else @intCast(op.fd);
+        const ident: usize = switch (op.kind) {
+            .timer => id,
+            .waitpid => @intCast(op.pid),
+            else => @intCast(op.fd),
+        };
         var changes = [_]posix.Kevent{.{
             .ident = ident,
             .filter = switch (op.kind) {
                 .read, .recv, .accept => c.EVFILT.READ,
                 .send, .connect => c.EVFILT.WRITE,
                 .timer => c.EVFILT.TIMER,
+                .waitpid => c.EVFILT.PROC,
                 else => return,
             },
             .flags = c.EV.DELETE,
@@ -347,7 +381,8 @@ pub const Loop = struct {
 
         var it = self.pending.iterator();
         while (it.next()) |entry| {
-            if (entry.value_ptr.kind != .timer and entry.value_ptr.fd == fd) {
+            const kind = entry.value_ptr.kind;
+            if (kind != .timer and kind != .waitpid and entry.value_ptr.fd == fd) {
                 ids_to_cancel.append(self.allocator, entry.key_ptr.*) catch {};
             }
         }
@@ -402,6 +437,7 @@ pub const Loop = struct {
             .recv => self.completeRecv(op.fd, op.buf),
             .send => self.completeSend(op.fd, op.buf),
             .timer => .{ .timer = {} },
+            .waitpid => self.completeWaitpid(op.pid),
             .socket, .close => unreachable,
         };
 
@@ -454,6 +490,14 @@ pub const Loop = struct {
             return .{ .err = err };
         };
         return .{ .send = bytes_sent };
+    }
+
+    fn completeWaitpid(_: *Loop, pid: posix.pid_t) root.Result {
+        const wait_result = posix.waitpid(pid, posix.W.NOHANG);
+        return .{ .waitpid = .{
+            .pid = wait_result.pid,
+            .status = wait_result.status,
+        } };
     }
 
     pub const RunMode = enum {
