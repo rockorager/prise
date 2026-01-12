@@ -27,6 +27,37 @@ const TimerContext = struct {
     timer_ref: i32,
 };
 
+const GitOperation = enum {
+    clone,
+    fetch,
+    checkout,
+};
+
+const GitContext = struct {
+    ui: *UI,
+    callback_ref: i32,
+    child: std.process.Child,
+    target_dir_buf: [std.fs.max_path_bytes]u8,
+    target_dir_len: usize,
+    branch_buf: [256]u8,
+    branch_len: usize,
+    repo_buf: [256]u8,
+    repo_len: usize,
+    operation: GitOperation,
+
+    fn getTargetDir(self: *const GitContext) []const u8 {
+        return self.target_dir_buf[0..self.target_dir_len];
+    }
+
+    fn getBranch(self: *const GitContext) []const u8 {
+        return self.branch_buf[0..self.branch_len];
+    }
+
+    fn getRepo(self: *const GitContext) []const u8 {
+        return self.repo_buf[0..self.repo_len];
+    }
+};
+
 const Timer = struct {
     ui: *UI,
     callback_ref: i32,
@@ -936,10 +967,22 @@ pub const UI = struct {
         return 1;
     }
 
+    const git_clone_url_max_len = 512;
+
     fn ensurePlugin(lua: *ziglua.Lua) i32 {
-        // Use page_allocator for git operations since this may be called
-        // before UI is fully initialized (during config loading)
-        const alloc = std.heap.page_allocator;
+        _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
+        const ui = lua.toUserdata(UI, -1) catch {
+            lua.pushNil();
+            _ = lua.pushString("UI not initialized");
+            return 2;
+        };
+        lua.pop(1);
+
+        if (ui.loop == null) {
+            lua.pushNil();
+            _ = lua.pushString("Event loop not available");
+            return 2;
+        }
 
         const repo = lua.toString(1) catch {
             lua.pushNil();
@@ -949,8 +992,16 @@ pub const UI = struct {
 
         const branch = lua.toString(2) catch "HEAD";
 
-        // Parse user/repo
+        lua.checkType(3, .function);
+        lua.pushValue(3);
+        const callback_ref = lua.ref(ziglua.registry_index) catch {
+            lua.pushNil();
+            _ = lua.pushString("Failed to create callback reference");
+            return 2;
+        };
+
         const slash_idx = std.mem.indexOfScalar(u8, repo, '/') orelse {
+            lua.unref(ziglua.registry_index, callback_ref);
             lua.pushNil();
             _ = lua.pushString("Invalid repo format, expected 'user/repo'");
             return 2;
@@ -959,39 +1010,55 @@ pub const UI = struct {
         const user = repo[0..slash_idx];
         const repo_name = repo[slash_idx + 1 ..];
         if (user.len == 0 or repo_name.len == 0) {
+            lua.unref(ziglua.registry_index, callback_ref);
             lua.pushNil();
             _ = lua.pushString("Invalid repo format, expected 'user/repo'");
             return 2;
         }
 
-        // Get plugin root from registry
         _ = lua.getField(ziglua.registry_index, "prise_plugin_root");
         const plugin_root_lua = lua.toString(-1) catch {
             lua.pop(1);
+            lua.unref(ziglua.registry_index, callback_ref);
             lua.pushNil();
             _ = lua.pushString("Plugin root not configured");
             return 2;
         };
 
-        // Copy plugin_root before popping (Lua string becomes invalid after pop)
         var plugin_root_buf: [std.fs.max_path_bytes]u8 = undefined;
         const plugin_root = std.fmt.bufPrint(&plugin_root_buf, "{s}", .{plugin_root_lua}) catch {
             lua.pop(1);
+            lua.unref(ziglua.registry_index, callback_ref);
             lua.pushNil();
             _ = lua.pushString("Plugin root path too long");
             return 2;
         };
         lua.pop(1);
 
-        // Build target directory: plugin_root/user__repo
-        var dir_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const target_dir = std.fmt.bufPrint(&dir_buf, "{s}/{s}__{s}", .{ plugin_root, user, repo_name }) catch {
+        const ctx = ui.allocator.create(GitContext) catch {
+            lua.unref(ziglua.registry_index, callback_ref);
+            lua.pushNil();
+            _ = lua.pushString("Out of memory");
+            return 2;
+        };
+
+        const target_dir = std.fmt.bufPrint(&ctx.target_dir_buf, "{s}/{s}__{s}", .{ plugin_root, user, repo_name }) catch {
+            ui.allocator.destroy(ctx);
+            lua.unref(ziglua.registry_index, callback_ref);
             lua.pushNil();
             _ = lua.pushString("Path too long");
             return 2;
         };
+        ctx.target_dir_len = target_dir.len;
 
-        // Check if directory exists
+        @memcpy(ctx.branch_buf[0..branch.len], branch);
+        ctx.branch_len = branch.len;
+        @memcpy(ctx.repo_buf[0..repo.len], repo);
+        ctx.repo_len = repo.len;
+        ctx.ui = ui;
+        ctx.callback_ref = callback_ref;
+        ctx.child = undefined;
+
         const dir_exists = blk: {
             std.fs.accessAbsolute(target_dir, .{}) catch {
                 break :blk false;
@@ -1000,78 +1067,116 @@ pub const UI = struct {
         };
 
         if (dir_exists) {
-            // Directory exists - do git fetch and checkout if branch specified
             if (!std.mem.eql(u8, branch, "HEAD")) {
-                const fetch_result = std.process.Child.run(.{
-                    .allocator = alloc,
-                    .argv = &.{ "git", "fetch", "origin", branch },
-                    .cwd = target_dir,
-                }) catch {
-                    // Fetch failed, but directory exists - continue anyway
-                    _ = lua.pushString(target_dir);
-                    return 1;
+                ctx.operation = .fetch;
+                spawnGitOperation(ctx, plugin_root) catch |err| {
+                    cleanupGitContext(ctx, err);
                 };
-                alloc.free(fetch_result.stdout);
-                alloc.free(fetch_result.stderr);
-
-                const checkout_result = std.process.Child.run(.{
-                    .allocator = alloc,
-                    .argv = &.{ "git", "checkout", branch },
-                    .cwd = target_dir,
-                }) catch {
-                    _ = lua.pushString(target_dir);
-                    return 1;
-                };
-                alloc.free(checkout_result.stdout);
-                alloc.free(checkout_result.stderr);
+            } else {
+                callGitCallback(ctx, null);
             }
-            _ = lua.pushString(target_dir);
-            return 1;
+        } else {
+            ctx.operation = .clone;
+            spawnGitOperation(ctx, plugin_root) catch |err| {
+                cleanupGitContext(ctx, err);
+            };
         }
 
-        // Directory doesn't exist - clone the repo
-        var url_buf: [512]u8 = undefined;
-        const clone_url = std.fmt.bufPrint(&url_buf, "https://github.com/{s}.git", .{repo}) catch {
-            lua.pushNil();
-            _ = lua.pushString("URL too long");
-            return 2;
-        };
+        return 0;
+    }
 
-        const clone_result = std.process.Child.run(.{
-            .allocator = alloc,
-            .argv = if (std.mem.eql(u8, branch, "HEAD"))
+    fn spawnGitOperation(ctx: *GitContext, plugin_root: []const u8) !void {
+        const target_dir = ctx.getTargetDir();
+        const branch = ctx.getBranch();
+        const repo = ctx.getRepo();
+
+        var url_buf: [git_clone_url_max_len]u8 = undefined;
+        const clone_url = std.fmt.bufPrint(&url_buf, "https://github.com/{s}.git", .{repo}) catch return error.UrlTooLong;
+
+        const argv: []const []const u8 = switch (ctx.operation) {
+            .clone => if (std.mem.eql(u8, branch, "HEAD"))
                 &.{ "git", "clone", "--depth", "1", clone_url, target_dir }
             else
                 &.{ "git", "clone", "--depth", "1", "-b", branch, clone_url, target_dir },
-            .cwd = plugin_root,
-        }) catch |err| {
-            lua.pushNil();
-            var err_buf: [256]u8 = undefined;
-            const err_msg = std.fmt.bufPrint(&err_buf, "git clone failed: {s}", .{@errorName(err)}) catch "git clone failed";
-            _ = lua.pushString(err_msg);
-            return 2;
-        };
-        defer alloc.free(clone_result.stdout);
-        defer alloc.free(clone_result.stderr);
-
-        const success = switch (clone_result.term) {
-            .Exited => |code| code == 0,
-            else => false,
+            .fetch => &.{ "git", "fetch", "origin", branch },
+            .checkout => &.{ "git", "checkout", branch },
         };
 
-        if (!success) {
-            lua.pushNil();
-            if (clone_result.stderr.len > 0) {
-                const trimmed = std.mem.trimRight(u8, clone_result.stderr, "\n\r");
-                _ = lua.pushString(trimmed);
-            } else {
-                _ = lua.pushString("git clone failed");
-            }
-            return 2;
+        ctx.child = std.process.Child.init(argv, ctx.ui.allocator);
+        ctx.child.cwd = switch (ctx.operation) {
+            .clone => plugin_root,
+            .fetch, .checkout => target_dir,
+        };
+
+        try ctx.child.spawn();
+
+        _ = try ctx.ui.loop.?.waitpid(ctx.child.id, .{
+            .ptr = ctx,
+            .cb = onGitComplete,
+        });
+    }
+
+    fn onGitComplete(loop: *io.Loop, completion: io.Completion) !void {
+        _ = loop;
+        const ctx = completion.userdataCast(GitContext);
+
+        if (completion.result == .err) {
+            cleanupGitContext(ctx, completion.result.err);
+            return;
         }
 
-        _ = lua.pushString(target_dir);
-        return 1;
+        const result = completion.result.waitpid;
+        const exit_code = (result.status >> 8) & 0xFF;
+        const signaled = (result.status & 0x7F) != 0;
+
+        if (signaled or exit_code != 0) {
+            if (ctx.operation == .fetch) {
+                callGitCallback(ctx, null);
+                return;
+            }
+            callGitCallback(ctx, "git operation failed");
+            return;
+        }
+
+        switch (ctx.operation) {
+            .clone => callGitCallback(ctx, null),
+            .fetch => {
+                ctx.operation = .checkout;
+                spawnGitOperation(ctx, "") catch |err| {
+                    cleanupGitContext(ctx, err);
+                };
+            },
+            .checkout => callGitCallback(ctx, null),
+        }
+    }
+
+    fn callGitCallback(ctx: *GitContext, err_msg: ?[]const u8) void {
+        const lua = ctx.ui.lua;
+
+        _ = lua.rawGetIndex(ziglua.registry_index, ctx.callback_ref);
+
+        if (err_msg) |msg| {
+            lua.pushNil();
+            _ = lua.pushString(msg);
+        } else {
+            _ = lua.pushString(ctx.getTargetDir());
+            lua.pushNil();
+        }
+
+        lua.protectedCall(.{ .args = 2, .results = 0, .msg_handler = 0 }) catch {
+            const lua_err = lua.toString(-1) catch "Unknown error";
+            log.err("Lua git callback error: {s}", .{lua_err});
+            lua.pop(1);
+        };
+
+        lua.unref(ziglua.registry_index, ctx.callback_ref);
+        ctx.ui.allocator.destroy(ctx);
+    }
+
+    fn cleanupGitContext(ctx: *GitContext, err: anyerror) void {
+        var err_buf: [256]u8 = undefined;
+        const err_msg = std.fmt.bufPrint(&err_buf, "git operation failed: {s}", .{@errorName(err)}) catch "git operation failed";
+        callGitCallback(ctx, err_msg);
     }
 
     fn setTimeout(lua: *ziglua.Lua) i32 {

@@ -169,34 +169,50 @@ function M.setup(raw_specs, user_cfg)
             end
 
             if not spec.lazy then
-                M.load(spec.name)
+                if spec.is_local then
+                    M.load(spec.name)
+                else
+                    table.insert(M.deferred_loads, spec.name)
+                end
             end
         end
     end
 end
 
----Get plugin directory path
----For local plugins, returns the dir directly
----For remote plugins, calls prise.ensure_plugin to clone/update
+---Load all deferred remote plugins (call this when event loop is ready)
+function M.load_deferred()
+    local to_load = M.deferred_loads
+    M.deferred_loads = {}
+    for _, name in ipairs(to_load) do
+        M.load(name)
+    end
+end
+
+---Get plugin directory path (async for remote plugins)
+---For local plugins, calls callback immediately with dir
+---For remote plugins, calls prise.ensure_plugin which calls back when done
 ---@param spec table Normalized spec
----@return string? dir, string? error
-local function get_plugin_dir(spec)
+---@param callback fun(dir: string?, err: string?)
+local function get_plugin_dir(spec, callback)
     if spec.is_local then
-        return spec.dir, nil
+        callback(spec.dir, nil)
+        return
     end
 
     local prise = require("prise")
     if prise.ensure_plugin then
         print("[prise.plugins] cloning/updating " .. spec.repo .. " branch=" .. tostring(spec.branch))
-        local dir, err = prise.ensure_plugin(spec.repo, spec.branch)
-        if dir then
-            print("[prise.plugins] plugin dir: " .. dir)
-        else
-            print("[prise.plugins] ensure_plugin error: " .. tostring(err))
-        end
-        return dir, err
+        prise.ensure_plugin(spec.repo, spec.branch, function(dir, err)
+            if dir then
+                print("[prise.plugins] plugin dir: " .. dir)
+            else
+                print("[prise.plugins] ensure_plugin error: " .. tostring(err))
+            end
+            callback(dir, err)
+        end)
+    else
+        callback(nil, "ensure_plugin not available")
     end
-    return nil, "ensure_plugin not available"
 end
 
 ---Add plugin lua paths to package.path
@@ -208,47 +224,32 @@ local function add_plugin_paths(dir)
     end
 end
 
----Load a plugin by name
+---@type table<string, boolean> Plugins currently being loaded (to prevent duplicate loads)
+M.loading = {}
+
+---@type string[] Names of remote plugins queued for loading when event loop is ready
+M.deferred_loads = {}
+
+---Finish loading a plugin after its directory is available
 ---@param name string Plugin name
+---@param spec table Normalized spec
+---@param dir string Plugin directory
 ---@return table|nil plugin The loaded plugin module or nil
-function M.load(name)
-    if M.loaded[name] then
-        if M.loaded[name] == true then
-            return nil
-        end
-        ---@diagnostic disable-next-line: return-type-mismatch
-        return M.loaded[name]
-    end
-
-    local spec = M.specs[name]
-    if not spec then
-        print("[prise.plugins] unknown plugin: " .. name)
-        return nil
-    end
-
-    if not is_enabled(spec) then
-        M.loaded[name] = false
-        return nil
-    end
-
-    local dir, dir_err = get_plugin_dir(spec)
-    if dir then
-        add_plugin_paths(dir)
-    elseif dir_err then
-        print("[prise.plugins] failed to get plugin dir for '" .. name .. "': " .. tostring(dir_err))
-        M.loaded[name] = false
-        return nil
-    end
+local function finish_load(name, spec, dir)
+    add_plugin_paths(dir)
 
     local ok, plugin_or_err = pcall(require, spec.name)
     if not ok then
         print("[prise.plugins] failed to load '" .. name .. "': " .. tostring(plugin_or_err))
         M.loaded[name] = false
+        M.loading[name] = nil
         return nil
     end
 
+    ---@type table|nil
     local plugin = plugin_or_err
     M.loaded[name] = plugin or true
+    M.loading[name] = nil
 
     if type(spec.config) == "function" then
         local config_ok, config_err = pcall(spec.config, plugin, spec.opts, M.user_config)
@@ -265,6 +266,66 @@ function M.load(name)
     M.emit("plugin_loaded", { name = name, plugin = plugin })
 
     return plugin
+end
+
+---Load a plugin by name (async for remote plugins)
+---@param name string Plugin name
+---@param callback? fun(plugin: table|nil) Optional callback when load completes
+---@return table|nil plugin The loaded plugin module or nil (for already-loaded plugins)
+function M.load(name, callback)
+    if M.loaded[name] then
+        ---@type table|nil
+        local plugin = nil
+        local loaded_val = M.loaded[name]
+        if type(loaded_val) == "table" then
+            plugin = loaded_val
+        end
+        if callback then
+            callback(plugin)
+        end
+        return plugin
+    end
+
+    if M.loading[name] then
+        return nil
+    end
+
+    local spec = M.specs[name]
+    if not spec then
+        print("[prise.plugins] unknown plugin: " .. name)
+        if callback then
+            callback(nil)
+        end
+        return nil
+    end
+
+    if not is_enabled(spec) then
+        M.loaded[name] = false
+        if callback then
+            callback(nil)
+        end
+        return nil
+    end
+
+    M.loading[name] = true
+
+    get_plugin_dir(spec, function(dir, dir_err)
+        if dir then
+            local plugin = finish_load(name, spec, dir)
+            if callback then
+                callback(plugin)
+            end
+        else
+            print("[prise.plugins] failed to get plugin dir for '" .. name .. "': " .. tostring(dir_err))
+            M.loaded[name] = false
+            M.loading[name] = nil
+            if callback then
+                callback(nil)
+            end
+        end
+    end)
+
+    return nil
 end
 
 ---Load all plugins triggered by a specific key

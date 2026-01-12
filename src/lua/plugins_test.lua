@@ -75,6 +75,7 @@ local function test_hooks()
     plugins.event_triggers = {}
 
     local called = false
+    ---@type table?
     local received_payload = nil
 
     plugins.on("test_hook", function(payload)
@@ -85,6 +86,7 @@ local function test_hooks()
     plugins.emit("test_hook", { foo = "bar" })
 
     assert(called, "hook should be called")
+    assert(received_payload ~= nil, "payload should not be nil")
     assert(received_payload.foo == "bar", "payload should be passed")
 
     print("PASS: test_hooks")
@@ -205,6 +207,7 @@ local function test_enabled_function()
     })
 
     local info = plugins.info("testplugin")
+    assert(info ~= nil, "info should not be nil")
     assert(enabled_called, "enabled function should be called")
     assert(info.enabled == false, "should be disabled")
 

@@ -411,6 +411,8 @@ local state = {
         pending = false,
         resize_mode = false,
     },
+    -- Whether deferred plugins have been loaded
+    deferred_plugins_loaded = false,
 }
 
 local M = {}
@@ -2192,6 +2194,14 @@ end
 ---@param event Event
 function M.update(event)
     local plugins = get_plugins()
+
+    -- Load deferred remote plugins on first update (event loop is now ready)
+    if not state.deferred_plugins_loaded then
+        state.deferred_plugins_loaded = true
+        if plugins then
+            plugins.load_deferred()
+        end
+    end
 
     -- Emit before_update hook
     if plugins then
