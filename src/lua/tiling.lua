@@ -3464,26 +3464,43 @@ local function build_widget_section(widget_specs, side)
     local segments = {}
     local total_width = 0
     local last_bg = nil
-    local is_first = true
+    local visible_index = 0 -- Track visible widget count for alternating backgrounds
+
+    -- Background colors for automatic alternation (used when widgets don't define unique colors)
+    local alt_backgrounds = { THEME.bg3, THEME.bg4 }
 
     for i, widget_spec in ipairs(widget_specs or {}) do
         local widget = normalize_widget(widget_spec)
         if widget then
             local result = widget.render(state, THEME)
             if result then -- nil means widget should be hidden
+                visible_index = visible_index + 1
+
+                -- Auto-assign alternating background if widget uses default bg3
+                -- This ensures visual separation between adjacent widgets
+                local widget_bg = result.style.bg
+                if side == "right" or side == "center" then
+                    -- For right/center, auto-alternate backgrounds for visual separation
+                    local alt_idx = ((visible_index - 1) % 2) + 1
+                    widget_bg = alt_backgrounds[alt_idx]
+                    result.style.bg = widget_bg
+                end
+
                 -- Add powerline separator between widgets (not before first)
-                if not is_first and last_bg then
+                if visible_index > 1 and last_bg then
                     if side == "right" then
                         -- Right side: arrow points left
+                        -- fg = color of arrow (next segment's bg), bg = previous segment's bg
                         table.insert(segments, {
                             text = POWERLINE_SYMBOLS.left_solid,
-                            style = { fg = result.style.bg, bg = last_bg },
+                            style = { fg = widget_bg, bg = last_bg },
                         })
                     else
                         -- Left/center: arrow points right
+                        -- fg = previous segment's bg, bg = next segment's bg
                         table.insert(segments, {
                             text = POWERLINE_SYMBOLS.right_solid,
-                            style = { fg = last_bg, bg = result.style.bg },
+                            style = { fg = last_bg, bg = widget_bg },
                         })
                     end
                     total_width = total_width + 1
@@ -3491,8 +3508,7 @@ local function build_widget_section(widget_specs, side)
 
                 table.insert(segments, result)
                 total_width = total_width + prise.gwidth(result.text)
-                last_bg = result.style.bg
-                is_first = false
+                last_bg = widget_bg
 
                 -- Schedule timer if widget has interval
                 if widget.interval then
