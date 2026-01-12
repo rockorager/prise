@@ -188,6 +188,17 @@ function M.load_deferred()
     end
 end
 
+---Update plugin status in the UI modal
+---@param name string Plugin name
+---@param status "cloning"|"updating"|"done"|"error"
+---@param message? string Optional message
+local function set_status(name, status, message)
+    local ok, tiling = pcall(require, "prise_tiling_ui")
+    if ok and tiling.set_plugin_status then
+        tiling.set_plugin_status(name, status, message)
+    end
+end
+
 ---Get plugin directory path (async for remote plugins)
 ---For local plugins, calls callback immediately with dir
 ---For remote plugins, calls prise.ensure_plugin which calls back when done
@@ -201,12 +212,12 @@ local function get_plugin_dir(spec, callback)
 
     local prise = require("prise")
     if prise.ensure_plugin then
-        print("[prise.plugins] cloning/updating " .. spec.repo .. " branch=" .. tostring(spec.branch))
+        set_status(spec.name, "cloning")
         prise.ensure_plugin(spec.repo, spec.branch, function(dir, err)
             if dir then
-                print("[prise.plugins] plugin dir: " .. dir)
+                set_status(spec.name, "done")
             else
-                print("[prise.plugins] ensure_plugin error: " .. tostring(err))
+                set_status(spec.name, "error", tostring(err))
             end
             callback(dir, err)
         end)
@@ -240,7 +251,7 @@ local function finish_load(name, spec, dir)
 
     local ok, plugin_or_err = pcall(require, spec.name)
     if not ok then
-        print("[prise.plugins] failed to load '" .. name .. "': " .. tostring(plugin_or_err))
+        set_status(name, "error", "load failed")
         M.loaded[name] = false
         M.loading[name] = nil
         return nil
@@ -254,13 +265,19 @@ local function finish_load(name, spec, dir)
     if type(spec.config) == "function" then
         local config_ok, config_err = pcall(spec.config, plugin, spec.opts, M.user_config)
         if not config_ok then
-            print("[prise.plugins] config error for '" .. name .. "': " .. tostring(config_err))
+            set_status(name, "error", tostring(config_err))
         end
     elseif plugin and type(plugin.setup) == "function" then
         local setup_ok, setup_err = pcall(plugin.setup, spec.opts, M.user_config)
         if not setup_ok then
-            print("[prise.plugins] setup error for '" .. name .. "': " .. tostring(setup_err))
+            set_status(name, "error", tostring(setup_err))
         end
+    end
+
+    -- Invalidate keybind matcher in case plugin modified keybinds
+    local tiling_ok, tiling = pcall(require, "prise_tiling_ui")
+    if tiling_ok and tiling.invalidate_keybinds then
+        tiling.invalidate_keybinds()
     end
 
     M.emit("plugin_loaded", { name = name, plugin = plugin })
@@ -292,7 +309,6 @@ function M.load(name, callback)
 
     local spec = M.specs[name]
     if not spec then
-        print("[prise.plugins] unknown plugin: " .. name)
         if callback then
             callback(nil)
         end
@@ -316,7 +332,7 @@ function M.load(name, callback)
                 callback(plugin)
             end
         else
-            print("[prise.plugins] failed to get plugin dir for '" .. name .. "': " .. tostring(dir_err))
+            set_status(name, "error", dir_err)
             M.loaded[name] = false
             M.loading[name] = nil
             if callback then
@@ -435,6 +451,18 @@ end
 ---@return boolean
 function M.is_loaded(name)
     return M.loaded[name] ~= nil and M.loaded[name] ~= false
+end
+
+---Get a loaded plugin module safely
+---Returns nil if plugin is not loaded yet or failed to load
+---@param name string Plugin name
+---@return table? plugin The plugin module or nil
+function M.get(name)
+    local loaded = M.loaded[name]
+    if loaded and type(loaded) == "table" then
+        return loaded
+    end
+    return nil
 end
 
 return M

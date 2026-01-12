@@ -413,6 +413,11 @@ local state = {
     },
     -- Whether deferred plugins have been loaded
     deferred_plugins_loaded = false,
+    -- Plugin status modal
+    plugin_status = {
+        visible = false,
+        operations = {}, -- { name = string, status = "cloning"|"updating"|"done"|"error", message = string? }
+    },
 }
 
 local M = {}
@@ -455,6 +460,30 @@ end
 ---@return string
 function M.get_macos_option_as_alt()
     return config.macos_option_as_alt or "false"
+end
+
+---Register a keybind dynamically (e.g., from a plugin)
+---This invalidates the keybind matcher so changes take effect immediately
+---@param key string The key sequence (e.g., "<leader>x")
+---@param action string|function The action name or function
+function M.register_keybind(key, action)
+    config.keybinds[key] = action
+    state.keybind_matcher = nil
+end
+
+---Register multiple keybinds dynamically
+---@param bindings table<string, string|function> Map of key to action
+function M.register_keybinds(bindings)
+    for key, action in pairs(bindings) do
+        config.keybinds[key] = action
+    end
+    state.keybind_matcher = nil
+end
+
+---Invalidate the keybind matcher (forces recompilation on next key event)
+---Called automatically after plugin config runs
+function M.invalidate_keybinds()
+    state.keybind_matcher = nil
 end
 
 local RESIZE_STEP = 0.05 -- 5% step for keyboard resize
@@ -3247,6 +3276,101 @@ local function build_session_picker()
     })
 end
 
+---Build the plugin status modal
+---@return table?
+local function build_plugin_status()
+    if not state.plugin_status.visible then
+        return nil
+    end
+
+    local ops = state.plugin_status.operations
+    if #ops == 0 then
+        return nil
+    end
+
+    local modal_style = { bg = THEME.bg1, fg = THEME.fg_bright }
+    local MODAL_WIDTH = 50
+
+    local items = {}
+    local all_done = true
+
+    for _, op in ipairs(ops) do
+        local icon, color
+        if op.status == "cloning" then
+            icon = "◐"
+            color = THEME.accent
+            all_done = false
+        elseif op.status == "updating" then
+            icon = "◑"
+            color = THEME.yellow
+            all_done = false
+        elseif op.status == "done" then
+            icon = "✓"
+            color = THEME.green
+        else
+            icon = "✗"
+            color = "#f38ba8"
+        end
+
+        local text = icon .. " " .. op.name
+        if op.message then
+            text = text .. " - " .. op.message
+        end
+
+        table.insert(
+            items,
+            prise.Text({
+                text = text,
+                style = { fg = color, bg = THEME.bg1 },
+            })
+        )
+    end
+
+    -- Auto-hide after all operations complete
+    if all_done then
+        if not state.plugin_status.hide_timer then
+            state.plugin_status.hide_timer = prise.set_timeout(1500, function()
+                state.plugin_status.visible = false
+                state.plugin_status.operations = {}
+                state.plugin_status.hide_timer = nil
+                prise.request_frame()
+            end)
+        end
+    end
+
+    return prise.Positioned({
+        anchor = "top_center",
+        y = 3,
+        child = prise.Box({
+            border = "rounded",
+            max_width = MODAL_WIDTH,
+            style = modal_style,
+            child = prise.Padding({
+                top = 1,
+                bottom = 1,
+                left = 2,
+                right = 2,
+                child = prise.Column({
+                    cross_axis_align = "stretch",
+                    children = {
+                        prise.Text({
+                            text = "  Plugins",
+                            style = { fg = THEME.fg_dim, bg = THEME.bg1, bold = true },
+                        }),
+                        prise.Text({
+                            text = string.rep("─", MODAL_WIDTH - 4),
+                            style = { fg = THEME.bg3, bg = THEME.bg1 },
+                        }),
+                        prise.Column({
+                            children = items,
+                        }),
+                    },
+                }),
+            }),
+        }),
+    })
+end
+
 ---Resolve the display title for a tab
 ---@param tab Tab
 ---@param is_active boolean
@@ -3690,6 +3814,7 @@ function M.view()
     local rename_tab = build_rename_tab()
     local swap_with_index = build_swap_with_index()
     local session_picker = build_session_picker()
+    local plugin_status = build_plugin_status()
     local floating = build_floating()
     local tab_bar = build_tab_bar()
     prise.log.debug("view: palette.visible=" .. tostring(state.palette.visible))
@@ -3757,6 +3882,14 @@ function M.view()
     local modal = palette or rename or rename_tab or swap_with_index or session_picker
     if modal then
         table.insert(overlay_children, modal)
+        return prise.Stack({
+            children = overlay_children,
+        })
+    end
+
+    -- Plugin status modal (shown alongside other content, doesn't block input)
+    if plugin_status then
+        table.insert(overlay_children, plugin_status)
         return prise.Stack({
             children = overlay_children,
         })
@@ -3871,6 +4004,37 @@ function M.set_state(saved, pty_lookup)
         end
     end
 
+    prise.request_frame()
+end
+
+---Set plugin operation status (called by plugin manager)
+---@param name string Plugin name
+---@param status "cloning"|"updating"|"done"|"error"
+---@param message? string Optional message
+function M.set_plugin_status(name, status, message)
+    -- Find existing operation or add new one
+    local found = false
+    for _, op in ipairs(state.plugin_status.operations) do
+        if op.name == name then
+            op.status = status
+            op.message = message
+            found = true
+            break
+        end
+    end
+    if not found then
+        table.insert(state.plugin_status.operations, {
+            name = name,
+            status = status,
+            message = message,
+        })
+    end
+    state.plugin_status.visible = true
+    -- Cancel any pending hide timer when new operations come in
+    if state.plugin_status.hide_timer and status ~= "done" and status ~= "error" then
+        state.plugin_status.hide_timer:cancel()
+        state.plugin_status.hide_timer = nil
+    end
     prise.request_frame()
 end
 

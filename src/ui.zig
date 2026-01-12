@@ -1107,6 +1107,8 @@ pub const UI = struct {
             .clone => plugin_root,
             .fetch, .checkout => target_dir,
         };
+        ctx.child.stdout_behavior = .Ignore;
+        ctx.child.stderr_behavior = .Ignore;
 
         try ctx.child.spawn();
 
