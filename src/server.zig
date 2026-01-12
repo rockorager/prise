@@ -2270,9 +2270,15 @@ const Server = struct {
             log.info("Writing initial command to PTY {}: {s}", .{ pty_id, cmd });
             const cmd_with_newline = try std.fmt.allocPrint(self.allocator, "{s}\n", .{cmd});
             defer self.allocator.free(cmd_with_newline);
-            _ = posix.write(process.master, cmd_with_newline) catch |err| {
-                log.warn("Failed to write initial command to PTY {}: {}", .{ pty_id, err });
-            };
+
+            var total_written: usize = 0;
+            while (total_written < cmd_with_newline.len) {
+                const written = posix.write(process.master, cmd_with_newline[total_written..]) catch |err| {
+                    log.warn("Failed to write initial command to PTY {}: {}", .{ pty_id, err });
+                    break;
+                };
+                total_written += written;
+            }
         }
 
         log.info("Created PTY {} with PID {}", .{ pty_id, process.pid });
