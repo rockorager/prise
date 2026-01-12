@@ -1404,6 +1404,86 @@ local function cleanup_new_ptys(pty_queue, start_idx)
     end
 end
 
+---Build a floating pane from layout definition
+---@param floating_def table The floating definition from layout
+---@param pty Pty The PTY for the floating pane
+---@return FloatingPane
+local function build_floating_pane(floating_def, pty)
+    return {
+        pane = {
+            type = "pane",
+            id = pty:id(),
+            pty = pty,
+        },
+        visible = floating_def.visible ~= false,
+    }
+end
+
+---Close all PTYs in existing tabs
+---@param tabs Tab[]
+local function close_old_tabs(tabs)
+    for _, tab in ipairs(tabs) do
+        local panes = collect_panes(tab.root, {})
+        for _, pane in ipairs(panes) do
+            if pane.pty and pane.pty.close then
+                pane.pty:close()
+            end
+        end
+        if tab.floating and tab.floating.pane and tab.floating.pane.pty and tab.floating.pane.pty.close then
+            tab.floating.pane.pty:close()
+        end
+    end
+end
+
+---Build tabs from layout definition
+---@param layout PriseLayout
+---@param pty_queue Pty[]
+---@return Tab[]? new_tabs
+---@return number? new_floating_width
+---@return number? new_floating_height
+---@return boolean? new_floating_visible
+---@return number queue_idx Final queue index (for verification)
+local function build_tabs_from_layout(layout, pty_queue)
+    local new_tabs = {}
+    local queue_idx = 1
+    local new_floating_width = state.floating.width
+    local new_floating_height = state.floating.height
+    local new_floating_visible = state.floating.visible
+
+    for tab_index, tab_def in ipairs(layout.tabs) do
+        local root, new_idx, err = build_node_from_layout(tab_def.root, pty_queue, queue_idx)
+        if not root then
+            prise.log.error(string.format("Layout: failed to build tab %d: %s", tab_index, err or "unknown"))
+            cleanup_new_ptys(pty_queue, queue_idx)
+            return nil, nil, nil, nil, queue_idx
+        end
+        queue_idx = new_idx
+
+        ---@type Tab
+        local tab = {
+            id = tab_index,
+            title = tab_def.title,
+            root = root,
+            last_focused_id = root and (is_pane(root) and root.id or get_first_leaf(root) and get_first_leaf(root).id),
+        }
+
+        if tab_def.floating and tab_def.floating.pane then
+            local floating_pty = pty_queue[queue_idx]
+            if floating_pty then
+                queue_idx = queue_idx + 1
+                tab.floating = build_floating_pane(tab_def.floating, floating_pty)
+                new_floating_width = tab_def.floating.width or new_floating_width
+                new_floating_height = tab_def.floating.height or new_floating_height
+                new_floating_visible = tab.floating.visible
+            end
+        end
+
+        table.insert(new_tabs, tab)
+    end
+
+    return new_tabs, new_floating_width, new_floating_height, new_floating_visible, queue_idx
+end
+
 ---Finalize a pending layout once all PTYs have been received
 ---@param pending table
 local function finalize_layout(pending)
@@ -1421,55 +1501,11 @@ local function finalize_layout(pending)
     end
 
     -- Build new tab structures in memory first (before destroying old state)
-    local new_tabs = {}
-    local queue_idx = 1
-    local new_floating_width = state.floating.width
-    local new_floating_height = state.floating.height
-    local new_floating_visible = state.floating.visible
-
-    for tab_index, tab_def in ipairs(layout.tabs) do
-        local root, new_idx, err = build_node_from_layout(tab_def.root, pty_queue, queue_idx)
-        if not root then
-            prise.log.error(string.format("Layout: failed to build tab %d: %s", tab_index, err or "unknown"))
-            cleanup_new_ptys(pty_queue, queue_idx)
-            state.pending_layout = nil
-            return
-        end
-        queue_idx = new_idx
-
-        ---@type Tab
-        local tab = {
-            id = tab_index,
-            title = tab_def.title,
-            root = root,
-            last_focused_id = root and (is_pane(root) and root.id or get_first_leaf(root) and get_first_leaf(root).id),
-        }
-
-        -- Handle floating pane for this tab
-        if tab_def.floating and tab_def.floating.pane then
-            local floating_pty = pty_queue[queue_idx]
-            if floating_pty then
-                queue_idx = queue_idx + 1
-                local float_visible = tab_def.floating.visible ~= false
-                tab.floating = {
-                    pane = {
-                        type = "pane",
-                        id = floating_pty:id(),
-                        pty = floating_pty,
-                    },
-                    visible = float_visible,
-                }
-                if tab_def.floating.width then
-                    new_floating_width = tab_def.floating.width
-                end
-                if tab_def.floating.height then
-                    new_floating_height = tab_def.floating.height
-                end
-                new_floating_visible = float_visible
-            end
-        end
-
-        table.insert(new_tabs, tab)
+    local new_tabs, new_floating_width, new_floating_height, new_floating_visible, queue_idx =
+        build_tabs_from_layout(layout, pty_queue)
+    if not new_tabs then
+        state.pending_layout = nil
+        return
     end
 
     -- Verify we used all PTYs
@@ -1481,17 +1517,7 @@ local function finalize_layout(pending)
     end
 
     -- Build succeeded - now safely close old PTYs/tabs
-    for _, tab in ipairs(state.tabs) do
-        local panes = collect_panes(tab.root, {})
-        for _, pane in ipairs(panes) do
-            if pane.pty and pane.pty.close then
-                pane.pty:close()
-            end
-        end
-        if tab.floating and tab.floating.pane and tab.floating.pane.pty then
-            tab.floating.pane.pty:close()
-        end
-    end
+    close_old_tabs(state.tabs)
 
     -- Swap in new state
     state.tabs = new_tabs
@@ -2789,8 +2815,8 @@ function M.update(event)
             elseif k == "ArrowDown" or (k == "n" and event.data.ctrl) then
                 if state.session_picker.selected < #filtered then
                     state.session_picker.selected = state.session_picker.selected + 1
-                    -- Adjust scroll if needed (visible height approx screen_rows - 15)
-                    local visible_height = math.max(1, state.screen_rows - 15)
+                    -- Adjust scroll if needed (items_start_y = 8, plus 1 for bottom padding)
+                    local visible_height = math.max(1, state.screen_rows - 9)
                     if state.session_picker.selected > state.session_picker.scroll_offset + visible_height then
                         state.session_picker.scroll_offset = state.session_picker.selected - visible_height
                     end
@@ -2865,7 +2891,8 @@ function M.update(event)
             elseif k == "ArrowDown" or (k == "n" and event.data.ctrl) then
                 if state.layout_picker.selected < #names then
                     state.layout_picker.selected = state.layout_picker.selected + 1
-                    local visible_height = math.max(1, state.screen_rows - 15)
+                    -- items_start_y = 8, plus 1 for bottom padding
+                    local visible_height = math.max(1, state.screen_rows - 9)
                     if state.layout_picker.selected > state.layout_picker.scroll_offset + visible_height then
                         state.layout_picker.scroll_offset = state.layout_picker.selected - visible_height
                     end
@@ -3445,7 +3472,7 @@ local function build_palette()
     if has_commands then
         -- Calculate visible height: screen height minus palette header and padding
         -- Subtract: palette_y (5) + padding (2) + input (1) + separator (1) + bottom padding (1)
-        local available_height = state.screen_rows - items_start_y - 1
+        local available_height = math.max(1, state.screen_rows - items_start_y - 1)
         local visible_count = math.min(#items - state.palette.scroll_offset, available_height)
         for display_row = 1, visible_count do
             local item_index = state.palette.scroll_offset + display_row
@@ -3602,7 +3629,7 @@ local function build_session_picker()
     local items_start_y = 5 + 1 + 1 + 1 -- palette_y + padding + input + separator
     state.session_picker.regions = {}
     if has_sessions then
-        local available_height = state.screen_rows - items_start_y - 1
+        local available_height = math.max(1, state.screen_rows - items_start_y - 1)
         local visible_count = math.min(#items - state.session_picker.scroll_offset, available_height)
         for display_row = 1, visible_count do
             local item_index = state.session_picker.scroll_offset + display_row
@@ -3697,7 +3724,7 @@ local function build_layout_picker()
 
     local items_start_y = 5 + 1 + 1 + 1
     state.layout_picker.regions = {}
-    local available_height = state.screen_rows - items_start_y - 1
+    local available_height = math.max(1, state.screen_rows - items_start_y - 1)
     local visible_count = math.min(#items - state.layout_picker.scroll_offset, available_height)
     for display_row = 1, visible_count do
         local item_index = state.layout_picker.scroll_offset + display_row
