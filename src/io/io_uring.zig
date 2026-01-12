@@ -26,6 +26,8 @@ pub const Loop = struct {
         buf: []u8 = &.{},
         timespec: linux.kernel_timespec = undefined,
         fd: posix.socket_t = undefined,
+        pid: posix.pid_t = undefined,
+        pidfd: posix.fd_t = undefined,
     };
 
     const OpKind = enum {
@@ -37,6 +39,7 @@ pub const Loop = struct {
         send,
         close,
         timer,
+        waitpid,
     };
 
     pub fn init(allocator: std.mem.Allocator) !Loop {
@@ -224,6 +227,34 @@ pub const Loop = struct {
         return root.Task{ .id = id, .ctx = ctx };
     }
 
+    pub fn waitpid(
+        self: *Loop,
+        pid: posix.pid_t,
+        ctx: root.Context,
+    ) !root.Task {
+        const id = self.next_id;
+        self.next_id += 1;
+
+        // Open a pidfd for the process
+        const rc = linux.pidfd_open(pid, 0);
+        const pidfd: posix.fd_t = if (linux.E.init(rc) != .SUCCESS)
+            return posix.unexpectedErrno(linux.E.init(rc))
+        else
+            @intCast(rc);
+
+        try self.pending.put(id, .{
+            .ctx = ctx,
+            .kind = .waitpid,
+            .pid = pid,
+            .pidfd = pidfd,
+        });
+
+        // Poll the pidfd for readability (signals process exit)
+        _ = try self.ring.poll_add(id, pidfd, linux.POLL.IN);
+
+        return root.Task{ .id = id, .ctx = ctx };
+    }
+
     pub fn cancel(self: *Loop, id: usize) !void {
         if (!self.pending.contains(id)) {
             return;
@@ -240,7 +271,8 @@ pub const Loop = struct {
 
         var it = self.pending.iterator();
         while (it.next()) |entry| {
-            if (entry.value_ptr.kind != .timer and entry.value_ptr.fd == fd) {
+            const kind = entry.value_ptr.kind;
+            if (kind != .timer and kind != .waitpid and entry.value_ptr.fd == fd) {
                 ids_to_cancel.append(self.allocator, entry.key_ptr.*) catch {};
             }
         }
@@ -300,6 +332,16 @@ pub const Loop = struct {
             .send => .{ .send = @intCast(cqe.res) },
             .close => .{ .close = {} },
             .timer => .{ .timer = {} },
+            .waitpid => blk: {
+                // Close the pidfd now that the process has exited
+                posix.close(op.pidfd);
+                // Reap the process to get exit status
+                const wait_result = posix.waitpid(op.pid, posix.W.NOHANG);
+                break :blk .{ .waitpid = .{
+                    .pid = wait_result.pid,
+                    .status = wait_result.status,
+                } };
+            },
         };
 
         try self.invokeCallback(ctx, result);
