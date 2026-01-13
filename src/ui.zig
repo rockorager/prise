@@ -39,14 +39,21 @@ const GitContext = struct {
     child: std.process.Child,
     target_dir_buf: [std.fs.max_path_bytes]u8,
     target_dir_len: usize,
+    plugin_root_buf: [std.fs.max_path_bytes]u8,
+    plugin_root_len: usize,
     branch_buf: [256]u8,
     branch_len: usize,
     repo_buf: [256]u8,
     repo_len: usize,
     operation: GitOperation,
+    initial_operation: GitOperation,
 
     fn getTargetDir(self: *const GitContext) []const u8 {
         return self.target_dir_buf[0..self.target_dir_len];
+    }
+
+    fn getPluginRoot(self: *const GitContext) []const u8 {
+        return self.plugin_root_buf[0..self.plugin_root_len];
     }
 
     fn getBranch(self: *const GitContext) []const u8 {
@@ -992,7 +999,11 @@ pub const UI = struct {
 
         const branch = lua.toString(2) catch "HEAD";
 
-        lua.checkType(3, .function);
+        if (lua.getTop() < 3 or lua.typeOf(3) != .function) {
+            lua.pushNil();
+            _ = lua.pushString("callback function required as third argument");
+            return 2;
+        }
         lua.pushValue(3);
         const callback_ref = lua.ref(ziglua.registry_index) catch {
             lua.pushNil();
@@ -1042,6 +1053,21 @@ pub const UI = struct {
             return 2;
         };
 
+        if (branch.len > ctx.branch_buf.len) {
+            ui.allocator.destroy(ctx);
+            lua.unref(ziglua.registry_index, callback_ref);
+            lua.pushNil();
+            _ = lua.pushString("Branch name too long");
+            return 2;
+        }
+        if (repo.len > ctx.repo_buf.len) {
+            ui.allocator.destroy(ctx);
+            lua.unref(ziglua.registry_index, callback_ref);
+            lua.pushNil();
+            _ = lua.pushString("Repo name too long");
+            return 2;
+        }
+
         const target_dir = std.fmt.bufPrint(&ctx.target_dir_buf, "{s}/{s}__{s}", .{ plugin_root, user, repo_name }) catch {
             ui.allocator.destroy(ctx);
             lua.unref(ziglua.registry_index, callback_ref);
@@ -1051,6 +1077,8 @@ pub const UI = struct {
         };
         ctx.target_dir_len = target_dir.len;
 
+        @memcpy(ctx.plugin_root_buf[0..plugin_root.len], plugin_root);
+        ctx.plugin_root_len = plugin_root.len;
         @memcpy(ctx.branch_buf[0..branch.len], branch);
         ctx.branch_len = branch.len;
         @memcpy(ctx.repo_buf[0..repo.len], repo);
@@ -1069,15 +1097,18 @@ pub const UI = struct {
         if (dir_exists) {
             if (!std.mem.eql(u8, branch, "HEAD")) {
                 ctx.operation = .fetch;
-                spawnGitOperation(ctx, plugin_root) catch |err| {
+                ctx.initial_operation = .fetch;
+                spawnGitOperation(ctx) catch |err| {
                     cleanupGitContext(ctx, err);
                 };
             } else {
+                ctx.initial_operation = .fetch;
                 callGitCallback(ctx, null);
             }
         } else {
             ctx.operation = .clone;
-            spawnGitOperation(ctx, plugin_root) catch |err| {
+            ctx.initial_operation = .clone;
+            spawnGitOperation(ctx) catch |err| {
                 cleanupGitContext(ctx, err);
             };
         }
@@ -1085,8 +1116,9 @@ pub const UI = struct {
         return 0;
     }
 
-    fn spawnGitOperation(ctx: *GitContext, plugin_root: []const u8) !void {
+    fn spawnGitOperation(ctx: *GitContext) !void {
         const target_dir = ctx.getTargetDir();
+        const plugin_root = ctx.getPluginRoot();
         const branch = ctx.getBranch();
         const repo = ctx.getRepo();
 
@@ -1133,6 +1165,7 @@ pub const UI = struct {
 
         if (signaled or exit_code != 0) {
             if (ctx.operation == .fetch) {
+                log.warn("git fetch failed for {s}, using existing directory", .{ctx.getRepo()});
                 callGitCallback(ctx, null);
                 return;
             }
@@ -1144,7 +1177,7 @@ pub const UI = struct {
             .clone => callGitCallback(ctx, null),
             .fetch => {
                 ctx.operation = .checkout;
-                spawnGitOperation(ctx, "") catch |err| {
+                spawnGitOperation(ctx) catch |err| {
                     cleanupGitContext(ctx, err);
                 };
             },
@@ -1165,7 +1198,12 @@ pub const UI = struct {
             lua.pushNil();
         }
 
-        lua.protectedCall(.{ .args = 2, .results = 0, .msg_handler = 0 }) catch {
+        _ = lua.pushString(switch (ctx.initial_operation) {
+            .clone => "clone",
+            .fetch, .checkout => "update",
+        });
+
+        lua.protectedCall(.{ .args = 3, .results = 0, .msg_handler = 0 }) catch {
             const lua_err = lua.toString(-1) catch "Unknown error";
             log.err("Lua git callback error: {s}", .{lua_err});
             lua.pop(1);
@@ -1176,6 +1214,8 @@ pub const UI = struct {
     }
 
     fn cleanupGitContext(ctx: *GitContext, err: anyerror) void {
+        // Stack buffer is safe here because callGitCallback uses err_msg synchronously
+        // before returning. Do not make callGitCallback async without changing this.
         var err_buf: [256]u8 = undefined;
         const err_msg = std.fmt.bufPrint(&err_buf, "git operation failed: {s}", .{@errorName(err)}) catch "git operation failed";
         callGitCallback(ctx, err_msg);

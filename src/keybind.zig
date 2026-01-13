@@ -169,8 +169,8 @@ fn matcherKeyToString(lua: *ziglua.Lua) i32 {
     var buf: [128]u8 = undefined;
     var len: usize = 0;
 
-    // Max size: '<' + 4 modifiers (8 chars) + key + '>' = 11 + key.len
-    const max_key_len = buf.len - 11;
+    // Max size: '<' + 4 modifiers (8 chars) + key + '>' = 10 + key.len
+    const max_key_len = buf.len - 10;
     if (key.key.len > max_key_len) {
         lua.pushNil();
         return 1;

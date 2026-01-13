@@ -3330,9 +3330,15 @@ local function build_plugin_status()
     if all_done then
         if not state.plugin_status.hide_timer then
             state.plugin_status.hide_timer = prise.set_timeout(1500, function()
+                state.plugin_status.hide_timer = nil
+                -- Verify all operations are still done before hiding
+                for _, op in ipairs(state.plugin_status.operations) do
+                    if op.status ~= "done" and op.status ~= "error" then
+                        return
+                    end
+                end
                 state.plugin_status.visible = false
                 state.plugin_status.operations = {}
-                state.plugin_status.hide_timer = nil
                 prise.request_frame()
             end)
         end

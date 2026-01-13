@@ -20,6 +20,15 @@ M.event_triggers = {}
 ---@type table? Reference to user's tiling config
 M.user_config = nil
 
+---@type table<string, boolean> Plugins currently being loaded (to prevent duplicate loads)
+M.loading = {}
+
+---@type table<string, function[]> Pending callbacks for plugins currently being loaded
+M.pending_callbacks = {}
+
+---@type string[] Names of remote plugins queued for loading when event loop is ready
+M.deferred_loads = {}
+
 ---Check if a table contains a value
 ---@param tbl table
 ---@param val any
@@ -213,8 +222,13 @@ local function get_plugin_dir(spec, callback)
     local prise = require("prise")
     if prise.ensure_plugin then
         set_status(spec.name, "cloning")
-        prise.ensure_plugin(spec.repo, spec.branch, function(dir, err)
+        prise.ensure_plugin(spec.repo, spec.branch, function(dir, err, operation)
             if dir then
+                if operation == "update" then
+                    set_status(spec.name, "updating")
+                else
+                    set_status(spec.name, "cloning")
+                end
                 set_status(spec.name, "done")
             else
                 set_status(spec.name, "error", tostring(err))
@@ -234,12 +248,6 @@ local function add_plugin_paths(dir)
         package.path = lua_path .. ";" .. package.path
     end
 end
-
----@type table<string, boolean> Plugins currently being loaded (to prevent duplicate loads)
-M.loading = {}
-
----@type string[] Names of remote plugins queued for loading when event loop is ready
-M.deferred_loads = {}
 
 ---Finish loading a plugin after its directory is available
 ---@param name string Plugin name
@@ -304,6 +312,10 @@ function M.load(name, callback)
     end
 
     if M.loading[name] then
+        if callback then
+            M.pending_callbacks[name] = M.pending_callbacks[name] or {}
+            table.insert(M.pending_callbacks[name], callback)
+        end
         return nil
     end
 
@@ -326,17 +338,23 @@ function M.load(name, callback)
     M.loading[name] = true
 
     get_plugin_dir(spec, function(dir, dir_err)
+        local plugin = nil
         if dir then
-            local plugin = finish_load(name, spec, dir)
-            if callback then
-                callback(plugin)
-            end
+            plugin = finish_load(name, spec, dir)
         else
             set_status(name, "error", dir_err)
             M.loaded[name] = false
             M.loading[name] = nil
-            if callback then
-                callback(nil)
+        end
+
+        if callback then
+            callback(plugin)
+        end
+        local pending = M.pending_callbacks[name]
+        if pending then
+            M.pending_callbacks[name] = nil
+            for _, cb in ipairs(pending) do
+                cb(plugin)
             end
         end
     end)
@@ -363,12 +381,6 @@ function M.load_for_event(event_name)
     if names then
         for _, name in ipairs(names) do
             M.load(name)
-        end
-    end
-
-    for _, spec in pairs(M.specs) do
-        if tbl_contains(spec.event, event_name) and not M.loaded[spec.name] then
-            M.load(spec.name)
         end
     end
 end
