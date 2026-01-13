@@ -1068,7 +1068,7 @@ pub const UI = struct {
             return 2;
         }
 
-        const target_dir = std.fmt.bufPrint(&ctx.target_dir_buf, "{s}/{s}__{s}", .{ plugin_root, user, repo_name }) catch {
+        const target_dir = std.fmt.bufPrint(&ctx.target_dir_buf, "{s}/{s}/{s}", .{ plugin_root, user, repo_name }) catch {
             ui.allocator.destroy(ctx);
             lua.unref(ziglua.registry_index, callback_ref);
             lua.pushNil();
@@ -1076,6 +1076,21 @@ pub const UI = struct {
             return 2;
         };
         ctx.target_dir_len = target_dir.len;
+
+        const user_dir = std.fmt.bufPrint(&ctx.plugin_root_buf, "{s}/{s}", .{ plugin_root, user }) catch {
+            ui.allocator.destroy(ctx);
+            lua.unref(ziglua.registry_index, callback_ref);
+            lua.pushNil();
+            _ = lua.pushString("Path too long");
+            return 2;
+        };
+        std.fs.cwd().makePath(user_dir) catch |err| {
+            ui.allocator.destroy(ctx);
+            lua.unref(ziglua.registry_index, callback_ref);
+            lua.pushNil();
+            _ = lua.pushString(@errorName(err));
+            return 2;
+        };
 
         @memcpy(ctx.plugin_root_buf[0..plugin_root.len], plugin_root);
         ctx.plugin_root_len = plugin_root.len;
