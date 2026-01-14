@@ -918,18 +918,55 @@ fn isUrlChar(ch: u8) bool {
 
 fn isLinkStartBoundary(ch: u8) bool {
     return ch == 0 or std.ascii.isWhitespace(ch) or switch (ch) {
-        '(', '[', '{', '<' => true,
+        '(', '[', '{', '<', '"', '\'', '`' => true,
         else => false,
     };
+}
+
+fn countChar(slice: []const u8, ch: u8) usize {
+    var count: usize = 0;
+    for (slice) |c| {
+        if (c == ch) count += 1;
+    }
+    return count;
 }
 
 fn trimUrlEnd(row_chars: []const u8, start: usize, end: usize) usize {
     var trimmed_end = end;
     while (trimmed_end > start) {
         const ch = row_chars[trimmed_end - 1];
-        if (ch == '.' or ch == ',' or ch == ';' or ch == ')' or ch == ']' or ch == '}') {
+        // Always trim trailing punctuation that's unlikely to be part of URL
+        if (ch == '.' or ch == ',' or ch == ';' or ch == ':' or ch == '!' or ch == '?') {
             trimmed_end -= 1;
             continue;
+        }
+        // For paired delimiters, only trim if unbalanced (more closers than openers)
+        if (ch == ')') {
+            const url_so_far = row_chars[start..trimmed_end];
+            const open_count = countChar(url_so_far, '(');
+            const close_count = countChar(url_so_far, ')');
+            if (close_count > open_count) {
+                trimmed_end -= 1;
+                continue;
+            }
+        }
+        if (ch == ']') {
+            const url_so_far = row_chars[start..trimmed_end];
+            const open_count = countChar(url_so_far, '[');
+            const close_count = countChar(url_so_far, ']');
+            if (close_count > open_count) {
+                trimmed_end -= 1;
+                continue;
+            }
+        }
+        if (ch == '}') {
+            const url_so_far = row_chars[start..trimmed_end];
+            const open_count = countChar(url_so_far, '{');
+            const close_count = countChar(url_so_far, '}');
+            if (close_count > open_count) {
+                trimmed_end -= 1;
+                continue;
+            }
         }
         break;
     }
