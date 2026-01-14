@@ -897,8 +897,27 @@ pub const UI = struct {
             return 1;
         };
 
-        // Only allow http/https URLs for security
-        if (!std.mem.startsWith(u8, url, "http://") and !std.mem.startsWith(u8, url, "https://")) {
+        // Only allow safe URL schemes
+        const allowed_schemes = [_][]const u8{
+            "http://",
+            "https://",
+            "mailto:",
+            "file://",
+        };
+        var scheme_allowed = false;
+        for (allowed_schemes) |scheme| {
+            if (std.mem.startsWith(u8, url, scheme)) {
+                scheme_allowed = true;
+                break;
+            }
+        }
+        if (!scheme_allowed) {
+            lua.pushBoolean(false);
+            return 1;
+        }
+
+        // Validate URL length (OSC 8 spec recommends max 2083 bytes)
+        if (url.len > 2083) {
             lua.pushBoolean(false);
             return 1;
         }

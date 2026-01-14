@@ -1233,12 +1233,10 @@ pub const App = struct {
                             if (target_x) |hover_x| {
                                 if (target_y) |hover_y| {
                                     if (hover_x >= 0 and hover_y >= 0) {
-                                        const hover_col: i32 = @intFromFloat(@floor(hover_x));
-                                        const hover_row: i32 = @intFromFloat(@floor(hover_y));
-                                        if (hover_col >= 0 and hover_row >= 0) {
-                                            if (surface.getHyperlinkAt(@intCast(hover_row), @intCast(hover_col)) != null) {
-                                                hyperlink_hover = true;
-                                            }
+                                        const hover_col: u16 = @intFromFloat(@floor(hover_x));
+                                        const hover_row: u16 = @intFromFloat(@floor(hover_y));
+                                        if (surface.getHyperlinkAt(hover_row, hover_col) != null) {
+                                            hyperlink_hover = true;
                                         }
                                     }
                                 }

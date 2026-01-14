@@ -884,10 +884,12 @@ fn resolveHyperlink(
         return null;
     }
 
-    // Assign new stable ID using persistent state
+    // Assign new stable ID using persistent state (wrapping handles overflow gracefully)
     const hyperlink_id = ctx.next_hyperlink_id.*;
-    ctx.next_hyperlink_id.* += 1;
+    ctx.next_hyperlink_id.* +%= 1;
+    if (ctx.next_hyperlink_id.* == 0) ctx.next_hyperlink_id.* = 1; // Skip reserved ID 0
     const uri_copy = try ctx.allocator.dupe(u8, uri);
+    errdefer ctx.allocator.free(uri_copy);
     try ctx.hyperlinks_map.put(ctx.allocator, uri_copy, hyperlink_id);
     try emitHyperlinkIfNeeded(ctx, hyperlink_id, uri);
     ctx.last_hyperlink_id = hyperlink_id;
@@ -900,10 +902,12 @@ fn resolveAutoHyperlinkId(ctx: *RedrawContext, uri: []const u8) !u32 {
         return existing_id;
     }
 
-    // Assign new stable ID using persistent state
+    // Assign new stable ID using persistent state (wrapping handles overflow gracefully)
     const hyperlink_id = ctx.next_hyperlink_id.*;
-    ctx.next_hyperlink_id.* += 1;
+    ctx.next_hyperlink_id.* +%= 1;
+    if (ctx.next_hyperlink_id.* == 0) ctx.next_hyperlink_id.* = 1; // Skip reserved ID 0
     const uri_copy = try ctx.allocator.dupe(u8, uri);
+    errdefer ctx.allocator.free(uri_copy);
     try ctx.hyperlinks_map.put(ctx.allocator, uri_copy, hyperlink_id);
     try emitHyperlinkIfNeeded(ctx, hyperlink_id, uri);
     return hyperlink_id;
@@ -1030,7 +1034,10 @@ fn buildAutoLinkMap(ctx: *RedrawContext, slices: CellSlices) ![]u32 {
         while (end < row_chars.len and row_chars[end] != 0 and isUrlChar(row_chars[end])) : (end += 1) {}
 
         end = trimUrlEnd(row_chars, i, end);
-        if (end <= i + prefix_len) {
+        const uri_len = end - i;
+
+        // Skip URLs that are too short or exceed OSC 8 length limit (2083 bytes)
+        if (uri_len <= prefix_len or uri_len > 2083) {
             i += 1;
             continue;
         }

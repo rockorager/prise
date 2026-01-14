@@ -140,7 +140,7 @@ function prise.get_time() end
 function prise.get_git_branch(cwd) end
 
 ---Open a URL using the system's default handler (safe, no shell interpolation)
----Only allows http:// and https:// URLs
+---Allowed schemes: http://, https://, mailto:, file://
 ---@param url string The URL to open
 ---@return boolean success Whether the URL opener was spawned successfully
 function prise.open_url(url) end
