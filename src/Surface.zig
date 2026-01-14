@@ -58,6 +58,7 @@ cursor_shape: redraw.UIEvent.CursorShape.Shape = .block,
 mouse_shape: redraw.UIEvent.MouseShape.Shape = .default,
 dirty: bool = false,
 hl_attrs: std.AutoHashMap(u32, vaxis.Style),
+hyperlinks: std.AutoHashMap(u32, []const u8),
 title: std.ArrayList(u8),
 pty_id: u32,
 colors: TerminalColors = .{},
@@ -92,6 +93,7 @@ pub fn init(allocator: std.mem.Allocator, pty_id: u32, rows: u16, cols: u16, col
         .rows = rows,
         .cols = cols,
         .hl_attrs = std.AutoHashMap(u32, vaxis.Style).init(allocator),
+        .hyperlinks = std.AutoHashMap(u32, []const u8).init(allocator),
         .title = std.ArrayList(u8).empty,
         .pty_id = pty_id,
         .colors = colors,
@@ -104,6 +106,11 @@ pub fn deinit(self: *Surface) void {
     self.back.deinit(self.allocator);
     self.allocator.destroy(self.back);
     self.hl_attrs.deinit();
+    var hl_iter = self.hyperlinks.valueIterator();
+    while (hl_iter.next()) |uri| {
+        self.allocator.free(uri.*);
+    }
+    self.hyperlinks.deinit();
     self.title.deinit(self.allocator);
 }
 
@@ -137,6 +144,15 @@ pub fn isCellSelected(self: *const Surface, row: u16, col: u16) bool {
         // Middle rows: entire row is selected
         return true;
     }
+}
+
+/// Get the hyperlink URI at a specific cell position, if any.
+/// Returns null if no hyperlink is present at that position.
+pub fn getHyperlinkAt(self: *const Surface, row: u16, col: u16) ?[]const u8 {
+    if (col >= self.cols or row >= self.rows) return null;
+    const cell = self.front.readCell(@intCast(col), @intCast(row)) orelse return null;
+    if (cell.link.uri.len == 0) return null;
+    return cell.link.uri;
 }
 
 pub fn resize(self: *Surface, rows: u16, cols: u16) !void {
@@ -216,11 +232,18 @@ fn applyCursor(self: *Surface, params: msgpack.Value) void {
 }
 
 /// Apply a single cell or run of cells from a write event.
-/// Updates col_ptr to track horizontal position and current_hl_ptr to track style state.
-fn applyCell(self: *Surface, row: usize, col_ptr: *usize, cell: msgpack.Value, current_hl_ptr: *u32) void {
+/// Updates col_ptr to track horizontal position, current_hl_ptr for style state, and current_hyperlink_ptr for hyperlink state.
+fn applyCell(
+    self: *Surface,
+    row: usize,
+    col_ptr: *usize,
+    cell: msgpack.Value,
+    current_hl_ptr: *u32,
+    current_hyperlink_ptr: *u32,
+) void {
     if (cell != .array or cell.array.len == 0) return;
 
-    // cell: [grapheme, style_id?, repeat?, width?]
+    // cell: [grapheme, style_id?, repeat?, width?, hyperlink_id?]
     const text = if (cell.array[0] == .string) cell.array[0].string else " ";
 
     if (cell.array.len > 1 and cell.array[1] != .nil) {
@@ -250,7 +273,27 @@ fn applyCell(self: *Surface, row: usize, col_ptr: *usize, cell: msgpack.Value, c
     else
         1;
 
-    const style = self.hl_attrs.get(current_hl_ptr.*) orelse vaxis.Style{};
+    // Handle hyperlink_id (5th element, index 4)
+    if (cell.array.len > 4 and cell.array[4] != .nil) {
+        current_hyperlink_ptr.* = switch (cell.array[4]) {
+            .unsigned => |u| @as(u32, @intCast(u)),
+            .integer => |i| @as(u32, @intCast(i)),
+            else => current_hyperlink_ptr.*,
+        };
+    }
+
+    var style = self.hl_attrs.get(current_hl_ptr.*) orelse vaxis.Style{
+        .fg = self.colors.fg orelse .default,
+    };
+    const hyperlink_uri = if (current_hyperlink_ptr.* > 0)
+        self.hyperlinks.get(current_hyperlink_ptr.*)
+    else
+        null;
+
+    // Add underline styling for hyperlinks
+    if (hyperlink_uri != null) {
+        style.ul_style = .single;
+    }
 
     var i: usize = 0;
     while (i < repeat) : (i += 1) {
@@ -259,6 +302,7 @@ fn applyCell(self: *Surface, row: usize, col_ptr: *usize, cell: msgpack.Value, c
             self.back.writeCell(@intCast(col), @intCast(row), .{
                 .char = .{ .grapheme = text, .width = @intCast(width) },
                 .style = style,
+                .link = .{ .uri = hyperlink_uri orelse "", .params = "" },
             });
             // Write spacer cells for wide characters
             for (1..width) |offset| {
@@ -266,6 +310,7 @@ fn applyCell(self: *Surface, row: usize, col_ptr: *usize, cell: msgpack.Value, c
                     self.back.writeCell(@intCast(col + offset), @intCast(row), .{
                         .char = .{ .grapheme = "", .width = 0 },
                         .style = style,
+                        .link = .{ .uri = hyperlink_uri orelse "", .params = "" },
                     });
                 }
             }
@@ -390,6 +435,47 @@ fn applyStyle(self: *Surface, params: msgpack.Value) !void {
     }
 
     try self.hl_attrs.put(id, style);
+}
+
+fn applyHyperlink(self: *Surface, params: msgpack.Value) !void {
+    if (params.array.len < 2) return;
+
+    // args: [id, uri]
+    const id = switch (params.array[0]) {
+        .unsigned => |u| @as(u32, @intCast(u)),
+        .integer => |i| @as(u32, @intCast(i)),
+        else => return,
+    };
+
+    // Skip if ID already exists - IDs are stable, so same ID = same URI.
+    // Never replace to avoid dangling pointers in cells that store URI slices.
+    if (self.hyperlinks.contains(id)) return;
+
+    const uri_val = params.array[1];
+    if (uri_val != .string) return;
+
+    const uri = try self.allocator.dupe(u8, uri_val.string);
+    errdefer self.allocator.free(uri);
+
+    try self.hyperlinks.put(id, uri);
+}
+
+pub fn commitFrame(self: *Surface) void {
+    for (0..self.rows) |row| {
+        for (0..self.cols) |col| {
+            if (self.back.readCell(@intCast(col), @intCast(row))) |cell| {
+                self.front.writeCell(@intCast(col), @intCast(row), cell);
+            }
+        }
+    }
+    self.front.cursor_row = self.back.cursor_row;
+    self.front.cursor_col = self.back.cursor_col;
+    self.front.cursor_vis = self.back.cursor_vis;
+
+    // Reset cursor visibility for the next frame. If we don't receive a cursor_pos
+    // event in the next frame, we assume the cursor is hidden.
+    self.back.cursor_vis = false;
+    self.dirty = false;
 }
 
 /// Apply selection bounds from a selection event.
@@ -540,32 +626,22 @@ pub fn applyRedraw(self: *Surface, params: msgpack.Value) !void {
             // - Absent or nil => reuse previous cell style within this write batch
             // - 0 => default style
             // current_hl resets to 0 at the start of each write event
+            // current_hyperlink resets to 0 (no hyperlink) at the start of each write event
             var current_hl: u32 = 0;
+            var current_hyperlink: u32 = 0;
             for (cells.array) |cell| {
-                self.applyCell(row, &col, cell, &current_hl);
+                self.applyCell(row, &col, cell, &current_hl, &current_hyperlink);
             }
             self.dirty = true;
         } else if (std.mem.eql(u8, event_name.string, "style")) {
             try self.applyStyle(event_params);
+        } else if (std.mem.eql(u8, event_name.string, "hyperlink")) {
+            try self.applyHyperlink(event_params);
         } else if (std.mem.eql(u8, event_name.string, "selection")) {
             self.applySelection(event_params);
         } else if (std.mem.eql(u8, event_name.string, "flush")) {
             // Flush marks the end of a frame - copy back to front now
-
-            for (0..self.rows) |row| {
-                for (0..self.cols) |col| {
-                    if (self.back.readCell(@intCast(col), @intCast(row))) |cell| {
-                        self.front.writeCell(@intCast(col), @intCast(row), cell);
-                    }
-                }
-            }
-            self.front.cursor_row = self.back.cursor_row;
-            self.front.cursor_col = self.back.cursor_col;
-            self.front.cursor_vis = self.back.cursor_vis;
-
-            // Reset cursor visibility for the next frame. If we don't receive a cursor_pos
-            // event in the next frame, we assume the cursor is hidden.
-            self.back.cursor_vis = false;
+            self.commitFrame();
         }
     }
 }
@@ -600,6 +676,13 @@ pub fn render(self: *const Surface, win: vaxis.Window, focused: bool) void {
             if (col >= win.width or row >= win.height) continue;
 
             var cell = self.front.readCell(@intCast(col), @intCast(row)) orelse continue;
+
+            // Resolve default fg color to terminal's configured fg
+            if (cell.style.fg == .default) {
+                if (self.colors.fg) |fg| {
+                    cell.style.fg = fg;
+                }
+            }
 
             if (self.isCellSelected(@intCast(row), @intCast(col))) {
                 cell.style.bg = .{ .rgb = SELECTION_BG_COLOR };

@@ -152,6 +152,10 @@ const Pty = struct {
     left_click_count: u8 = 0,
     left_click_time: i64 = 0, // milliseconds timestamp
 
+    // Persistent hyperlink state for stable IDs across incremental renders
+    hyperlinks_map: std.StringHashMapUnmanaged(u32) = .empty,
+    next_hyperlink_id: u32 = 1, // 0 is reserved for "no hyperlink"
+
     // Pointer to server for callbacks (opaque to avoid circular type dependency)
     server_ptr: *anyopaque = undefined,
 
@@ -245,6 +249,12 @@ const Pty = struct {
         self.clients.deinit(allocator);
         self.title.deinit(allocator);
         self.cwd.deinit(allocator);
+        // Free all hyperlink URI strings
+        var hl_iter = self.hyperlinks_map.keyIterator();
+        while (hl_iter.next()) |uri_ptr| {
+            allocator.free(uri_ptr.*);
+        }
+        self.hyperlinks_map.deinit(allocator);
         allocator.destroy(self);
     }
 
@@ -748,6 +758,7 @@ pub const RenderMode = enum { full, incremental };
 /// State passed between redraw helper functions
 const RedrawContext = struct {
     builder: *redraw.RedrawBuilder,
+    allocator: std.mem.Allocator, // persistent allocator for hyperlink URIs
     temp_alloc: std.mem.Allocator,
     pty_id: usize,
     rows: usize,
@@ -757,6 +768,13 @@ const RedrawContext = struct {
     next_style_id: u32,
     last_style: ?ghostty_vt.Style,
     last_style_id: u32,
+    // Pointer to Pty's persistent hyperlink state
+    hyperlinks_map: *std.StringHashMapUnmanaged(u32),
+    next_hyperlink_id: *u32,
+    // Per-render tracking of which hyperlinks have been emitted this frame
+    emitted_hyperlinks: std.AutoHashMap(u32, void),
+    // Track last hyperlink ID within a row for run-length encoding
+    last_hyperlink_id: u32,
 };
 
 fn emitTitle(builder: *redraw.RedrawBuilder, pty_instance: *Pty, mode: RenderMode) !void {
@@ -770,7 +788,7 @@ fn emitResize(builder: *redraw.RedrawBuilder, pty_id: usize, rows: usize, cols: 
     try builder.resize(@intCast(pty_id), @intCast(rows), @intCast(cols));
 }
 
-fn initStylesContext(temp_alloc: std.mem.Allocator, builder: *redraw.RedrawBuilder, pty_id: usize, rows: usize, cols: usize) !RedrawContext {
+fn initStylesContext(pty_instance: *Pty, temp_alloc: std.mem.Allocator, builder: *redraw.RedrawBuilder, rows: usize, cols: usize) !RedrawContext {
     var styles_map = std.AutoHashMap(u64, u32).init(temp_alloc);
     const default_style: ghostty_vt.Style = .{
         .fg_color = .none,
@@ -784,8 +802,9 @@ fn initStylesContext(temp_alloc: std.mem.Allocator, builder: *redraw.RedrawBuild
 
     return .{
         .builder = builder,
+        .allocator = pty_instance.allocator,
         .temp_alloc = temp_alloc,
-        .pty_id = pty_id,
+        .pty_id = pty_instance.id,
         .rows = rows,
         .cols = cols,
         .default_style = default_style,
@@ -793,6 +812,10 @@ fn initStylesContext(temp_alloc: std.mem.Allocator, builder: *redraw.RedrawBuild
         .next_style_id = 1,
         .last_style = null,
         .last_style_id = 0,
+        .hyperlinks_map = &pty_instance.hyperlinks_map,
+        .next_hyperlink_id = &pty_instance.next_hyperlink_id,
+        .emitted_hyperlinks = std.AutoHashMap(u32, void).init(temp_alloc),
+        .last_hyperlink_id = 0,
     };
 }
 
@@ -818,6 +841,179 @@ fn resolveStyle(ctx: *RedrawContext, vt_style: ghostty_vt.Style) !u32 {
     ctx.last_style = vt_style;
     ctx.last_style_id = style_id;
     return style_id;
+}
+
+fn emitHyperlinkIfNeeded(ctx: *RedrawContext, hyperlink_id: u32, uri: []const u8) !void {
+    if (ctx.emitted_hyperlinks.contains(hyperlink_id)) return;
+    try ctx.emitted_hyperlinks.put(hyperlink_id, {});
+    try ctx.builder.hyperlink(hyperlink_id, uri);
+}
+
+fn resolveHyperlink(
+    ctx: *RedrawContext,
+    raw_cell: *const ghostty_vt.page.Cell,
+    page: *const ghostty_vt.page.Page,
+) !?u32 {
+    // No hyperlink on this cell
+    if (!raw_cell.hyperlink) {
+        // If we were in a hyperlink, send 0 to end it
+        if (ctx.last_hyperlink_id != 0) {
+            ctx.last_hyperlink_id = 0;
+            return 0;
+        }
+        return null;
+    }
+
+    const link_id = page.lookupHyperlink(raw_cell) orelse {
+        // Cell claims hyperlink but lookup failed - treat as no hyperlink
+        if (ctx.last_hyperlink_id != 0) {
+            ctx.last_hyperlink_id = 0;
+            return 0;
+        }
+        return null;
+    };
+    const link_entry = page.hyperlink_set.get(page.memory, link_id);
+    const uri = link_entry.uri.slice(page.memory);
+
+    if (ctx.hyperlinks_map.get(uri)) |existing_id| {
+        try emitHyperlinkIfNeeded(ctx, existing_id, uri);
+        if (existing_id != ctx.last_hyperlink_id) {
+            ctx.last_hyperlink_id = existing_id;
+            return existing_id;
+        }
+        return null;
+    }
+
+    // Assign new stable ID using persistent state
+    const hyperlink_id = ctx.next_hyperlink_id.*;
+    ctx.next_hyperlink_id.* += 1;
+    const uri_copy = try ctx.allocator.dupe(u8, uri);
+    try ctx.hyperlinks_map.put(ctx.allocator, uri_copy, hyperlink_id);
+    try emitHyperlinkIfNeeded(ctx, hyperlink_id, uri);
+    ctx.last_hyperlink_id = hyperlink_id;
+    return hyperlink_id;
+}
+
+fn resolveAutoHyperlinkId(ctx: *RedrawContext, uri: []const u8) !u32 {
+    if (ctx.hyperlinks_map.get(uri)) |existing_id| {
+        try emitHyperlinkIfNeeded(ctx, existing_id, uri);
+        return existing_id;
+    }
+
+    // Assign new stable ID using persistent state
+    const hyperlink_id = ctx.next_hyperlink_id.*;
+    ctx.next_hyperlink_id.* += 1;
+    const uri_copy = try ctx.allocator.dupe(u8, uri);
+    try ctx.hyperlinks_map.put(ctx.allocator, uri_copy, hyperlink_id);
+    try emitHyperlinkIfNeeded(ctx, hyperlink_id, uri);
+    return hyperlink_id;
+}
+
+fn isUrlChar(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or switch (ch) {
+        ':', '/', '?', '#', '[', ']', '@', '!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=', '-', '.', '_', '~', '%' => true,
+        else => false,
+    };
+}
+
+fn isLinkStartBoundary(ch: u8) bool {
+    return ch == 0 or std.ascii.isWhitespace(ch) or switch (ch) {
+        '(', '[', '{', '<' => true,
+        else => false,
+    };
+}
+
+fn trimUrlEnd(row_chars: []const u8, start: usize, end: usize) usize {
+    var trimmed_end = end;
+    while (trimmed_end > start) {
+        const ch = row_chars[trimmed_end - 1];
+        if (ch == '.' or ch == ',' or ch == ';' or ch == ')' or ch == ']' or ch == '}') {
+            trimmed_end -= 1;
+            continue;
+        }
+        break;
+    }
+    return trimmed_end;
+}
+
+fn buildRowAscii(ctx: *RedrawContext, slices: CellSlices) ![]u8 {
+    const row_chars = try ctx.temp_alloc.alloc(u8, ctx.cols);
+    @memset(row_chars, 0);
+
+    var x: usize = 0;
+    while (x < ctx.cols) : (x += 1) {
+        const raw_cell = slices.raw[x];
+        if (raw_cell.wide == .spacer_tail or raw_cell.hyperlink or raw_cell.wide == .wide) continue;
+
+        const is_direct_color = raw_cell.content_tag == .bg_color_rgb or raw_cell.content_tag == .bg_color_palette;
+        if (is_direct_color) continue;
+
+        const text = try resolveCellText(ctx, raw_cell, slices.grapheme[x], false);
+        if (text.len == 1 and text[0] >= 0x20 and text[0] < 0x7f) {
+            row_chars[x] = text[0];
+        }
+    }
+
+    return row_chars;
+}
+
+fn buildAutoLinkMap(ctx: *RedrawContext, slices: CellSlices) ![]u32 {
+    const auto_links = try ctx.temp_alloc.alloc(u32, ctx.cols);
+    @memset(auto_links, 0);
+
+    const row_chars = try buildRowAscii(ctx, slices);
+    const prefixes = [_][]const u8{ "http://", "https://" };
+
+    var i: usize = 0;
+    while (i < row_chars.len) {
+        if (row_chars[i] == 0) {
+            i += 1;
+            continue;
+        }
+
+        var prefix_len: usize = 0;
+        for (prefixes) |prefix| {
+            if (i + prefix.len <= row_chars.len and std.mem.eql(u8, row_chars[i .. i + prefix.len], prefix)) {
+                prefix_len = prefix.len;
+                break;
+            }
+        }
+
+        if (prefix_len == 0) {
+            i += 1;
+            continue;
+        }
+
+        if (i > 0 and !isLinkStartBoundary(row_chars[i - 1])) {
+            i += 1;
+            continue;
+        }
+
+        var end = i + prefix_len;
+        while (end < row_chars.len and row_chars[end] != 0 and isUrlChar(row_chars[end])) : (end += 1) {}
+
+        end = trimUrlEnd(row_chars, i, end);
+        if (end <= i + prefix_len) {
+            i += 1;
+            continue;
+        }
+
+        const uri = row_chars[i..end];
+        const link_id = try resolveAutoHyperlinkId(ctx, uri);
+        for (i..end) |col| {
+            auto_links[col] = link_id;
+        }
+        i = end;
+    }
+
+    return auto_links;
+}
+
+fn resolveAutoLink(ctx: *RedrawContext, auto_links: []const u32, col: usize) ?u32 {
+    const auto_id = auto_links[col];
+    if (auto_id == ctx.last_hyperlink_id) return null;
+    ctx.last_hyperlink_id = auto_id;
+    return auto_id;
 }
 
 const CellSlices = struct {
@@ -920,10 +1116,12 @@ fn cellsMatch(
     return true;
 }
 
-fn emitRow(ctx: *RedrawContext, y: usize, slices: CellSlices) !void {
+fn emitRow(ctx: *RedrawContext, y: usize, slices: CellSlices, row_pin: ghostty_vt.PageList.Pin) !void {
     var cells_buf = std.ArrayList(redraw.UIEvent.Write.Cell).empty;
-    var last_hl_id: u32 = 0;
+    var last_style_id: u32 = 0;
     var x: usize = 0;
+    const page = &row_pin.node.data;
+    const auto_links = try buildAutoLinkMap(ctx, slices);
 
     while (x < ctx.cols) {
         const raw_cell = slices.raw[x];
@@ -948,14 +1146,24 @@ fn emitRow(ctx: *RedrawContext, y: usize, slices: CellSlices) !void {
         const text = try resolveCellText(ctx, raw_cell, slices.grapheme[x], is_direct_color);
         const repeat = detectRepeat(raw_cell, slices, x, ctx.cols, is_direct_color);
 
-        const hl_id_to_send: ?u32 = if (style_id != last_hl_id) style_id else null;
-        if (hl_id_to_send) |id| last_hl_id = id;
+        const style_id_to_send: ?u32 = if (style_id != last_style_id) style_id else null;
+        if (style_id_to_send) |id| last_style_id = id;
+
+        // Get actual cell pointer from page memory for hyperlink lookup
+        var pin = row_pin;
+        pin.x = @intCast(x);
+        const rac = pin.rowAndCell();
+        const hyperlink_id = if (raw_cell.hyperlink)
+            try resolveHyperlink(ctx, rac.cell, page)
+        else
+            resolveAutoLink(ctx, auto_links, x);
 
         try cells_buf.append(ctx.temp_alloc, .{
             .grapheme = text,
-            .style_id = hl_id_to_send,
+            .style_id = style_id_to_send,
             .repeat = if (repeat > 1) @intCast(repeat) else null,
             .width = if (raw_cell.wide == .wide) 2 else null,
+            .hyperlink_id = hyperlink_id,
         });
 
         x += repeat;
@@ -971,6 +1179,7 @@ fn emitRows(ctx: *RedrawContext, rs: *ghostty_vt.RenderState, effective_mode: Re
     const row_data_slice = rs.row_data.slice();
     const row_cells = row_data_slice.items(.cells);
     const row_dirties = row_data_slice.items(.dirty);
+    const row_pins = row_data_slice.items(.pin);
 
     for (0..ctx.rows) |y| {
         if (effective_mode == .incremental and !row_dirties[y]) continue;
@@ -983,7 +1192,7 @@ fn emitRows(ctx: *RedrawContext, rs: *ghostty_vt.RenderState, effective_mode: Re
             .style = rs_cells_slice.items(.style),
             .grapheme = rs_cells_slice.items(.grapheme),
         };
-        try emitRow(ctx, y, slices);
+        try emitRow(ctx, y, slices, row_pins[y]);
     }
 }
 
@@ -1070,7 +1279,7 @@ fn buildRedrawMessageFromPty(
         try emitResize(&builder, pty_instance.id, rows, cols);
     }
 
-    var ctx = try initStylesContext(temp_alloc, &builder, pty_instance.id, rows, cols);
+    var ctx = try initStylesContext(pty_instance, temp_alloc, &builder, rows, cols);
     try emitRows(&ctx, rs, effective_mode);
     try emitCursor(&builder, pty_instance.id, rs);
     try builder.mouseShape(@intCast(pty_instance.id), mouse_shape);

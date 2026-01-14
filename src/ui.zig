@@ -439,6 +439,10 @@ pub const UI = struct {
         lua.pushFunction(ziglua.wrap(getGitBranch));
         lua.setField(-2, "get_git_branch");
 
+        // Register open_url (safe, no shell interpolation)
+        lua.pushFunction(ziglua.wrap(openUrl));
+        lua.setField(-2, "open_url");
+
         registerTimerMetatable(lua);
 
         // Register keybind module
@@ -884,6 +888,51 @@ pub const UI = struct {
         }
 
         _ = lua.pushString(branch);
+        return 1;
+    }
+
+    fn openUrl(lua: *ziglua.Lua) i32 {
+        const url = lua.toString(1) catch {
+            lua.pushBoolean(false);
+            return 1;
+        };
+
+        // Only allow http/https URLs for security
+        if (!std.mem.startsWith(u8, url, "http://") and !std.mem.startsWith(u8, url, "https://")) {
+            lua.pushBoolean(false);
+            return 1;
+        }
+
+        // Validate URL doesn't contain control characters
+        for (url) |c| {
+            if (c < 0x20 or c == 0x7f) {
+                lua.pushBoolean(false);
+                return 1;
+            }
+        }
+
+        const opener: []const u8 = switch (@import("builtin").os.tag) {
+            .macos => "open",
+            .linux => "xdg-open",
+            .windows => "start",
+            else => {
+                lua.pushBoolean(false);
+                return 1;
+            },
+        };
+
+        const argv = &[_][]const u8{ opener, url };
+        var child = std.process.Child.init(argv, std.heap.page_allocator);
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+
+        child.spawn() catch {
+            lua.pushBoolean(false);
+            return 1;
+        };
+
+        lua.pushBoolean(true);
         return 1;
     }
 

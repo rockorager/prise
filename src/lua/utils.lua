@@ -1,3 +1,5 @@
+local prise = require("prise")
+
 ---@class Utils
 local M = {}
 
@@ -33,6 +35,17 @@ function M.merge_config(target, source)
             target[k] = v
         end
     end
+end
+
+---Open a URL using the system's default handler
+---Uses prise.open_url (Zig implementation) for security - no shell interpolation
+---@param url string The URL to open
+---@return boolean success Whether the command was started successfully
+function M.open_url(url)
+    if not url or url == "" then
+        return false
+    end
+    return prise.open_url(url)
 end
 
 return M

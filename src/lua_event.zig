@@ -64,6 +64,7 @@ pub const MouseEvent = struct {
     button: vaxis.Mouse.Button,
     action: vaxis.Mouse.Type,
     mods: vaxis.Mouse.Modifiers,
+    super: bool,
     target: ?u32, // PTY ID if hit, null otherwise
     target_x: ?f64, // x relative to target widget
     target_y: ?f64, // y relative to target widget
@@ -221,7 +222,7 @@ fn pushMouseEvent(lua: *ziglua.Lua, m: MouseEvent) void {
     pushMouseAction(lua, m.action);
     lua.setField(-2, "action");
 
-    pushModifiers(lua, m.mods.ctrl, m.mods.alt, m.mods.shift);
+    pushModifiers(lua, m.mods.ctrl, m.mods.alt, m.mods.shift, m.super);
     lua.setField(-2, "mods");
 
     if (m.target) |target| {
@@ -322,7 +323,7 @@ fn pushVaxisMouseEvent(lua: *ziglua.Lua, mouse: vaxis.Mouse) void {
     pushMouseType(lua, mouse.type);
     lua.setField(-2, "event_type");
 
-    pushModifiers(lua, mouse.mods.ctrl, mouse.mods.alt, mouse.mods.shift);
+    pushModifiers(lua, mouse.mods.ctrl, mouse.mods.alt, mouse.mods.shift, false);
     lua.setField(-2, "mods");
 
     lua.setField(-2, "data");
@@ -369,14 +370,16 @@ fn pushMouseType(lua: *ziglua.Lua, mouse_type: vaxis.Mouse.Type) void {
     }
 }
 
-fn pushModifiers(lua: *ziglua.Lua, ctrl: bool, alt: bool, shift: bool) void {
-    lua.createTable(0, 3);
+fn pushModifiers(lua: *ziglua.Lua, ctrl: bool, alt: bool, shift: bool, super: bool) void {
+    lua.createTable(0, 4);
     lua.pushBoolean(ctrl);
     lua.setField(-2, "ctrl");
     lua.pushBoolean(alt);
     lua.setField(-2, "alt");
     lua.pushBoolean(shift);
     lua.setField(-2, "shift");
+    lua.pushBoolean(super);
+    lua.setField(-2, "super");
 }
 
 const PtyHandle = struct {
@@ -435,6 +438,10 @@ fn ptyIndex(lua: *ziglua.Lua) i32 {
         lua.pushFunction(ziglua.wrap(ptyCopySelection));
         return 1;
     }
+    if (std.mem.eql(u8, key, "get_hyperlink_at")) {
+        lua.pushFunction(ziglua.wrap(ptyGetHyperlinkAt));
+        return 1;
+    }
     return 0;
 }
 
@@ -482,6 +489,24 @@ fn ptyCopySelection(lua: *ziglua.Lua) i32 {
         log.err("Failed to copy selection: {}", .{err});
     };
     return 0;
+}
+
+fn ptyGetHyperlinkAt(lua: *ziglua.Lua) i32 {
+    const pty = lua.checkUserdata(PtyHandle, 1, "PrisePty");
+    const row = lua.checkInteger(2);
+    const col = lua.checkInteger(3);
+
+    if (row < 0 or col < 0) {
+        lua.pushNil();
+        return 1;
+    }
+
+    if (pty.surface.getHyperlinkAt(@intCast(row), @intCast(col))) |uri| {
+        _ = lua.pushString(uri);
+    } else {
+        lua.pushNil();
+    }
+    return 1;
 }
 
 fn ptySendKey(lua: *ziglua.Lua) i32 {

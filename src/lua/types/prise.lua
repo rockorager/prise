@@ -139,4 +139,10 @@ function prise.get_time() end
 ---@return string? The branch name, or nil if not a git repo
 function prise.get_git_branch(cwd) end
 
+---Open a URL using the system's default handler (safe, no shell interpolation)
+---Only allows http:// and https:// URLs
+---@param url string The URL to open
+---@return boolean success Whether the URL opener was spawned successfully
+function prise.open_url(url) end
+
 return prise

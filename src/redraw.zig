@@ -15,6 +15,7 @@ pub const UIEvent = union(enum) {
     cursor_shape: CursorShape,
     mouse_shape: MouseShape,
     style: Style,
+    hyperlink: Hyperlink,
     title: Title,
     selection: Selection,
     flush: void,
@@ -55,6 +56,7 @@ pub const UIEvent = union(enum) {
             style_id: ?u32 = null, // omitted = reuse previous
             repeat: ?u32 = null, // omitted = 1
             width: ?u8 = null, // omitted = 1, 2 = wide char
+            hyperlink_id: ?u32 = null, // omitted = no hyperlink, 0 = end hyperlink
         };
     };
 
@@ -140,6 +142,14 @@ pub const UIEvent = union(enum) {
             dotted = 4,
             dashed = 5,
         };
+    };
+
+    /// ["hyperlink", id, uri]
+    /// Defines a hyperlink that can be referenced by cells via hyperlink_id.
+    /// id=0 is reserved for "no hyperlink".
+    pub const Hyperlink = struct {
+        id: u32,
+        uri: []const u8,
     };
 };
 
@@ -228,6 +238,27 @@ pub const RedrawBuilder = struct {
                     try cell_items.append(arena, msgpack.Value.nil); // repeat placeholder
                 }
                 try cell_items.append(arena, .{ .unsigned = w });
+            }
+
+            // Include hyperlink_id if present
+            if (cell.hyperlink_id) |hl_id| {
+                // Ensure all preceding fields have values or placeholders
+                const current_len = cell_items.items.len;
+                if (current_len == 1) {
+                    // Only grapheme, need style_id, repeat, width placeholders
+                    try cell_items.append(arena, msgpack.Value.nil); // style_id
+                    try cell_items.append(arena, msgpack.Value.nil); // repeat
+                    try cell_items.append(arena, msgpack.Value.nil); // width
+                } else if (current_len == 2) {
+                    // grapheme + style_id, need repeat, width placeholders
+                    try cell_items.append(arena, msgpack.Value.nil); // repeat
+                    try cell_items.append(arena, msgpack.Value.nil); // width
+                } else if (current_len == 3) {
+                    // grapheme + style_id + repeat, need width placeholder
+                    try cell_items.append(arena, msgpack.Value.nil); // width
+                }
+                // current_len == 4 means all fields present, just append
+                try cell_items.append(arena, .{ .unsigned = hl_id });
             }
 
             cells_arr[i] = .{ .array = try cell_items.toOwnedSlice(arena) };
@@ -449,6 +480,24 @@ pub const RedrawBuilder = struct {
         const args = try arena.alloc(msgpack.Value, 2);
         args[0] = .{ .unsigned = id };
         args[1] = .{ .map = try items.toOwnedSlice(arena) };
+
+        const args_array: msgpack.Value = .{ .array = args };
+
+        const event_arr = try arena.alloc(msgpack.Value, 2);
+        event_arr[0] = event_name;
+        event_arr[1] = args_array;
+
+        try self.events.append(self.allocator, .{ .array = event_arr });
+    }
+
+    /// Add a hyperlink definition event
+    pub fn hyperlink(self: *RedrawBuilder, id: u32, uri: []const u8) !void {
+        const arena = self.arena.allocator();
+        const event_name: msgpack.Value = .{ .string = try arena.dupe(u8, "hyperlink") };
+
+        const args = try arena.alloc(msgpack.Value, 2);
+        args[0] = .{ .unsigned = id };
+        args[1] = .{ .string = try arena.dupe(u8, uri) };
 
         const args_array: msgpack.Value = .{ .array = args };
 

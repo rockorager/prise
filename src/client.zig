@@ -642,6 +642,9 @@ pub const App = struct {
     // to allow scrolling while selecting beyond viewport bounds
     selection_drag_pty: ?u32 = null,
 
+    // Track Super/Cmd key state for mouse interactions
+    super_mod_down: bool = false,
+
     pipe_read_fd: posix.fd_t = undefined,
     pipe_write_fd: posix.fd_t = undefined,
     parser: vaxis.Parser = undefined,
@@ -1087,6 +1090,14 @@ pub const App = struct {
             return;
         }
 
+        if (event == .key_press) {
+            const key = event.key_press;
+            self.super_mod_down = key.mods.super;
+        } else if (event == .key_release) {
+            const key = event.key_release;
+            self.super_mod_down = key.mods.super;
+        }
+
         // If we're in paste mode, buffer key presses instead of forwarding
         if (self.paste_buffer != null and event == .key_press) {
             const key = event.key_press;
@@ -1217,7 +1228,24 @@ pub const App = struct {
                     }
                     // Update mouse cursor shape based on target PTY's mouse_shape
                     if (self.surfaces.get(pty_id)) |surface| {
-                        const vaxis_shape = mapMouseShapeToVaxis(surface.mouse_shape);
+                        var hyperlink_hover = false;
+                        if (self.super_mod_down) {
+                            if (target_x) |hover_x| {
+                                if (target_y) |hover_y| {
+                                    if (hover_x >= 0 and hover_y >= 0) {
+                                        const hover_col: i32 = @intFromFloat(@floor(hover_x));
+                                        const hover_row: i32 = @intFromFloat(@floor(hover_y));
+                                        if (hover_col >= 0 and hover_row >= 0) {
+                                            if (surface.getHyperlinkAt(@intCast(hover_row), @intCast(hover_col)) != null) {
+                                                hyperlink_hover = true;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        const vaxis_shape = if (hyperlink_hover) .pointer else mapMouseShapeToVaxis(surface.mouse_shape);
                         self.vx.setMouseShape(vaxis_shape);
                         try self.scheduleRender();
                     }
@@ -1233,6 +1261,7 @@ pub const App = struct {
                     .button = mouse.button,
                     .action = mouse.type,
                     .mods = mouse.mods,
+                    .super = self.super_mod_down,
                     .target = target,
                     .target_x = target_x,
                     .target_y = target_y,
@@ -1552,6 +1581,9 @@ pub const App = struct {
                 const should_flush = ClientLogic.shouldFlush(params);
                 if (should_flush) {
                     log.debug("handleRedraw: flush event received for pty {}, rendering", .{pid});
+                    try self.scheduleRender();
+                } else if (surface.dirty) {
+                    surface.commitFrame();
                     try self.scheduleRender();
                 }
             } else {
