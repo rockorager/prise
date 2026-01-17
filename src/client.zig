@@ -181,7 +181,7 @@ pub const ClientState = struct {
     pty_validity: ?i64 = null,
 
     pub const RequestInfo = union(enum) {
-        spawn: struct { cwd: ?[]const u8 = null },
+        spawn: struct { cwd: ?[]const u8 = null, old_pty_id: ?u32 = null },
         attach: struct { pty_id: i64, cwd: ?[]const u8 = null },
         detach,
         get_server_info,
@@ -211,7 +211,7 @@ pub const ServerAction = union(enum) {
     send_attach: i64,
     spawn_pty_with_cwd: struct { cwd: ?[]const u8 },
     redraw: msgpack.Value,
-    attached: i64,
+    attached: struct { new_pty_id: i64, old_pty_id: ?u32 = null },
     pty_exited: struct { pty_id: u32, status: u32 },
     cwd_changed: struct { pty_id: u32, cwd: []const u8 },
     detached,
@@ -281,17 +281,17 @@ pub const ClientLogic = struct {
         if (request_info) |entry| {
             log.info("processServerMessage: found pending request: {s}", .{@tagName(entry.value)});
             return switch (entry.value) {
-                .spawn => |spawn_info| handleSpawnResult(state, result, spawn_info.cwd),
+                .spawn => |spawn_info| handleSpawnResult(state, result, spawn_info.cwd, spawn_info.old_pty_id),
                 .attach => |attach_info| {
                     state.pty_id = attach_info.pty_id;
                     state.attached = true;
                     if (attach_info.cwd) |c| {
-                        const owned_cwd = state.allocator.dupe(u8, c) catch return .{ .attached = attach_info.pty_id };
+                        const owned_cwd = state.allocator.dupe(u8, c) catch return .{ .attached = .{ .new_pty_id = attach_info.pty_id } };
                         state.cwd_map.put(attach_info.pty_id, owned_cwd) catch {
                             state.allocator.free(owned_cwd);
                         };
                     }
-                    return .{ .attached = attach_info.pty_id };
+                    return .{ .attached = .{ .new_pty_id = attach_info.pty_id } };
                 },
                 .detach => .detached,
                 .get_server_info => handleServerInfoResult(state, result),
@@ -332,23 +332,23 @@ pub const ClientLogic = struct {
         return .none;
     }
 
-    fn handleSpawnResult(state: *ClientState, result: msgpack.Value, cwd: ?[]const u8) ServerAction {
+    fn handleSpawnResult(state: *ClientState, result: msgpack.Value, cwd: ?[]const u8, old_pty_id: ?u32) ServerAction {
         const id: i64 = switch (result) {
             .integer => |i| i,
             .unsigned => |u| @intCast(u),
             else => -1,
         };
-        log.info("processServerMessage: spawn result id={}", .{id});
+        log.info("processServerMessage: spawn result id={}, old_pty_id={?}", .{ id, old_pty_id });
         if (id >= 0) {
             state.pty_id = id;
             state.attached = true;
             if (cwd) |c| {
-                const owned_cwd = state.allocator.dupe(u8, c) catch return .{ .attached = id };
+                const owned_cwd = state.allocator.dupe(u8, c) catch return .{ .attached = .{ .new_pty_id = id, .old_pty_id = old_pty_id } };
                 state.cwd_map.put(id, owned_cwd) catch {
                     state.allocator.free(owned_cwd);
                 };
             }
-            return .{ .attached = id };
+            return .{ .attached = .{ .new_pty_id = id, .old_pty_id = old_pty_id } };
         }
         return .none;
     }
@@ -361,7 +361,7 @@ pub const ClientLogic = struct {
                     return .{ .send_attach = i };
                 } else if (!state.attached) {
                     state.attached = true;
-                    return .{ .attached = i };
+                    return .{ .attached = .{ .new_pty_id = i } };
                 }
                 return .none;
             },
@@ -369,10 +369,10 @@ pub const ClientLogic = struct {
                 if (state.pty_id == null) {
                     state.pty_id = @intCast(u);
                     state.attached = true;
-                    return .{ .attached = @intCast(u) };
+                    return .{ .attached = .{ .new_pty_id = @intCast(u) } };
                 } else if (!state.attached) {
                     state.attached = true;
-                    return .{ .attached = @intCast(u) };
+                    return .{ .attached = .{ .new_pty_id = @intCast(u) } };
                 }
                 return .none;
             },
@@ -653,6 +653,8 @@ pub const App = struct {
     pending_attach_count: usize = 0,
     session_json: ?[]const u8 = null,
     pending_attach_cwd: std.AutoHashMap(u32, []const u8) = undefined,
+    // Maps old PTY IDs to new PTY IDs when spawning fresh PTYs due to validity mismatch
+    pty_id_remap: std.AutoHashMap(u32, u32) = undefined,
 
     paste_buffer: ?std.ArrayList(u8) = null,
 
@@ -698,6 +700,7 @@ pub const App = struct {
             .surfaces = std.AutoHashMap(u32, *Surface).init(allocator),
             .state = ClientState.init(allocator),
             .pending_attach_cwd = std.AutoHashMap(u32, []const u8).init(allocator),
+            .pty_id_remap = std.AutoHashMap(u32, u32).init(allocator),
             .pending_color_queries = .empty,
         };
         app.parser = .{};
@@ -795,6 +798,7 @@ pub const App = struct {
             self.allocator.free(cwd.*);
         }
         self.pending_attach_cwd.deinit();
+        self.pty_id_remap.deinit();
         self.pending_color_queries.deinit(self.allocator);
         if (self.current_session_name) |name| {
             self.allocator.free(name);
@@ -1826,7 +1830,7 @@ pub const App = struct {
             if (!validity_matches) {
                 const msgid = self.state.next_msgid;
                 self.state.next_msgid += 1;
-                try self.state.pending_requests.put(msgid, .{ .spawn = .{ .cwd = cwd } });
+                try self.state.pending_requests.put(msgid, .{ .spawn = .{ .cwd = cwd, .old_pty_id = pty_id } });
                 try self.spawnPtyWithCwd(msgid, cwd);
                 continue;
             }
@@ -1971,9 +1975,17 @@ pub const App = struct {
                                     log.err("Failed to handle redraw: {}", .{err});
                                 };
                             },
-                            .attached => |id_i64| {
+                            .attached => |info| {
                                 log.info("Attached to session, checking for resize", .{});
-                                const pty_id = @as(u32, @intCast(id_i64));
+                                const pty_id = @as(u32, @intCast(info.new_pty_id));
+
+                                // If this spawn replaced an old PTY (validity mismatch), record the mapping
+                                if (info.old_pty_id) |old_id| {
+                                    log.info("Recording PTY ID remap: {} -> {}", .{ old_id, pty_id });
+                                    app.pty_id_remap.put(old_id, pty_id) catch |err| {
+                                        log.err("Failed to record PTY ID remap: {}", .{err});
+                                    };
+                                }
 
                                 // Ensure surface exists
                                 if (!app.surfaces.contains(pty_id)) {
@@ -2860,7 +2872,9 @@ pub const App = struct {
     fn ptyLookup(ctx: *anyopaque, id: u32) ?UI.PtyLookupResult {
         const self: *App = @ptrCast(@alignCast(ctx));
 
-        const surface = self.surfaces.get(id) orelse return null;
+        // Check if this ID was remapped (old PTY ID -> new PTY ID due to validity mismatch)
+        const lookup_id = self.pty_id_remap.get(id) orelse id;
+        const surface = self.surfaces.get(lookup_id) orelse return null;
 
         return .{
             .surface = surface,
@@ -3105,7 +3119,8 @@ test "ClientLogic - processServerMessage" {
         try testing.expect(state.response_received);
         try testing.expectEqual(123, state.pty_id.?);
         try testing.expectEqual(std.meta.Tag(ServerAction).attached, std.meta.activeTag(action));
-        try testing.expectEqual(123, action.attached);
+        try testing.expectEqual(123, action.attached.new_pty_id);
+        try testing.expectEqual(null, action.attached.old_pty_id);
     }
 
     // Test Attach response (already have pty_id)
@@ -3125,7 +3140,7 @@ test "ClientLogic - processServerMessage" {
         const action = try ClientLogic.processServerMessage(&state, msg);
         try testing.expect(state.attached);
         try testing.expectEqual(std.meta.Tag(ServerAction).attached, std.meta.activeTag(action));
-        try testing.expectEqual(123, action.attached);
+        try testing.expectEqual(123, action.attached.new_pty_id);
     }
 
     // Test Redraw Notification
