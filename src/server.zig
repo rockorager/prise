@@ -25,6 +25,37 @@ const posix = std.posix;
 
 const log = std.log.scoped(.server);
 
+/// Persistent storage for hyperlink URIs with stable IDs across renders.
+const HyperlinkStore = struct {
+    allocator: std.mem.Allocator,
+    map: std.StringHashMapUnmanaged(u32) = .empty,
+    next_id: u32 = 1,
+
+    pub fn init(allocator: std.mem.Allocator) HyperlinkStore {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *HyperlinkStore) void {
+        var it = self.map.keyIterator();
+        while (it.next()) |key| self.allocator.free(key.*);
+        self.map.deinit(self.allocator);
+    }
+
+    pub fn getOrAssign(self: *HyperlinkStore, uri: []const u8) !u32 {
+        if (self.map.get(uri)) |id| return id;
+
+        const owned = try self.allocator.dupe(u8, uri);
+        errdefer self.allocator.free(owned);
+
+        const id = self.next_id;
+        self.next_id +%= 1;
+        if (self.next_id == 0) self.next_id = 1;
+
+        try self.map.put(self.allocator, owned, id);
+        return id;
+    }
+};
+
 /// Resource limits to prevent unbounded growth in the long-running daemon.
 pub const LIMITS = struct {
     pub const CLIENTS_MAX: usize = 64;
@@ -152,9 +183,7 @@ const Pty = struct {
     left_click_count: u8 = 0,
     left_click_time: i64 = 0, // milliseconds timestamp
 
-    // Persistent hyperlink state for stable IDs across incremental renders
-    hyperlinks_map: std.StringHashMapUnmanaged(u32) = .empty,
-    next_hyperlink_id: u32 = 1, // 0 is reserved for "no hyperlink"
+    hyperlinks: HyperlinkStore,
 
     // Pointer to server for callbacks (opaque to avoid circular type dependency)
     server_ptr: *anyopaque = undefined,
@@ -198,6 +227,7 @@ const Pty = struct {
             .pipe_fds = pipe_fds,
             .exit_pipe_fds = exit_pipe_fds,
             .render_state = .empty,
+            .hyperlinks = HyperlinkStore.init(allocator),
         };
 
         // Postcondition: instance initialized in running state with no clients
@@ -249,12 +279,7 @@ const Pty = struct {
         self.clients.deinit(allocator);
         self.title.deinit(allocator);
         self.cwd.deinit(allocator);
-        // Free all hyperlink URI strings
-        var hl_iter = self.hyperlinks_map.keyIterator();
-        while (hl_iter.next()) |uri_ptr| {
-            allocator.free(uri_ptr.*);
-        }
-        self.hyperlinks_map.deinit(allocator);
+        self.hyperlinks.deinit();
         allocator.destroy(self);
     }
 
@@ -758,7 +783,6 @@ pub const RenderMode = enum { full, incremental };
 /// State passed between redraw helper functions
 const RedrawContext = struct {
     builder: *redraw.RedrawBuilder,
-    allocator: std.mem.Allocator, // persistent allocator for hyperlink URIs
     temp_alloc: std.mem.Allocator,
     pty_id: usize,
     rows: usize,
@@ -768,12 +792,8 @@ const RedrawContext = struct {
     next_style_id: u32,
     last_style: ?ghostty_vt.Style,
     last_style_id: u32,
-    // Pointer to Pty's persistent hyperlink state
-    hyperlinks_map: *std.StringHashMapUnmanaged(u32),
-    next_hyperlink_id: *u32,
-    // Per-render tracking of which hyperlinks have been emitted this frame
+    hyperlinks: *HyperlinkStore,
     emitted_hyperlinks: std.AutoHashMap(u32, void),
-    // Track last hyperlink ID within a row for run-length encoding
     last_hyperlink_id: u32,
 };
 
@@ -788,7 +808,14 @@ fn emitResize(builder: *redraw.RedrawBuilder, pty_id: usize, rows: usize, cols: 
     try builder.resize(@intCast(pty_id), @intCast(rows), @intCast(cols));
 }
 
-fn initStylesContext(pty_instance: *Pty, temp_alloc: std.mem.Allocator, builder: *redraw.RedrawBuilder, rows: usize, cols: usize) !RedrawContext {
+fn initStylesContext(
+    temp_alloc: std.mem.Allocator,
+    builder: *redraw.RedrawBuilder,
+    pty_id: usize,
+    rows: usize,
+    cols: usize,
+    hyperlinks: *HyperlinkStore,
+) !RedrawContext {
     var styles_map = std.AutoHashMap(u64, u32).init(temp_alloc);
     const default_style: ghostty_vt.Style = .{
         .fg_color = .none,
@@ -802,9 +829,8 @@ fn initStylesContext(pty_instance: *Pty, temp_alloc: std.mem.Allocator, builder:
 
     return .{
         .builder = builder,
-        .allocator = pty_instance.allocator,
         .temp_alloc = temp_alloc,
-        .pty_id = pty_instance.id,
+        .pty_id = pty_id,
         .rows = rows,
         .cols = cols,
         .default_style = default_style,
@@ -812,8 +838,7 @@ fn initStylesContext(pty_instance: *Pty, temp_alloc: std.mem.Allocator, builder:
         .next_style_id = 1,
         .last_style = null,
         .last_style_id = 0,
-        .hyperlinks_map = &pty_instance.hyperlinks_map,
-        .next_hyperlink_id = &pty_instance.next_hyperlink_id,
+        .hyperlinks = hyperlinks,
         .emitted_hyperlinks = std.AutoHashMap(u32, void).init(temp_alloc),
         .last_hyperlink_id = 0,
     };
@@ -854,9 +879,7 @@ fn resolveHyperlink(
     raw_cell: *const ghostty_vt.page.Cell,
     page: *const ghostty_vt.page.Page,
 ) !?u32 {
-    // No hyperlink on this cell
     if (!raw_cell.hyperlink) {
-        // If we were in a hyperlink, send 0 to end it
         if (ctx.last_hyperlink_id != 0) {
             ctx.last_hyperlink_id = 0;
             return 0;
@@ -865,7 +888,6 @@ fn resolveHyperlink(
     }
 
     const link_id = page.lookupHyperlink(raw_cell) orelse {
-        // Cell claims hyperlink but lookup failed - treat as no hyperlink
         if (ctx.last_hyperlink_id != 0) {
             ctx.last_hyperlink_id = 0;
             return 0;
@@ -875,40 +897,18 @@ fn resolveHyperlink(
     const link_entry = page.hyperlink_set.get(page.memory, link_id);
     const uri = link_entry.uri.slice(page.memory);
 
-    if (ctx.hyperlinks_map.get(uri)) |existing_id| {
-        try emitHyperlinkIfNeeded(ctx, existing_id, uri);
-        if (existing_id != ctx.last_hyperlink_id) {
-            ctx.last_hyperlink_id = existing_id;
-            return existing_id;
-        }
-        return null;
-    }
-
-    // Assign new stable ID using persistent state (wrapping handles overflow gracefully)
-    const hyperlink_id = ctx.next_hyperlink_id.*;
-    ctx.next_hyperlink_id.* +%= 1;
-    if (ctx.next_hyperlink_id.* == 0) ctx.next_hyperlink_id.* = 1; // Skip reserved ID 0
-    const uri_copy = try ctx.allocator.dupe(u8, uri);
-    errdefer ctx.allocator.free(uri_copy);
-    try ctx.hyperlinks_map.put(ctx.allocator, uri_copy, hyperlink_id);
+    const hyperlink_id = try ctx.hyperlinks.getOrAssign(uri);
     try emitHyperlinkIfNeeded(ctx, hyperlink_id, uri);
-    ctx.last_hyperlink_id = hyperlink_id;
-    return hyperlink_id;
+
+    if (hyperlink_id != ctx.last_hyperlink_id) {
+        ctx.last_hyperlink_id = hyperlink_id;
+        return hyperlink_id;
+    }
+    return null;
 }
 
 fn resolveAutoHyperlinkId(ctx: *RedrawContext, uri: []const u8) !u32 {
-    if (ctx.hyperlinks_map.get(uri)) |existing_id| {
-        try emitHyperlinkIfNeeded(ctx, existing_id, uri);
-        return existing_id;
-    }
-
-    // Assign new stable ID using persistent state (wrapping handles overflow gracefully)
-    const hyperlink_id = ctx.next_hyperlink_id.*;
-    ctx.next_hyperlink_id.* +%= 1;
-    if (ctx.next_hyperlink_id.* == 0) ctx.next_hyperlink_id.* = 1; // Skip reserved ID 0
-    const uri_copy = try ctx.allocator.dupe(u8, uri);
-    errdefer ctx.allocator.free(uri_copy);
-    try ctx.hyperlinks_map.put(ctx.allocator, uri_copy, hyperlink_id);
+    const hyperlink_id = try ctx.hyperlinks.getOrAssign(uri);
     try emitHyperlinkIfNeeded(ctx, hyperlink_id, uri);
     return hyperlink_id;
 }
@@ -1323,7 +1323,7 @@ fn buildRedrawMessageFromPty(
         try emitResize(&builder, pty_instance.id, rows, cols);
     }
 
-    var ctx = try initStylesContext(pty_instance, temp_alloc, &builder, rows, cols);
+    var ctx = try initStylesContext(temp_alloc, &builder, pty_instance.id, rows, cols, &pty_instance.hyperlinks);
     try emitRows(&ctx, rs, effective_mode);
     try emitCursor(&builder, pty_instance.id, rs);
     try builder.mouseShape(@intCast(pty_instance.id), mouse_shape);
@@ -3786,6 +3786,7 @@ test "buildRedrawMessageFromPty" {
         .pipe_fds = undefined,
         .exit_pipe_fds = undefined,
         .render_state = .empty,
+        .hyperlinks = HyperlinkStore.init(allocator),
         .server_ptr = undefined,
     };
     defer {
@@ -3794,6 +3795,7 @@ test "buildRedrawMessageFromPty" {
         pty_inst.clients.deinit(allocator);
         pty_inst.title.deinit(allocator);
         pty_inst.cwd.deinit(allocator);
+        pty_inst.hyperlinks.deinit();
     }
 
     const msg = try buildRedrawMessageFromPty(allocator, &pty_inst, .full);
@@ -3824,6 +3826,7 @@ test "style optimization" {
         .pipe_fds = undefined,
         .exit_pipe_fds = undefined,
         .render_state = .empty,
+        .hyperlinks = HyperlinkStore.init(allocator),
         .server_ptr = undefined,
     };
     defer {
@@ -3832,6 +3835,7 @@ test "style optimization" {
         pty_inst.clients.deinit(allocator);
         pty_inst.title.deinit(allocator);
         pty_inst.cwd.deinit(allocator);
+        pty_inst.hyperlinks.deinit();
     }
 
     const handler = vt_handler.Handler.init(&pty_inst.terminal);
@@ -3970,6 +3974,7 @@ test "server - pty exit notification" {
         .pipe_fds = pipe_fds,
         .exit_pipe_fds = exit_pipe_fds,
         .render_state = .empty,
+        .hyperlinks = HyperlinkStore.init(allocator),
         .server_ptr = &server,
         .exited = std.atomic.Value(bool).init(false),
         .exit_status = std.atomic.Value(u32).init(0),
