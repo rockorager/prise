@@ -1,6 +1,7 @@
 //! UI layout and widget tree management.
 
 const std = @import("std");
+const build_options = @import("build_options");
 
 const vaxis = @import("vaxis");
 const zeit = @import("zeit");
@@ -135,8 +136,8 @@ pub const UI = struct {
 
         const extra_paths = std.fmt.allocPrint(
             allocator,
-            "{s}/.local/share/prise/lua/?.lua;/usr/local/share/prise/lua/?.lua;/usr/share/prise/lua/?.lua;/opt/homebrew/share/prise/lua/?.lua;{s}",
-            .{ home, current_path },
+            "{s}/share/prise/lua/?.lua;/usr/local/share/prise/lua/?.lua;/usr/share/prise/lua/?.lua;/opt/homebrew/share/prise/lua/?.lua;{s}",
+            .{ build_options.install_prefix, current_path },
         ) catch |err| {
             return .{ .err = .{ .err = err, .lua_msg = null } };
         };

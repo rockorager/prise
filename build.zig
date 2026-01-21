@@ -15,6 +15,7 @@ pub fn build(b: *std.Build) void {
 
     const options = b.addOptions();
     options.addOption([]const u8, "version", version);
+    options.addOption([]const u8, "install_prefix", b.install_prefix);
     exe_mod.addOptions("build_options", options);
 
     const ghostty = b.dependency("ghostty", .{
