@@ -143,13 +143,137 @@ The **status_bar** table configures the bottom status bar.
 **enabled**
 :   Show the status bar. Default: **true**
 
-Example:
+**widgets**
+:   Configure widgets for left, center, and right sections. If not specified,
+    the default layout is used (mode, git, zoom on left; time on right).
+
+Example (disable status bar):
 
 ```lua
 ui.setup({
     status_bar = { enabled = false },
 })
 ```
+
+## Status Bar Widgets
+
+The status bar supports customizable widgets arranged in three sections:
+left, center, and right. Each section is an array of widget specifications.
+
+```lua
+ui.setup({
+    status_bar = {
+        widgets = {
+            left = { "mode", "git", "zoom" },
+            center = {},
+            right = { "battery", "time" },
+        },
+    },
+})
+```
+
+### Built-in Widgets
+
+The following built-in widgets are available:
+
+**mode**
+:   Shows current mode (normal/command) and session name. Updates on state change.
+
+**git**
+:   Shows the current git branch for the focused pane's working directory.
+    Auto-hides when not in a git repository. Updates on focus and cwd change.
+
+**zoom**
+:   Shows "ZOOM" indicator when a pane is maximized. Auto-hides when not zoomed.
+
+**time**
+:   Shows current time in "Day HH:MM" format. Updates every 60 seconds.
+
+**battery**
+:   Shows battery percentage and charging status. Auto-hides on systems without
+    a battery (e.g., desktops). Updates every 30 seconds.
+    Supports macOS and Linux.
+
+**hostname**
+:   Shows the system hostname.
+
+### Shell Command Widgets
+
+You can create custom widgets that execute shell commands:
+
+```lua
+ui.setup({
+    status_bar = {
+        widgets = {
+            right = {
+                {
+                    type = "shell",
+                    command = "curl -s 'wttr.in?format=1'",
+                    interval = 600000,  -- 10 minutes (in ms)
+                    icon = "",         -- Optional prefix icon
+                },
+                "time",
+            },
+        },
+    },
+})
+```
+
+Shell widget options:
+
+**type**
+:   Must be **"shell"** for shell command widgets.
+
+**command**
+:   The shell command to execute. Output is trimmed of trailing newlines.
+
+**interval**
+:   Refresh interval in milliseconds. Default: **60000** (1 minute).
+
+**timeout**
+:   Command timeout in milliseconds. Default: **5000** (5 seconds).
+
+**icon**
+:   Optional icon to display before the command output.
+
+**style**
+:   Optional custom style table with **bg**, **fg**, **bold** fields.
+
+### Custom Widget Functions
+
+For advanced use cases, you can define widgets with custom render functions:
+
+```lua
+ui.setup({
+    status_bar = {
+        widgets = {
+            right = {
+                {
+                    render = function(state, theme)
+                        -- Return nil to hide the widget
+                        -- Return { text = "...", style = { bg = "...", fg = "..." } } to show
+                        return {
+                            text = " Custom ",
+                            style = { bg = theme.bg3, fg = theme.fg_dim }
+                        }
+                    end,
+                    interval = 5000,  -- Optional refresh interval
+                },
+            },
+        },
+    },
+})
+```
+
+### Default Layout
+
+If **widgets** is not specified, the status bar uses this default layout:
+
+- **Left**: mode, git branch, zoom indicator
+- **Center**: (empty)
+- **Right**: time
+
+This maintains backwards compatibility with existing configurations.
 
 # TAB BAR
 
