@@ -68,3 +68,9 @@ function Pty:close() end
 
 ---Copy the current selection to clipboard
 function Pty:copy_selection() end
+
+---Get the hyperlink URI at a specific cell position
+---@param row integer Row position (0-indexed)
+---@param col integer Column position (0-indexed)
+---@return string? uri The hyperlink URI, or nil if no hyperlink at that position
+function Pty:get_hyperlink_at(row, col) end

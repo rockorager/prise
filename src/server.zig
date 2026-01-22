@@ -25,6 +25,37 @@ const posix = std.posix;
 
 const log = std.log.scoped(.server);
 
+/// Persistent storage for hyperlink URIs with stable IDs across renders.
+const HyperlinkStore = struct {
+    allocator: std.mem.Allocator,
+    map: std.StringHashMapUnmanaged(u32) = .empty,
+    next_id: u32 = 1,
+
+    pub fn init(allocator: std.mem.Allocator) HyperlinkStore {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *HyperlinkStore) void {
+        var it = self.map.keyIterator();
+        while (it.next()) |key| self.allocator.free(key.*);
+        self.map.deinit(self.allocator);
+    }
+
+    pub fn getOrAssign(self: *HyperlinkStore, uri: []const u8) !u32 {
+        if (self.map.get(uri)) |id| return id;
+
+        const owned = try self.allocator.dupe(u8, uri);
+        errdefer self.allocator.free(owned);
+
+        const id = self.next_id;
+        self.next_id +%= 1;
+        if (self.next_id == 0) self.next_id = 1;
+
+        try self.map.put(self.allocator, owned, id);
+        return id;
+    }
+};
+
 /// Resource limits to prevent unbounded growth in the long-running daemon.
 pub const LIMITS = struct {
     pub const CLIENTS_MAX: usize = 64;
@@ -152,6 +183,8 @@ const Pty = struct {
     left_click_count: u8 = 0,
     left_click_time: i64 = 0, // milliseconds timestamp
 
+    hyperlinks: HyperlinkStore,
+
     // Pointer to server for callbacks (opaque to avoid circular type dependency)
     server_ptr: *anyopaque = undefined,
 
@@ -194,6 +227,7 @@ const Pty = struct {
             .pipe_fds = pipe_fds,
             .exit_pipe_fds = exit_pipe_fds,
             .render_state = .empty,
+            .hyperlinks = HyperlinkStore.init(allocator),
         };
 
         // Postcondition: instance initialized in running state with no clients
@@ -245,6 +279,7 @@ const Pty = struct {
         self.clients.deinit(allocator);
         self.title.deinit(allocator);
         self.cwd.deinit(allocator);
+        self.hyperlinks.deinit();
         allocator.destroy(self);
     }
 
@@ -757,6 +792,9 @@ const RedrawContext = struct {
     next_style_id: u32,
     last_style: ?ghostty_vt.Style,
     last_style_id: u32,
+    hyperlinks: *HyperlinkStore,
+    emitted_hyperlinks: std.AutoHashMap(u32, void),
+    last_hyperlink_id: u32,
 };
 
 fn emitTitle(builder: *redraw.RedrawBuilder, pty_instance: *Pty, mode: RenderMode) !void {
@@ -770,7 +808,14 @@ fn emitResize(builder: *redraw.RedrawBuilder, pty_id: usize, rows: usize, cols: 
     try builder.resize(@intCast(pty_id), @intCast(rows), @intCast(cols));
 }
 
-fn initStylesContext(temp_alloc: std.mem.Allocator, builder: *redraw.RedrawBuilder, pty_id: usize, rows: usize, cols: usize) !RedrawContext {
+fn initStylesContext(
+    temp_alloc: std.mem.Allocator,
+    builder: *redraw.RedrawBuilder,
+    pty_id: usize,
+    rows: usize,
+    cols: usize,
+    hyperlinks: *HyperlinkStore,
+) !RedrawContext {
     var styles_map = std.AutoHashMap(u64, u32).init(temp_alloc);
     const default_style: ghostty_vt.Style = .{
         .fg_color = .none,
@@ -793,6 +838,9 @@ fn initStylesContext(temp_alloc: std.mem.Allocator, builder: *redraw.RedrawBuild
         .next_style_id = 1,
         .last_style = null,
         .last_style_id = 0,
+        .hyperlinks = hyperlinks,
+        .emitted_hyperlinks = std.AutoHashMap(u32, void).init(temp_alloc),
+        .last_hyperlink_id = 0,
     };
 }
 
@@ -818,6 +866,198 @@ fn resolveStyle(ctx: *RedrawContext, vt_style: ghostty_vt.Style) !u32 {
     ctx.last_style = vt_style;
     ctx.last_style_id = style_id;
     return style_id;
+}
+
+fn emitHyperlinkIfNeeded(ctx: *RedrawContext, hyperlink_id: u32, uri: []const u8) !void {
+    if (ctx.emitted_hyperlinks.contains(hyperlink_id)) return;
+    try ctx.emitted_hyperlinks.put(hyperlink_id, {});
+    try ctx.builder.hyperlink(hyperlink_id, uri);
+}
+
+fn resolveHyperlink(
+    ctx: *RedrawContext,
+    raw_cell: *const ghostty_vt.page.Cell,
+    page: *const ghostty_vt.page.Page,
+) !?u32 {
+    if (!raw_cell.hyperlink) {
+        if (ctx.last_hyperlink_id != 0) {
+            ctx.last_hyperlink_id = 0;
+            return 0;
+        }
+        return null;
+    }
+
+    const link_id = page.lookupHyperlink(raw_cell) orelse {
+        if (ctx.last_hyperlink_id != 0) {
+            ctx.last_hyperlink_id = 0;
+            return 0;
+        }
+        return null;
+    };
+    const link_entry = page.hyperlink_set.get(page.memory, link_id);
+    const uri = link_entry.uri.slice(page.memory);
+
+    const hyperlink_id = try ctx.hyperlinks.getOrAssign(uri);
+    try emitHyperlinkIfNeeded(ctx, hyperlink_id, uri);
+
+    if (hyperlink_id != ctx.last_hyperlink_id) {
+        ctx.last_hyperlink_id = hyperlink_id;
+        return hyperlink_id;
+    }
+    return null;
+}
+
+fn resolveAutoHyperlinkId(ctx: *RedrawContext, uri: []const u8) !u32 {
+    const hyperlink_id = try ctx.hyperlinks.getOrAssign(uri);
+    try emitHyperlinkIfNeeded(ctx, hyperlink_id, uri);
+    return hyperlink_id;
+}
+
+fn isUrlChar(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or switch (ch) {
+        ':', '/', '?', '#', '[', ']', '@', '!', '$', '&', '\'', '(', ')', '*', '+', ',', ';', '=', '-', '.', '_', '~', '%' => true,
+        else => false,
+    };
+}
+
+fn isLinkStartBoundary(ch: u8) bool {
+    return ch == 0 or std.ascii.isWhitespace(ch) or switch (ch) {
+        '(', '[', '{', '<', '"', '\'', '`' => true,
+        else => false,
+    };
+}
+
+fn countChar(slice: []const u8, ch: u8) usize {
+    var count: usize = 0;
+    for (slice) |c| {
+        if (c == ch) count += 1;
+    }
+    return count;
+}
+
+fn trimUrlEnd(row_chars: []const u8, start: usize, end: usize) usize {
+    var trimmed_end = end;
+    while (trimmed_end > start) {
+        const ch = row_chars[trimmed_end - 1];
+        // Always trim trailing punctuation that's unlikely to be part of URL
+        if (ch == '.' or ch == ',' or ch == ';' or ch == ':' or ch == '!' or ch == '?') {
+            trimmed_end -= 1;
+            continue;
+        }
+        // For paired delimiters, only trim if unbalanced (more closers than openers)
+        if (ch == ')') {
+            const url_so_far = row_chars[start..trimmed_end];
+            const open_count = countChar(url_so_far, '(');
+            const close_count = countChar(url_so_far, ')');
+            if (close_count > open_count) {
+                trimmed_end -= 1;
+                continue;
+            }
+        }
+        if (ch == ']') {
+            const url_so_far = row_chars[start..trimmed_end];
+            const open_count = countChar(url_so_far, '[');
+            const close_count = countChar(url_so_far, ']');
+            if (close_count > open_count) {
+                trimmed_end -= 1;
+                continue;
+            }
+        }
+        if (ch == '}') {
+            const url_so_far = row_chars[start..trimmed_end];
+            const open_count = countChar(url_so_far, '{');
+            const close_count = countChar(url_so_far, '}');
+            if (close_count > open_count) {
+                trimmed_end -= 1;
+                continue;
+            }
+        }
+        break;
+    }
+    return trimmed_end;
+}
+
+fn buildRowAscii(ctx: *RedrawContext, slices: CellSlices) ![]u8 {
+    const row_chars = try ctx.temp_alloc.alloc(u8, ctx.cols);
+    @memset(row_chars, 0);
+
+    var x: usize = 0;
+    while (x < ctx.cols) : (x += 1) {
+        const raw_cell = slices.raw[x];
+        if (raw_cell.wide == .spacer_tail or raw_cell.hyperlink or raw_cell.wide == .wide) continue;
+
+        const is_direct_color = raw_cell.content_tag == .bg_color_rgb or raw_cell.content_tag == .bg_color_palette;
+        if (is_direct_color) continue;
+
+        const text = try resolveCellText(ctx, raw_cell, slices.grapheme[x], false);
+        if (text.len == 1 and text[0] >= 0x20 and text[0] < 0x7f) {
+            row_chars[x] = text[0];
+        }
+    }
+
+    return row_chars;
+}
+
+fn buildAutoLinkMap(ctx: *RedrawContext, slices: CellSlices) ![]u32 {
+    const auto_links = try ctx.temp_alloc.alloc(u32, ctx.cols);
+    @memset(auto_links, 0);
+
+    const row_chars = try buildRowAscii(ctx, slices);
+    const prefixes = [_][]const u8{ "http://", "https://" };
+
+    var i: usize = 0;
+    while (i < row_chars.len) {
+        if (row_chars[i] == 0) {
+            i += 1;
+            continue;
+        }
+
+        var prefix_len: usize = 0;
+        for (prefixes) |prefix| {
+            if (i + prefix.len <= row_chars.len and std.mem.eql(u8, row_chars[i .. i + prefix.len], prefix)) {
+                prefix_len = prefix.len;
+                break;
+            }
+        }
+
+        if (prefix_len == 0) {
+            i += 1;
+            continue;
+        }
+
+        if (i > 0 and !isLinkStartBoundary(row_chars[i - 1])) {
+            i += 1;
+            continue;
+        }
+
+        var end = i + prefix_len;
+        while (end < row_chars.len and row_chars[end] != 0 and isUrlChar(row_chars[end])) : (end += 1) {}
+
+        end = trimUrlEnd(row_chars, i, end);
+        const uri_len = end - i;
+
+        // Skip URLs that are too short or exceed OSC 8 length limit (2083 bytes)
+        if (uri_len <= prefix_len or uri_len > 2083) {
+            i += 1;
+            continue;
+        }
+
+        const uri = row_chars[i..end];
+        const link_id = try resolveAutoHyperlinkId(ctx, uri);
+        for (i..end) |col| {
+            auto_links[col] = link_id;
+        }
+        i = end;
+    }
+
+    return auto_links;
+}
+
+fn resolveAutoLink(ctx: *RedrawContext, auto_links: []const u32, col: usize) ?u32 {
+    const auto_id = auto_links[col];
+    if (auto_id == ctx.last_hyperlink_id) return null;
+    ctx.last_hyperlink_id = auto_id;
+    return auto_id;
 }
 
 const CellSlices = struct {
@@ -920,10 +1160,12 @@ fn cellsMatch(
     return true;
 }
 
-fn emitRow(ctx: *RedrawContext, y: usize, slices: CellSlices) !void {
+fn emitRow(ctx: *RedrawContext, y: usize, slices: CellSlices, row_pin: ghostty_vt.PageList.Pin) !void {
     var cells_buf = std.ArrayList(redraw.UIEvent.Write.Cell).empty;
-    var last_hl_id: u32 = 0;
+    var last_style_id: u32 = 0;
     var x: usize = 0;
+    const page = &row_pin.node.data;
+    const auto_links = try buildAutoLinkMap(ctx, slices);
 
     while (x < ctx.cols) {
         const raw_cell = slices.raw[x];
@@ -948,14 +1190,24 @@ fn emitRow(ctx: *RedrawContext, y: usize, slices: CellSlices) !void {
         const text = try resolveCellText(ctx, raw_cell, slices.grapheme[x], is_direct_color);
         const repeat = detectRepeat(raw_cell, slices, x, ctx.cols, is_direct_color);
 
-        const hl_id_to_send: ?u32 = if (style_id != last_hl_id) style_id else null;
-        if (hl_id_to_send) |id| last_hl_id = id;
+        const style_id_to_send: ?u32 = if (style_id != last_style_id) style_id else null;
+        if (style_id_to_send) |id| last_style_id = id;
+
+        // Get actual cell pointer from page memory for hyperlink lookup
+        var pin = row_pin;
+        pin.x = @intCast(x);
+        const rac = pin.rowAndCell();
+        const hyperlink_id = if (raw_cell.hyperlink)
+            try resolveHyperlink(ctx, rac.cell, page)
+        else
+            resolveAutoLink(ctx, auto_links, x);
 
         try cells_buf.append(ctx.temp_alloc, .{
             .grapheme = text,
-            .style_id = hl_id_to_send,
+            .style_id = style_id_to_send,
             .repeat = if (repeat > 1) @intCast(repeat) else null,
             .width = if (raw_cell.wide == .wide) 2 else null,
+            .hyperlink_id = hyperlink_id,
         });
 
         x += repeat;
@@ -971,6 +1223,7 @@ fn emitRows(ctx: *RedrawContext, rs: *ghostty_vt.RenderState, effective_mode: Re
     const row_data_slice = rs.row_data.slice();
     const row_cells = row_data_slice.items(.cells);
     const row_dirties = row_data_slice.items(.dirty);
+    const row_pins = row_data_slice.items(.pin);
 
     for (0..ctx.rows) |y| {
         if (effective_mode == .incremental and !row_dirties[y]) continue;
@@ -983,7 +1236,7 @@ fn emitRows(ctx: *RedrawContext, rs: *ghostty_vt.RenderState, effective_mode: Re
             .style = rs_cells_slice.items(.style),
             .grapheme = rs_cells_slice.items(.grapheme),
         };
-        try emitRow(ctx, y, slices);
+        try emitRow(ctx, y, slices, row_pins[y]);
     }
 }
 
@@ -1070,7 +1323,7 @@ fn buildRedrawMessageFromPty(
         try emitResize(&builder, pty_instance.id, rows, cols);
     }
 
-    var ctx = try initStylesContext(temp_alloc, &builder, pty_instance.id, rows, cols);
+    var ctx = try initStylesContext(temp_alloc, &builder, pty_instance.id, rows, cols, &pty_instance.hyperlinks);
     try emitRows(&ctx, rs, effective_mode);
     try emitCursor(&builder, pty_instance.id, rs);
     try builder.mouseShape(@intCast(pty_instance.id), mouse_shape);
@@ -3533,6 +3786,7 @@ test "buildRedrawMessageFromPty" {
         .pipe_fds = undefined,
         .exit_pipe_fds = undefined,
         .render_state = .empty,
+        .hyperlinks = HyperlinkStore.init(allocator),
         .server_ptr = undefined,
     };
     defer {
@@ -3541,6 +3795,7 @@ test "buildRedrawMessageFromPty" {
         pty_inst.clients.deinit(allocator);
         pty_inst.title.deinit(allocator);
         pty_inst.cwd.deinit(allocator);
+        pty_inst.hyperlinks.deinit();
     }
 
     const msg = try buildRedrawMessageFromPty(allocator, &pty_inst, .full);
@@ -3571,6 +3826,7 @@ test "style optimization" {
         .pipe_fds = undefined,
         .exit_pipe_fds = undefined,
         .render_state = .empty,
+        .hyperlinks = HyperlinkStore.init(allocator),
         .server_ptr = undefined,
     };
     defer {
@@ -3579,6 +3835,7 @@ test "style optimization" {
         pty_inst.clients.deinit(allocator);
         pty_inst.title.deinit(allocator);
         pty_inst.cwd.deinit(allocator);
+        pty_inst.hyperlinks.deinit();
     }
 
     const handler = vt_handler.Handler.init(&pty_inst.terminal);
@@ -3717,6 +3974,7 @@ test "server - pty exit notification" {
         .pipe_fds = pipe_fds,
         .exit_pipe_fds = exit_pipe_fds,
         .render_state = .empty,
+        .hyperlinks = HyperlinkStore.init(allocator),
         .server_ptr = &server,
         .exited = std.atomic.Value(bool).init(false),
         .exit_status = std.atomic.Value(u32).init(0),

@@ -2708,6 +2708,18 @@ function M.update(event)
             and d.target == floating_tab.floating.pane.id
         then
             if floating_tab.floating.pane.pty then
+                -- Check for hyperlink click (Cmd+left click)
+                if d.action == "press" and (d.button == "left" or d.button == "none") and d.mods.super then
+                    local uri = floating_tab.floating.pane.pty:get_hyperlink_at(
+                        math.floor(d.target_y or 0),
+                        math.floor(d.target_x or 0)
+                    )
+                    if uri then
+                        utils.open_url(uri)
+                        return
+                    end
+                end
+
                 floating_tab.floating.pane.pty:send_mouse({
                     x = d.target_x or 0,
                     y = d.target_y or 0,
@@ -2725,6 +2737,16 @@ function M.update(event)
             local path = find_node_path(root, d.target)
             if path then
                 local pane = path[#path]
+
+                -- Check for hyperlink click (Cmd+left click)
+                if d.action == "press" and (d.button == "left" or d.button == "none") and d.mods.super then
+                    local uri = pane.pty:get_hyperlink_at(math.floor(d.target_y or 0), math.floor(d.target_x or 0))
+                    if uri then
+                        utils.open_url(uri)
+                        return
+                    end
+                end
+
                 pane.pty:send_mouse({
                     x = d.target_x or 0,
                     y = d.target_y or 0,

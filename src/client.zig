@@ -18,6 +18,18 @@ const log = std.log.scoped(.client);
 
 const MAX_PASTE_SIZE = 10 * 1024 * 1024; // 10 MiB
 
+const InputState = struct {
+    mods: vaxis.Key.Modifiers = .{},
+
+    fn updateFromKey(self: *InputState, key: vaxis.Key) void {
+        self.mods = key.mods;
+    }
+
+    fn reset(self: *InputState) void {
+        self.mods = .{};
+    }
+};
+
 pub const MsgId = enum(u16) {
     spawn_pty = 1,
     attach_pty = 2,
@@ -642,6 +654,8 @@ pub const App = struct {
     // to allow scrolling while selecting beyond viewport bounds
     selection_drag_pty: ?u32 = null,
 
+    input_state: InputState = .{},
+
     pipe_read_fd: posix.fd_t = undefined,
     pipe_write_fd: posix.fd_t = undefined,
     parser: vaxis.Parser = undefined,
@@ -1091,6 +1105,12 @@ pub const App = struct {
             return;
         }
 
+        if (event == .key_press) {
+            self.input_state.updateFromKey(event.key_press);
+        } else if (event == .key_release) {
+            self.input_state.updateFromKey(event.key_release);
+        }
+
         // If we're in paste mode, buffer key presses instead of forwarding
         if (self.paste_buffer != null and event == .key_press) {
             const key = event.key_press;
@@ -1219,9 +1239,23 @@ pub const App = struct {
                         target_x = x - @as(f64, @floatFromInt(region.x));
                         target_y = y - @as(f64, @floatFromInt(region.y));
                     }
-                    // Update mouse cursor shape based on target PTY's mouse_shape
                     if (self.surfaces.get(pty_id)) |surface| {
-                        const vaxis_shape = mapMouseShapeToVaxis(surface.mouse_shape);
+                        var hyperlink_hover = false;
+                        if (self.input_state.mods.super) {
+                            if (target_x) |hover_x| {
+                                if (target_y) |hover_y| {
+                                    if (hover_x >= 0 and hover_y >= 0) {
+                                        const hover_col: u16 = @intFromFloat(@floor(hover_x));
+                                        const hover_row: u16 = @intFromFloat(@floor(hover_y));
+                                        if (surface.getHyperlinkAt(hover_row, hover_col) != null) {
+                                            hyperlink_hover = true;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        const vaxis_shape = if (hyperlink_hover) .pointer else mapMouseShapeToVaxis(surface.mouse_shape);
                         self.vx.setMouseShape(vaxis_shape);
                         try self.scheduleRender();
                     }
@@ -1237,6 +1271,7 @@ pub const App = struct {
                     .button = mouse.button,
                     .action = mouse.type,
                     .mods = mouse.mods,
+                    .super = self.input_state.mods.super,
                     .target = target,
                     .target_x = target_x,
                     .target_y = target_y,
@@ -1556,6 +1591,9 @@ pub const App = struct {
                 const should_flush = ClientLogic.shouldFlush(params);
                 if (should_flush) {
                     log.debug("handleRedraw: flush event received for pty {}, rendering", .{pid});
+                    try self.scheduleRender();
+                } else if (surface.dirty) {
+                    surface.commitFrame();
                     try self.scheduleRender();
                 }
             } else {
