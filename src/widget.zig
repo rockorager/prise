@@ -171,7 +171,11 @@ pub const Widget = struct {
                 p.child.deinit(allocator);
                 allocator.destroy(p.child);
             },
-            .separator => {},
+            .separator => |*sep| {
+                if (sep.segments) |segs| {
+                    allocator.free(segs);
+                }
+            },
         }
     }
 
@@ -429,14 +433,56 @@ pub const Widget = struct {
             },
             .separator => |sep| {
                 const line_char = sep.lineChar();
-                const style = sep.style;
+                const total_size: u16 = if (sep.axis == .horizontal) win.width else win.height;
 
-                for (0..win.height) |row| {
-                    for (0..win.width) |col| {
-                        win.writeCell(@intCast(col), @intCast(row), .{
-                            .char = .{ .grapheme = line_char, .width = 1 },
-                            .style = style,
-                        });
+                if (total_size == 0) {
+                    return;
+                }
+
+                if (sep.segments) |segments| {
+                    // Segmented rendering
+                    if (sep.axis == .horizontal) {
+                        for (0..win.width) |col| {
+                            var segment_style = sep.style;
+                            for (segments) |segment| {
+                                const actual_start: u16 = @intFromFloat(segment.ratio_start * @as(f32, @floatFromInt(total_size)));
+                                const actual_end: u16 = @intFromFloat(segment.ratio_end * @as(f32, @floatFromInt(total_size)));
+                                if (col >= actual_start and col < actual_end) {
+                                    segment_style = segment.style;
+                                    break;
+                                }
+                            }
+                            win.writeCell(@intCast(col), 0, .{
+                                .char = .{ .grapheme = line_char, .width = 1 },
+                                .style = segment_style,
+                            });
+                        }
+                    } else {
+                        for (0..win.height) |row| {
+                            var segment_style = sep.style;
+                            for (segments) |segment| {
+                                const actual_start: u16 = @intFromFloat(segment.ratio_start * @as(f32, @floatFromInt(total_size)));
+                                const actual_end: u16 = @intFromFloat(segment.ratio_end * @as(f32, @floatFromInt(total_size)));
+                                if (row >= actual_start and row < actual_end) {
+                                    segment_style = segment.style;
+                                    break;
+                                }
+                            }
+                            win.writeCell(0, @intCast(row), .{
+                                .char = .{ .grapheme = line_char, .width = 1 },
+                                .style = segment_style,
+                            });
+                        }
+                    }
+                } else {
+                    // Solid rendering
+                    for (0..win.height) |row| {
+                        for (0..win.width) |col| {
+                            win.writeCell(@intCast(col), @intCast(row), .{
+                                .char = .{ .grapheme = line_char, .width = 1 },
+                                .style = sep.style,
+                            });
+                        }
                     }
                 }
             },
@@ -788,6 +834,7 @@ pub const Separator = struct {
     axis: Axis,
     style: vaxis.Style = .{},
     border: Box.Border = .single,
+    segments: ?[]const SeparatorSegment = null, // optional, when segmented rendering is needed
 
     pub const Axis = enum { horizontal, vertical };
 
@@ -806,6 +853,12 @@ pub const Separator = struct {
             },
         };
     }
+};
+
+pub const SeparatorSegment = struct {
+    ratio_start: f32,
+    ratio_end: f32,
+    style: vaxis.Style,
 };
 
 pub const Padding = struct {
@@ -1081,6 +1134,8 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
         const len = lua.rawLen(-1);
         for (1..len + 1) |i| {
             _ = lua.getIndex(-1, @intCast(i));
+            defer lua.pop(1);
+
             if (lua.typeOf(-1) == .string) {
                 const text = try lua.toString(-1);
                 try items.append(allocator, .{
@@ -1104,7 +1159,6 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
                     .style = item_style,
                 });
             }
-            lua.pop(1);
         }
         lua.pop(1); // items
 
@@ -1264,10 +1318,11 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
         const len = lua.rawLen(-1);
         for (1..len + 1) |i| {
             _ = lua.getIndex(-1, @intCast(i));
+            defer lua.pop(1);
+
             // recursive call
             const child = try parseWidget(lua, allocator, -1);
             try children.append(allocator, child);
-            lua.pop(1);
         }
         lua.pop(1); // children
 
@@ -1310,10 +1365,11 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
         const len = lua.rawLen(-1);
         for (1..len + 1) |i| {
             _ = lua.getIndex(-1, @intCast(i));
+            defer lua.pop(1);
+
             // recursive call
             const child = try parseWidget(lua, allocator, -1);
             try children.append(allocator, child);
-            lua.pop(1);
         }
         lua.pop(1); // children
 
@@ -1436,9 +1492,10 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
         const len = lua.rawLen(-1);
         for (1..len + 1) |i| {
             _ = lua.getIndex(-1, @intCast(i));
+            defer lua.pop(1);
+
             const child = try parseWidget(lua, allocator, -1);
             try children.append(allocator, child);
-            lua.pop(1);
         }
         lua.pop(1); // children
 
@@ -1516,7 +1573,7 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
         }
         lua.pop(1);
 
-        // Parse style
+        // Parse default style (used for unsegmented and as fallback for segments)
         var style = vaxis.Style{};
         _ = lua.getField(index, "style");
         if (lua.typeOf(-1) == .table) {
@@ -1524,10 +1581,62 @@ pub fn parseWidget(lua: *ziglua.Lua, allocator: std.mem.Allocator, index: i32) !
         }
         lua.pop(1);
 
+        // Optional: parse segments for segmented rendering
+        var segments_list = std.ArrayList(SeparatorSegment).empty;
+        errdefer segments_list.deinit(allocator);
+
+        _ = lua.getField(index, "segments");
+        defer lua.pop(1);
+
+        if (lua.typeOf(-1) == .table) {
+            const segments_len = lua.rawLen(-1);
+            for (1..segments_len + 1) |i| {
+                _ = lua.getIndex(-1, @intCast(i));
+                defer lua.pop(1);
+
+                if (lua.typeOf(-1) == .table) {
+                    var ratio_start: f32 = 0.0;
+                    var ratio_end: f32 = 1.0;
+                    var seg_style = style;
+
+                    _ = lua.getField(-1, "ratio_start");
+                    if (lua.typeOf(-1) == .number) {
+                        ratio_start = @floatCast(lua.toNumber(-1) catch 0.0);
+                    }
+                    lua.pop(1);
+
+                    _ = lua.getField(-1, "ratio_end");
+                    if (lua.typeOf(-1) == .number) {
+                        ratio_end = @floatCast(lua.toNumber(-1) catch 1.0);
+                    }
+                    lua.pop(1);
+
+                    _ = lua.getField(-1, "style");
+                    if (lua.typeOf(-1) == .table) {
+                        seg_style = parseStyle(lua, -1) catch style;
+                    }
+                    lua.pop(1);
+
+                    try segments_list.append(allocator, .{
+                        .ratio_start = ratio_start,
+                        .ratio_end = ratio_end,
+                        .style = seg_style,
+                    });
+                }
+            }
+        }
+
+        // Only use segments if we parsed some
+        const segments = if (segments_list.items.len > 0)
+            try segments_list.toOwnedSlice(allocator)
+        else
+            null;
+
         return .{ .ratio = ratio, .id = id, .focus = focus, .kind = .{ .separator = .{
             .axis = axis,
             .border = border,
             .style = style,
+            .segments = segments,
         } } };
     }
 
