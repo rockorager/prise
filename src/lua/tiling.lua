@@ -206,6 +206,17 @@ local POWERLINE_SYMBOLS = {
 ---Example: ["<leader>v"] = "split_horizontal"
 ---@alias PriseKeybinds table<string, string|function>
 
+---@class PrisePluginSpec
+---@field [1] string "user/repo" GitHub repository, or local path (./path, ../path, ~/path, /path)
+---@field name? string Logical name for the plugin (default: repo name or directory name)
+---@field branch? string Git branch or tag for remote plugins (default: HEAD)
+---@field enabled? boolean|fun(): boolean Whether plugin is enabled (default: true)
+---@field lazy? boolean Load lazily (default: true)
+---@field event? string|string[] Events that trigger lazy loading
+---@field keys? string|string[] Keys that trigger lazy loading
+---@field opts? table Options passed to plugin.setup()
+---@field config? fun(plugin: table, opts: table) Custom config function
+
 ---@class PriseBordersConfig
 ---@field enabled? boolean Show pane borders (default: false)
 ---@field show_single_pane? boolean Show border when only one pane exists (default: false)
@@ -227,6 +238,7 @@ local POWERLINE_SYMBOLS = {
 ---@field leader? string Leader key sequence (default: "<D-k>")
 ---@field keybinds? PriseKeybinds Keybind definitions
 ---@field macos_option_as_alt? "false"|"left"|"right"|"true" macOS Option key behavior (default: "false")
+---@field plugins? PrisePluginSpec[] List of plugins to load
 
 ---@class PriseConfig
 ---@field theme PriseTheme
@@ -236,6 +248,7 @@ local POWERLINE_SYMBOLS = {
 ---@field floating PriseFloatingConfig
 ---@field leader string
 ---@field keybinds PriseKeybinds
+---@field plugins? PrisePluginSpec[]
 
 -- Default configuration
 ---@type PriseConfig
@@ -398,6 +411,13 @@ local state = {
         pending = false,
         resize_mode = false,
     },
+    -- Whether deferred plugins have been loaded
+    deferred_plugins_loaded = false,
+    -- Plugin status modal
+    plugin_status = {
+        visible = false,
+        operations = {}, -- { name = string, status = "cloning"|"updating"|"done"|"error", message = string? }
+    },
 }
 
 local M = {}
@@ -411,6 +431,7 @@ local function init_keybinds()
     if state.keybind_matcher then
         return
     end
+
     state.keybind_matcher = prise.keybind.compile(config.keybinds, config.leader)
 end
 
@@ -426,12 +447,43 @@ function M.setup(opts)
     -- Mark keybinds for re-initialization on next key event
     -- (lazy init because UI pointer may not be available during config loading)
     state.keybind_matcher = nil
+
+    -- Initialize plugin system
+    if config.plugins then
+        local plugins = require("prise.plugins")
+        plugins.setup(config.plugins, config)
+        plugins.emit("ui_setup", { config = config })
+    end
 end
 
 ---Get the macos_option_as_alt setting
 ---@return string
 function M.get_macos_option_as_alt()
     return config.macos_option_as_alt or "false"
+end
+
+---Register a keybind dynamically (e.g., from a plugin)
+---This invalidates the keybind matcher so changes take effect immediately
+---@param key string The key sequence (e.g., "<leader>x")
+---@param action string|function The action name or function
+function M.register_keybind(key, action)
+    config.keybinds[key] = action
+    state.keybind_matcher = nil
+end
+
+---Register multiple keybinds dynamically
+---@param bindings table<string, string|function> Map of key to action
+function M.register_keybinds(bindings)
+    for key, action in pairs(bindings) do
+        config.keybinds[key] = action
+    end
+    state.keybind_matcher = nil
+end
+
+---Invalidate the keybind matcher (forces recompilation on next key event)
+---Called automatically after plugin config runs
+function M.invalidate_keybinds()
+    state.keybind_matcher = nil
 end
 
 local RESIZE_STEP = 0.05 -- 5% step for keyboard resize
@@ -2156,8 +2208,35 @@ end
 
 -- --- Main Functions ---
 
+local plugins_loaded = false
+
+---Get the plugins module if available
+---@return table?
+local function get_plugins()
+    local ok, plugins = pcall(require, "prise.plugins")
+    if ok then
+        return plugins
+    end
+    return nil
+end
+
 ---@param event Event
 function M.update(event)
+    local plugins = get_plugins()
+
+    -- Load deferred remote plugins on first update (event loop is now ready)
+    if not state.deferred_plugins_loaded then
+        state.deferred_plugins_loaded = true
+        if plugins then
+            plugins.load_deferred()
+        end
+    end
+
+    -- Emit before_update hook
+    if plugins then
+        plugins.emit("before_update", { event = event, state = state })
+    end
+
     if event.type == "pty_attach" then
         prise.log.info("Lua: pty_attach received")
         ---@type Pty
@@ -2457,6 +2536,14 @@ function M.update(event)
         -- Ignore modifier-only key presses (Shift, Ctrl, Alt, Super)
         if is_modifier_key(event.data.key) then
             return
+        end
+
+        -- Trigger key-based plugin lazy loading
+        if plugins then
+            local key_str = state.keybind_matcher:key_to_string(event.data)
+            if key_str then
+                plugins.load_for_key(key_str)
+            end
         end
 
         local result = state.keybind_matcher:handle_key(event.data)
@@ -2807,6 +2894,26 @@ function M.update(event)
         update_cached_git_branch()
         prise.request_frame()
         prise.save() -- Auto-save on cwd change
+    end
+
+    -- Emit after_update hook
+    if plugins then
+        plugins.emit("after_update", { event = event, state = state })
+    end
+
+    -- Emit UI_READY event on first pty_attach (plugins can lazy load on this)
+    if event.type == "pty_attach" and not plugins_loaded and plugins then
+        plugins_loaded = true
+        plugins.load_for_event("UI_READY")
+        plugins.emit("ui_ready", { state = state })
+
+        -- Schedule VeryLazy loading
+        prise.set_timeout(100, function()
+            local p = get_plugins()
+            if p then
+                p.load_for_event("VeryLazy")
+            end
+        end)
     end
 end
 
@@ -3161,6 +3268,107 @@ local function build_session_picker()
                             scroll_offset = state.session_picker.scroll_offset,
                             style = palette_style,
                             selected_style = selected_style,
+                        }),
+                    },
+                }),
+            }),
+        }),
+    })
+end
+
+---Build the plugin status modal
+---@return table?
+local function build_plugin_status()
+    if not state.plugin_status.visible then
+        return nil
+    end
+
+    local ops = state.plugin_status.operations
+    if #ops == 0 then
+        return nil
+    end
+
+    local modal_style = { bg = THEME.bg1, fg = THEME.fg_bright }
+    local MODAL_WIDTH = 50
+
+    local items = {}
+    local all_done = true
+
+    for _, op in ipairs(ops) do
+        local icon, color
+        if op.status == "cloning" then
+            icon = "◐"
+            color = THEME.accent
+            all_done = false
+        elseif op.status == "updating" then
+            icon = "◑"
+            color = THEME.yellow
+            all_done = false
+        elseif op.status == "done" then
+            icon = "✓"
+            color = THEME.green
+        else
+            icon = "✗"
+            color = "#f38ba8"
+        end
+
+        local text = icon .. " " .. op.name
+        if op.message then
+            text = text .. " - " .. op.message
+        end
+
+        table.insert(
+            items,
+            prise.Text({
+                text = text,
+                style = { fg = color, bg = THEME.bg1 },
+            })
+        )
+    end
+
+    -- Auto-hide after all operations complete
+    if all_done then
+        if not state.plugin_status.hide_timer then
+            state.plugin_status.hide_timer = prise.set_timeout(1500, function()
+                state.plugin_status.hide_timer = nil
+                -- Verify all operations are still done before hiding
+                for _, op in ipairs(state.plugin_status.operations) do
+                    if op.status ~= "done" and op.status ~= "error" then
+                        return
+                    end
+                end
+                state.plugin_status.visible = false
+                state.plugin_status.operations = {}
+                prise.request_frame()
+            end)
+        end
+    end
+
+    return prise.Positioned({
+        anchor = "top_center",
+        y = 3,
+        child = prise.Box({
+            border = "rounded",
+            max_width = MODAL_WIDTH,
+            style = modal_style,
+            child = prise.Padding({
+                top = 1,
+                bottom = 1,
+                left = 2,
+                right = 2,
+                child = prise.Column({
+                    cross_axis_align = "stretch",
+                    children = {
+                        prise.Text({
+                            text = "  Plugins",
+                            style = { fg = THEME.fg_dim, bg = THEME.bg1, bold = true },
+                        }),
+                        prise.Text({
+                            text = string.rep("─", MODAL_WIDTH - 4),
+                            style = { fg = THEME.bg3, bg = THEME.bg1 },
+                        }),
+                        prise.Column({
+                            children = items,
                         }),
                     },
                 }),
@@ -3612,6 +3820,7 @@ function M.view()
     local rename_tab = build_rename_tab()
     local swap_with_index = build_swap_with_index()
     local session_picker = build_session_picker()
+    local plugin_status = build_plugin_status()
     local floating = build_floating()
     local tab_bar = build_tab_bar()
     prise.log.debug("view: palette.visible=" .. tostring(state.palette.visible))
@@ -3679,6 +3888,14 @@ function M.view()
     local modal = palette or rename or rename_tab or swap_with_index or session_picker
     if modal then
         table.insert(overlay_children, modal)
+        return prise.Stack({
+            children = overlay_children,
+        })
+    end
+
+    -- Plugin status modal (shown alongside other content, doesn't block input)
+    if plugin_status then
+        table.insert(overlay_children, plugin_status)
         return prise.Stack({
             children = overlay_children,
         })
@@ -3793,6 +4010,37 @@ function M.set_state(saved, pty_lookup)
         end
     end
 
+    prise.request_frame()
+end
+
+---Set plugin operation status (called by plugin manager)
+---@param name string Plugin name
+---@param status "cloning"|"updating"|"done"|"error"
+---@param message? string Optional message
+function M.set_plugin_status(name, status, message)
+    -- Find existing operation or add new one
+    local found = false
+    for _, op in ipairs(state.plugin_status.operations) do
+        if op.name == name then
+            op.status = status
+            op.message = message
+            found = true
+            break
+        end
+    end
+    if not found then
+        table.insert(state.plugin_status.operations, {
+            name = name,
+            status = status,
+            message = message,
+        })
+    end
+    state.plugin_status.visible = true
+    -- Cancel any pending hide timer when new operations come in
+    if state.plugin_status.hide_timer and status ~= "done" and status ~= "error" then
+        state.plugin_status.hide_timer:cancel()
+        state.plugin_status.hide_timer = nil
+    end
     prise.request_frame()
 end
 

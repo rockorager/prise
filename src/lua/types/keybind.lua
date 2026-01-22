@@ -24,6 +24,11 @@ function KeybindMatcher:is_pending() end
 ---Reset the matcher to initial state
 function KeybindMatcher:reset() end
 
+---Convert a key event to a vim-style key string
+---@param key_data table Key event data with key, ctrl, alt, shift, super fields
+---@return string? key_string The formatted key string like "<C-a>" or "g"
+function KeybindMatcher:key_to_string(key_data) end
+
 ---Keybind module for compiling and matching keybinds
 ---@class KeybindModule
 local KeybindModule = {}
