@@ -99,7 +99,19 @@ pub fn main() !void {
         if (result.attach_session) |s| allocator.free(s);
         if (result.new_session_name) |s| allocator.free(s);
     }
-    try runClient(allocator, socket_path, result);
+    runClient(allocator, socket_path, result) catch |err| {
+        if (err == error.ServerNotRunning) {
+            std.fs.File.stderr().writeAll(
+                \\Server not running. Start with:
+                \\    prise serve
+                \\
+                \\For automatic startup, see 'man prise.7'
+                \\
+            ) catch {};
+            return;
+        }
+        return err;
+    };
 }
 
 fn parseArgs(allocator: std.mem.Allocator, socket_path: []const u8) !?ParseResult {
