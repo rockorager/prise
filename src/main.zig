@@ -48,10 +48,14 @@ fn fileLogFn(
 
 const MAX_LOG_SIZE = 64 * 1024 * 1024; // 64 MiB
 
+fn getLogDir(buf: []u8) ?[]const u8 {
+    const home = posix.getenv("HOME") orelse return null;
+    return std.fmt.bufPrint(buf, "{s}/.cache/prise", .{home}) catch null;
+}
+
 fn initLogFile(filename: []const u8) void {
-    const home = posix.getenv("HOME") orelse return;
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const log_dir = std.fmt.bufPrint(&path_buf, "{s}/.cache/prise", .{home}) catch return;
+    const log_dir = getLogDir(&path_buf) orelse return;
 
     std.fs.makeDirAbsolute(log_dir) catch |err| switch (err) {
         error.PathAlreadyExists => {},
@@ -100,17 +104,31 @@ pub fn main() !void {
         if (result.new_session_name) |s| allocator.free(s);
     }
     runClient(allocator, socket_path, result) catch |err| {
+        var log_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
+
         if (err == error.ServerNotRunning) {
-            std.fs.File.stderr().writeAll(
+            try std.fs.File.stderr().writeAll(
                 \\Server not running. Start with:
                 \\    prise serve
                 \\
                 \\For automatic startup, see 'man prise.7'
                 \\
-            ) catch {};
-            return;
+            );
+        } else if (getLogDir(&log_dir_buf)) |log_dir| {
+            var msg_buf: [1024]u8 = undefined;
+            const msg = try std.fmt.bufPrint(&msg_buf,
+                \\Unexpected error: {s}
+                \\
+                \\Check logs for details:
+                \\    {s}/client.log
+                \\    {s}/server.log
+                \\
+            , .{ @errorName(err), log_dir, log_dir });
+            try std.fs.File.stderr().writeAll(msg);
+        } else {
+            return err;
         }
-        return err;
+        return;
     };
 }
 
