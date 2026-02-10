@@ -2234,6 +2234,7 @@ function M.update(event)
             state.pending_split = nil
         end
         update_pty_focus(old_focused_id, state.focused_id)
+        update_cached_git_branch()
         prise.request_frame()
         prise.save() -- Auto-save on pane added
     elseif event.type == "key_press" then
@@ -3793,6 +3794,7 @@ function M.set_state(saved, pty_lookup)
         end
     end
 
+    update_cached_git_branch()
     prise.request_frame()
 end
 
