@@ -888,7 +888,7 @@ local function close_tab(idx)
         return
     end
 
-    -- If this is the last tab, quit the app
+    -- If this is the last tab, close PTYs and let remove_pane_by_id handle cleanup
     if #state.tabs == 1 then
         local panes = collect_panes(tab.root, {})
         for _, pane in ipairs(panes) do
@@ -896,12 +896,6 @@ local function close_tab(idx)
                 pane.pty:close()
             end
         end
-        -- Cancel clock timer before exit
-        if state.clock_timer then
-            state.clock_timer:cancel()
-            state.clock_timer = nil
-        end
-        prise.exit()
         return
     end
 
