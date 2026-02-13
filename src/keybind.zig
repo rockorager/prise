@@ -85,6 +85,10 @@ fn matcherIndex(lua: *ziglua.Lua) i32 {
         lua.pushFunction(ziglua.wrap(matcherReset));
         return 1;
     }
+    if (std.mem.eql(u8, key, "key_to_string")) {
+        lua.pushFunction(ziglua.wrap(matcherKeyToString));
+        return 1;
+    }
 
     return 0;
 }
@@ -151,6 +155,60 @@ fn matcherReset(lua: *ziglua.Lua) i32 {
     const handle = lua.checkUserdata(MatcherHandle, 1, "PriseKeybindMatcher");
     handle.matcher.reset();
     return 0;
+}
+
+fn matcherKeyToString(lua: *ziglua.Lua) i32 {
+    _ = lua.checkUserdata(MatcherHandle, 1, "PriseKeybindMatcher");
+    lua.checkType(2, .table);
+
+    const key = extractKey(lua, 2) catch {
+        lua.pushNil();
+        return 1;
+    };
+
+    var buf: [128]u8 = undefined;
+    var len: usize = 0;
+
+    // Max size: '<' + 4 modifiers (8 chars) + key + '>' = 10 + key.len
+    const max_key_len = buf.len - 10;
+    if (key.key.len > max_key_len) {
+        lua.pushNil();
+        return 1;
+    }
+
+    const has_mods = key.ctrl or key.alt or key.shift or key.super;
+    const is_special = key.key.len > 1;
+
+    if (has_mods or is_special) {
+        buf[len] = '<';
+        len += 1;
+        if (key.ctrl) {
+            @memcpy(buf[len .. len + 2], "C-");
+            len += 2;
+        }
+        if (key.alt) {
+            @memcpy(buf[len .. len + 2], "A-");
+            len += 2;
+        }
+        if (key.shift) {
+            @memcpy(buf[len .. len + 2], "S-");
+            len += 2;
+        }
+        if (key.super) {
+            @memcpy(buf[len .. len + 2], "D-");
+            len += 2;
+        }
+        @memcpy(buf[len .. len + key.key.len], key.key);
+        len += key.key.len;
+        buf[len] = '>';
+        len += 1;
+    } else {
+        @memcpy(buf[len .. len + key.key.len], key.key);
+        len += key.key.len;
+    }
+
+    _ = lua.pushString(buf[0..len]);
+    return 1;
 }
 
 fn compile(lua: *ziglua.Lua) i32 {
