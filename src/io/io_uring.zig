@@ -282,6 +282,18 @@ pub const Loop = struct {
         }
     }
 
+    /// Cancel all pending operations and clear the pending map.
+    /// Used for clean shutdown - cancels are queued but we don't wait for completions.
+    pub fn cancelAll(self: *Loop) void {
+        var it = self.pending.iterator();
+        while (it.next()) |entry| {
+            const sqe = self.ring.get_sqe() catch continue;
+            sqe.prep_cancel(@intCast(entry.key_ptr.*), 0);
+        }
+        // Clear all pending - we won't wait for cancel completions
+        self.pending.clearRetainingCapacity();
+    }
+
     pub fn run(self: *Loop, mode: RunMode) !void {
         var cqes: [CQE_BATCH_SIZE]linux.io_uring_cqe = undefined;
 

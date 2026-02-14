@@ -392,6 +392,40 @@ pub const Loop = struct {
         }
     }
 
+    /// Cancel all pending operations and clear the pending map.
+    /// Used for clean shutdown.
+    pub fn cancelAll(self: *Loop) void {
+        var it = self.pending.iterator();
+        while (it.next()) |entry| {
+            const op = entry.value_ptr.*;
+            const id = entry.key_ptr.*;
+
+            // Try to remove from kqueue
+            const ident: usize = switch (op.kind) {
+                .timer => id,
+                .waitpid => @intCast(op.pid),
+                else => @intCast(op.fd),
+            };
+            var changes = [_]posix.Kevent{.{
+                .ident = ident,
+                .filter = switch (op.kind) {
+                    .read, .recv, .accept => c.EVFILT.READ,
+                    .send, .connect => c.EVFILT.WRITE,
+                    .timer => c.EVFILT.TIMER,
+                    .waitpid => c.EVFILT.PROC,
+                    else => continue,
+                },
+                .flags = c.EV.DELETE,
+                .fflags = 0,
+                .data = 0,
+                .udata = id,
+            }};
+            _ = posix.kevent(self.kq, &changes, &[_]posix.Kevent{}, null) catch {};
+        }
+        // Clear all pending
+        self.pending.clearRetainingCapacity();
+    }
+
     pub fn run(self: *Loop, mode: RunMode) !void {
         var events: [EVENT_BATCH_SIZE]posix.Kevent = undefined;
 
