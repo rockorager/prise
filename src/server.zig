@@ -1301,6 +1301,8 @@ const Client = struct {
             try self.handleFocusEvent(notif);
         } else if (std.mem.eql(u8, notif.method, "color_response")) {
             try self.handleColorResponse(notif);
+        } else if (std.mem.eql(u8, notif.method, "scroll_input")) {
+            try self.handleScrollInput(notif);
         }
     }
 
@@ -1505,13 +1507,48 @@ const Client = struct {
                 else => 0,
             };
             if (delta != 0) {
-                pty_instance.terminal_mutex.lock();
-                pty_instance.terminal.scrollViewport(.{ .delta = delta }) catch |err| {
-                    log.err("Failed to scroll viewport: {}", .{err});
-                };
-                pty_instance.terminal_mutex.unlock();
-                _ = posix.write(pty_instance.pipe_fds[1], "x") catch {};
+                scrollPtyViewport(pty_instance, delta);
             }
+        }
+    }
+
+    fn scrollPtyViewport(pty_instance: *Pty, delta: isize) void {
+        pty_instance.terminal_mutex.lock();
+        defer pty_instance.terminal_mutex.unlock();
+
+        pty_instance.terminal.scrollViewport(.{ .delta = delta }) catch |err| {
+            log.err("Failed to scroll viewport: {}", .{err});
+        };
+        _ = posix.write(pty_instance.pipe_fds[1], "x") catch {};
+    }
+
+    fn handleScrollInput(self: *Client, notif: rpc.Notification) !void {
+        if (notif.params != .array or notif.params.array.len < 2) {
+            log.warn("scroll_input notification: invalid params", .{});
+            return;
+        }
+
+        const pty_id = parsePtyId(notif.params.array[0]) orelse {
+            log.warn("scroll_input notification: invalid pty_id type", .{});
+            return;
+        };
+
+        const delta: isize = switch (notif.params.array[1]) {
+            .integer => |i| @intCast(i),
+            .unsigned => |u| @intCast(u),
+            else => {
+                log.warn("scroll_input notification: invalid delta type", .{});
+                return;
+            },
+        };
+
+        const pty_instance = self.server.ptys.get(pty_id) orelse {
+            log.warn("scroll_input notification: PTY {} not found", .{pty_id});
+            return;
+        };
+
+        if (delta != 0) {
+            scrollPtyViewport(pty_instance, delta);
         }
     }
 
