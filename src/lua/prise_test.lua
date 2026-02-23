@@ -47,6 +47,8 @@ local function mock_text_input()
         move_to_end = function() end,
         clear = function() end,
         destroy = function() end,
+        kill_line = function() end,
+        delete_word_backward = function() end,
     }
     return input
 end

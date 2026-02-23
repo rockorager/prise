@@ -98,6 +98,7 @@ pub const UI = struct {
         cols: u16,
         attach: bool,
         cwd: ?[]const u8 = null,
+        command: ?[]const []const u8 = null,
     };
 
     pub const InitError = struct {
@@ -452,6 +453,7 @@ pub const UI = struct {
     fn spawn(lua: *ziglua.Lua) i32 {
         _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
         const ui = lua.toUserdata(UI, -1) catch {
+            lua.pop(1); // pop invalid userdata
             lua.pushNil();
             return 1;
         };
@@ -480,11 +482,49 @@ pub const UI = struct {
 
             _ = lua.getField(1, "cwd");
             if (lua.isString(-1)) opts.cwd = lua.toString(-1) catch null;
-            lua.pop(1);
+            // Don't pop cwd yet - need to keep it valid for callback
+
+            // Parse command array if present
+            // Keep strings on stack until after callback to keep pointers valid
+            var command_buf: [64][]const u8 = undefined;
+            var command_len: usize = 0;
+            var stack_items_to_pop: i32 = 1; // For cwd
+
+            _ = lua.getField(1, "command");
+            stack_items_to_pop += 1; // For command table
+            if (lua.typeOf(-1) == .table) {
+                const len = lua.rawLen(-1);
+                // Remember command table position (absolute index from bottom)
+                const cmd_table_idx = lua.getTop();
+                var i: usize = 0;
+                while (i < len and i < command_buf.len) : (i += 1) {
+                    // Use absolute index to command table since stack grows
+                    _ = lua.rawGetIndex(cmd_table_idx, @intCast(i + 1));
+                    if (lua.isString(-1)) {
+                        command_buf[i] = lua.toString(-1) catch "";
+                        command_len += 1;
+                        stack_items_to_pop += 1; // Keep string on stack
+                    } else {
+                        lua.pop(1); // Pop non-string values immediately
+                    }
+                }
+            }
+
+            if (command_len > 0) {
+                opts.command = command_buf[0..command_len];
+                log.info("spawn: command has {} args", .{command_len});
+                for (command_buf[0..command_len]) |arg| {
+                    log.info("spawn: arg = '{s}'", .{arg});
+                }
+            } else {
+                log.info("spawn: no command provided", .{});
+            }
 
             cb(ui.spawn_ctx, opts) catch |err| {
+                lua.pop(stack_items_to_pop); // Clean up stack before raising error
                 lua.raiseErrorStr("Failed to spawn: %s", .{@errorName(err).ptr});
             };
+            lua.pop(stack_items_to_pop); // Clean up after successful callback
         } else {
             lua.raiseErrorStr("Spawn callback not configured", .{});
         }
@@ -494,6 +534,7 @@ pub const UI = struct {
     fn requestFrame(lua: *ziglua.Lua) i32 {
         _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
         const ui = lua.toUserdata(UI, -1) catch {
+            lua.pop(1); // pop invalid userdata
             lua.pushNil();
             return 1;
         };
@@ -507,7 +548,10 @@ pub const UI = struct {
 
     fn save(lua: *ziglua.Lua) i32 {
         _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
-        const ui = lua.toUserdata(UI, -1) catch return 0;
+        const ui = lua.toUserdata(UI, -1) catch {
+            lua.pop(1);
+            return 0;
+        };
         lua.pop(1);
 
         if (ui.save_callback) |cb| {
@@ -519,6 +563,7 @@ pub const UI = struct {
     fn getSessionName(lua: *ziglua.Lua) i32 {
         _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
         const ui = lua.toUserdata(UI, -1) catch {
+            lua.pop(1);
             lua.pushNil();
             return 1;
         };
@@ -1058,6 +1103,7 @@ pub const UI = struct {
 
         _ = self.lua.getField(-1, "view");
         if (self.lua.typeOf(-1) != .function) {
+            self.lua.pop(1);
             return error.NoViewFunction;
         }
 
