@@ -87,6 +87,7 @@ local utils = require("utils")
 ---@field screen_rows number
 ---@field keybind_matcher? KeybindMatcher
 ---@field floating FloatingPaneState
+---@field scroll_mode boolean
 
 ---@class Command
 ---@field name string|fun(): string
@@ -318,6 +319,7 @@ local config = {
         ["<leader>f"] = "floating_toggle",
         ["<leader>+"] = "floating_increase_size",
         ["<leader>-"] = "floating_decrease_size",
+        ["<leader>["] = "scroll_mode",
     },
     macos_option_as_alt = "false",
 }
@@ -398,6 +400,7 @@ local state = {
         pending = false,
         resize_mode = false,
     },
+    scroll_mode = false,
 }
 
 local M = {}
@@ -1987,6 +1990,10 @@ action_handlers = {
         state.floating.resize_mode = true
         prise.request_frame()
     end,
+    scroll_mode = function()
+        state.scroll_mode = true
+        prise.request_frame()
+    end,
     -- command_palette is added after open_palette is defined
 }
 
@@ -2431,6 +2438,30 @@ function M.update(event)
             end
             handle_text_input_key(state.swap_with_index.input, event.data)
             prise.request_frame()
+            return
+        end
+
+        if state.scroll_mode then
+            if event.data.key == "Escape" or event.data.key == "q" then
+                state.scroll_mode = false
+                prise.request_frame()
+                return
+            end
+
+            local pty = get_focused_pty()
+            if not pty then
+                prise.log.warn("scroll_mode: no focused pty")
+                return
+            end
+
+            if event.data.key == "k" then
+                pty:scroll(-1)
+                prise.request_frame()
+            elseif event.data.key == "j" then
+                pty:scroll(1)
+                prise.request_frame()
+            end
+
             return
         end
 
@@ -3476,6 +3507,21 @@ local function build_status_bar()
         table.insert(segments, { text = " ZOOM ", style = { bg = THEME.yellow, fg = THEME.fg_dark, bold = true } })
         left_width = left_width + 1 + 6
         last_bg = THEME.yellow
+    end
+
+    -- Scroll mode indicator
+    if state.scroll_mode then
+        local scroll_text = " SCROLL "
+        table.insert(
+            segments,
+            { text = POWERLINE_SYMBOLS.right_solid, style = { fg = last_bg, bg = THEME.mode_command } }
+        )
+        table.insert(
+            segments,
+            { text = scroll_text, style = { bg = THEME.mode_command, fg = THEME.fg_dark, bold = true } }
+        )
+        left_width = left_width + 1 + prise.gwidth(scroll_text)
+        last_bg = THEME.mode_command
     end
 
     -- Floating resize mode indicator
