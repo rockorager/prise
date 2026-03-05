@@ -68,3 +68,7 @@ function Pty:close() end
 
 ---Copy the current selection to clipboard
 function Pty:copy_selection() end
+
+---Scroll the viewport by delta lines
+---@param delta integer Positive = scroll down, negative = scroll up
+function Pty:scroll(delta) end

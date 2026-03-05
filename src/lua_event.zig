@@ -28,6 +28,7 @@ pub const PtyAttachInfo = struct {
     close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
     copy_selection_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
+    send_scroll_fn: *const fn (app: *anyopaque, id: u32, delta: i32) anyerror!void,
     cell_size_fn: *const fn (app: *anyopaque) CellSize,
 };
 
@@ -138,6 +139,7 @@ fn pushPtyAttachEvent(lua: *ziglua.Lua, info: PtyAttachInfo) void {
         .cwd_fn = info.cwd_fn,
         .copy_selection_fn = info.copy_selection_fn,
         .cell_size_fn = info.cell_size_fn,
+        .send_scroll_fn = info.send_scroll_fn,
     };
 
     _ = lua.getMetatableRegistry("PrisePty");
@@ -390,6 +392,7 @@ const PtyHandle = struct {
     close_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
     copy_selection_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
+    send_scroll_fn: *const fn (app: *anyopaque, id: u32, delta: i32) anyerror!void,
     cell_size_fn: *const fn (app: *anyopaque) CellSize,
 };
 
@@ -435,6 +438,19 @@ fn ptyIndex(lua: *ziglua.Lua) i32 {
         lua.pushFunction(ziglua.wrap(ptyCopySelection));
         return 1;
     }
+    if (std.mem.eql(u8, key, "scroll")) {
+        lua.pushFunction(ziglua.wrap(ptyScroll));
+        return 1;
+    }
+    return 0;
+}
+
+fn ptyScroll(lua: *ziglua.Lua) i32 {
+    const pty = lua.checkUserdata(PtyHandle, 1, "PrisePty");
+    const delta: i32 = @intCast(lua.checkInteger(2));
+    pty.send_scroll_fn(pty.app, pty.id, delta) catch |err| {
+        log.err("Failed to send scroll: {}", .{err});
+    };
     return 0;
 }
 
@@ -737,6 +753,7 @@ pub fn pushPtyUserdata(
     cwd_fn: *const fn (app: *anyopaque, id: u32) ?[]const u8,
     copy_selection_fn: *const fn (app: *anyopaque, id: u32) anyerror!void,
     cell_size_fn: *const fn (app: *anyopaque) CellSize,
+    send_scroll_fn: *const fn (app: *anyopaque, id: u32, delta: i32) anyerror!void,
 ) !void {
     const pty = lua.newUserdata(PtyHandle, @sizeOf(PtyHandle));
     pty.* = .{
@@ -751,6 +768,7 @@ pub fn pushPtyUserdata(
         .cwd_fn = cwd_fn,
         .copy_selection_fn = copy_selection_fn,
         .cell_size_fn = cell_size_fn,
+        .send_scroll_fn = send_scroll_fn,
     };
 
     _ = lua.getMetatableRegistry("PrisePty");

@@ -2182,6 +2182,18 @@ pub const App = struct {
                                                         };
                                                     }
                                                 }.appGetCellSize,
+                                                .send_scroll_fn = struct {
+                                                    fn appSendScroll(ctx: *anyopaque, id: u32, delta: i32) anyerror!void {
+                                                        const self: *App = @ptrCast(@alignCast(ctx));
+                                                        const scroll_msg = try msgpack.encode(self.allocator, .{
+                                                            2,
+                                                            "scroll_input",
+                                                            .{ id, delta },
+                                                        });
+                                                        defer self.allocator.free(scroll_msg);
+                                                        try self.sendDirect(scroll_msg);
+                                                    }
+                                                }.appSendScroll,
                                             },
                                         }) catch |err| {
                                             log.err("Failed to update UI with pty_attach: {}", .{err});
@@ -3044,6 +3056,18 @@ pub const App = struct {
                     };
                 }
             }.getCellSize,
+            .send_scroll_fn = struct {
+                fn sendScroll(app_ctx: *anyopaque, pty_id: u32, delta: i32) anyerror!void {
+                    const app: *App = @ptrCast(@alignCast(app_ctx));
+                    const scroll_msg = try msgpack.encode(app.allocator, .{
+                        2,
+                        "scroll_input",
+                        .{ pty_id, delta },
+                    });
+                    defer app.allocator.free(scroll_msg);
+                    try app.sendDirect(scroll_msg);
+                }
+            }.sendScroll,
         };
     }
 };
