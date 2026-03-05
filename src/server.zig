@@ -2488,11 +2488,22 @@ const Server = struct {
             return msgpack.Value.nil;
         };
 
-        const result = screen.selectionString(self.allocator, .{
+        const result_z = screen.selectionString(self.allocator, .{
             .sel = sel,
             .trim = true,
         }) catch |err| {
             std.log.err("Failed to get selection string: {}", .{err});
+            return msgpack.Value.nil;
+        };
+
+        // selectionString returns a sentinel-terminated slice ([:0]const u8).
+        // msgpack.Value stores plain []const u8 and later deinit() calls
+        // allocator.free on that plain slice. If we pass result_z directly,
+        // deinit will free len bytes instead of len+1, triggering allocator
+        // size-mismatch crashes when copying selections.
+        defer self.allocator.free(result_z);
+        const result = self.allocator.dupe(u8, result_z) catch |err| {
+            std.log.err("Failed to duplicate selection string: {}", .{err});
             return msgpack.Value.nil;
         };
 
