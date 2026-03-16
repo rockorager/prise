@@ -440,6 +440,18 @@ pub const UI = struct {
         lua.pushFunction(ziglua.wrap(getGitBranch));
         lua.setField(-2, "get_git_branch");
 
+        // Register get_hostname
+        lua.pushFunction(ziglua.wrap(getHostname));
+        lua.setField(-2, "get_hostname");
+
+        // Register get_battery
+        lua.pushFunction(ziglua.wrap(getBattery));
+        lua.setField(-2, "get_battery");
+
+        // Register exec (shell command execution with caching)
+        lua.pushFunction(ziglua.wrap(execCommand));
+        lua.setField(-2, "exec");
+
         registerTimerMetatable(lua);
 
         // Register keybind module
@@ -885,6 +897,181 @@ pub const UI = struct {
         }
 
         _ = lua.pushString(branch);
+        return 1;
+    }
+
+    fn getHostname(lua: *ziglua.Lua) i32 {
+        var buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
+        const hostname = std.posix.gethostname(&buf) catch {
+            lua.pushNil();
+            return 1;
+        };
+        _ = lua.pushString(hostname);
+        return 1;
+    }
+
+    fn getBattery(lua: *ziglua.Lua) i32 {
+        _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
+        const ui = lua.toUserdata(UI, -1) catch {
+            lua.pushNil();
+            return 1;
+        };
+        lua.pop(1);
+
+        const builtin = @import("builtin");
+
+        if (builtin.os.tag == .macos) {
+            // macOS: use pmset -g batt
+            const result = std.process.Child.run(.{
+                .allocator = ui.allocator,
+                .argv = &.{ "pmset", "-g", "batt" },
+            }) catch {
+                lua.pushNil();
+                return 1;
+            };
+            defer ui.allocator.free(result.stdout);
+            defer ui.allocator.free(result.stderr);
+
+            if (result.term.Exited != 0) {
+                lua.pushNil();
+                return 1;
+            }
+
+            // Parse output like: "-InternalBattery-0 (id=...)  85 percent; charging; 0:30 remaining"
+            // or "Now drawing from 'Battery Power'" followed by battery line
+            var percent: ?i64 = null;
+            var charging = false;
+
+            var lines = std.mem.splitScalar(u8, result.stdout, '\n');
+            while (lines.next()) |line| {
+                // Look for percentage
+                if (std.mem.indexOf(u8, line, "%")) |pct_idx| {
+                    // Find start of number (scan backwards from %)
+                    var start = pct_idx;
+                    while (start > 0 and (line[start - 1] >= '0' and line[start - 1] <= '9')) {
+                        start -= 1;
+                    }
+                    if (start < pct_idx) {
+                        percent = std.fmt.parseInt(i64, line[start..pct_idx], 10) catch null;
+                    }
+                }
+                // Check charging status
+                if (std.mem.indexOf(u8, line, "charging") != null and std.mem.indexOf(u8, line, "discharging") == null) {
+                    charging = true;
+                }
+                if (std.mem.indexOf(u8, line, "AC Power") != null) {
+                    charging = true;
+                }
+            }
+
+            if (percent) |p| {
+                lua.createTable(0, 2);
+                lua.pushInteger(p);
+                lua.setField(-2, "percent");
+                lua.pushBoolean(charging);
+                lua.setField(-2, "charging");
+                return 1;
+            }
+
+            lua.pushNil();
+            return 1;
+        } else if (builtin.os.tag == .linux) {
+            // Linux: read from /sys/class/power_supply/
+            const battery_paths = [_][]const u8{
+                "/sys/class/power_supply/BAT0",
+                "/sys/class/power_supply/BAT1",
+                "/sys/class/power_supply/battery",
+            };
+
+            for (battery_paths) |bat_path| {
+                const capacity_path = std.fmt.allocPrint(ui.allocator, "{s}/capacity", .{bat_path}) catch continue;
+                defer ui.allocator.free(capacity_path);
+
+                const status_path = std.fmt.allocPrint(ui.allocator, "{s}/status", .{bat_path}) catch continue;
+                defer ui.allocator.free(status_path);
+
+                // Read capacity
+                const capacity_file = std.fs.openFileAbsolute(capacity_path, .{}) catch continue;
+                defer capacity_file.close();
+
+                var capacity_buf: [8]u8 = undefined;
+                const capacity_len = capacity_file.read(&capacity_buf) catch continue;
+                const capacity_str = std.mem.trimRight(u8, capacity_buf[0..capacity_len], "\n\r \t");
+                const percent = std.fmt.parseInt(i64, capacity_str, 10) catch continue;
+
+                // Read status
+                var charging = false;
+                if (std.fs.openFileAbsolute(status_path, .{})) |status_file| {
+                    defer status_file.close();
+                    var status_buf: [32]u8 = undefined;
+                    if (status_file.read(&status_buf)) |status_len| {
+                        const status_str = std.mem.trimRight(u8, status_buf[0..status_len], "\n\r \t");
+                        charging = std.mem.eql(u8, status_str, "Charging") or std.mem.eql(u8, status_str, "Full");
+                    } else |_| {}
+                } else |_| {}
+
+                lua.createTable(0, 2);
+                lua.pushInteger(percent);
+                lua.setField(-2, "percent");
+                lua.pushBoolean(charging);
+                lua.setField(-2, "charging");
+                return 1;
+            }
+
+            // No battery found
+            lua.pushNil();
+            return 1;
+        } else {
+            // Unsupported platform
+            lua.pushNil();
+            return 1;
+        }
+    }
+
+    fn execCommand(lua: *ziglua.Lua) i32 {
+        _ = lua.getField(ziglua.registry_index, "prise_ui_ptr");
+        const ui = lua.toUserdata(UI, -1) catch {
+            lua.pushNil();
+            return 1;
+        };
+        lua.pop(1);
+
+        // Get command string from table or direct argument
+        var command: []const u8 = undefined;
+
+        if (lua.typeOf(1) == .table) {
+            _ = lua.getField(1, "command");
+            command = lua.toString(-1) catch {
+                lua.pushNil();
+                return 1;
+            };
+            lua.pop(1);
+            // Note: timeout field is parsed but not yet implemented
+        } else {
+            command = lua.toString(1) catch {
+                lua.pushNil();
+                return 1;
+            };
+        }
+
+        // Execute command via sh -c
+        const result = std.process.Child.run(.{
+            .allocator = ui.allocator,
+            .argv = &.{ "sh", "-c", command },
+        }) catch {
+            lua.pushNil();
+            return 1;
+        };
+        defer ui.allocator.free(result.stdout);
+        defer ui.allocator.free(result.stderr);
+
+        if (result.term.Exited != 0) {
+            lua.pushNil();
+            return 1;
+        }
+
+        const output = std.mem.trimRight(u8, result.stdout, "\n\r");
+        _ = lua.pushString(output);
         return 1;
     }
 
