@@ -21,6 +21,7 @@ pub fn build(b: *std.Build) void {
     const ghostty = b.dependency("ghostty", .{
         .target = target,
         .optimize = optimize,
+        .@"emit-lib-vt" = true,
     });
     exe_mod.addImport("ghostty-vt", ghostty.module("ghostty-vt"));
 
