@@ -2717,6 +2717,7 @@ function M.update(event)
             state.active_tab = 1
             state.focused_id = new_pane.id
         else
+            state.zoomed_pane_id = nil -- Unzoom to reveal new split pane
             -- Insert into active tab's tree
             local tab = get_active_tab()
             if not tab then
