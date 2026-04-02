@@ -3091,11 +3091,16 @@ function M.update(event)
             pty:send_key(data)
         end
     elseif event.type == "paste" then
+        local text_sanitized = event.data.text:gsub("[\r\n\t]", " ")
         if state.palette.visible then
-            -- Insert into command palette, replacing newlines/tabs with spaces
-            local text = event.data.text:gsub("[\r\n\t]", " ")
-            state.palette.input:insert(text)
+            state.palette.input:insert(text_sanitized)
             state.palette.selected = 1
+            prise.request_frame()
+        elseif state.rename_tab.visible then
+            state.rename_tab.input:insert(text_sanitized)
+            prise.request_frame()
+        elseif state.rename.visible then
+            state.rename.input:insert(text_sanitized)
             prise.request_frame()
         else
             local pty = get_visible_floating_pty() or get_focused_pty()
