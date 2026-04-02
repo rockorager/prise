@@ -550,6 +550,13 @@ local RESIZE_STEP = 0.05 -- 5% step for keyboard resize
 local PALETTE_WIDTH = 60 -- Total width of command palette
 local PALETTE_INNER_WIDTH = 56 -- Inner width (PALETTE_WIDTH - 4 for padding)
 
+---@return integer start_x
+---@return integer end_x
+local function modal_x_bounds()
+    local start_x = math.floor((state.screen_cols - PALETTE_WIDTH) / 2)
+    return start_x, start_x + PALETTE_WIDTH
+end
+
 -- Floating pane size bounds
 local FLOATING_MIN_WIDTH = 40
 local FLOATING_MAX_WIDTH = 200
@@ -1503,8 +1510,11 @@ end
 local function build_tabs_from_layout(layout, pty_queue)
     local new_tabs = {}
     local queue_idx = 1
+    ---@type number
     local new_floating_width = state.floating.width
+    ---@type number
     local new_floating_height = state.floating.height
+    ---@type boolean
     local new_floating_visible = state.floating.visible
 
     for tab_index, tab_def in ipairs(layout.tabs) do
@@ -1564,6 +1574,12 @@ local function finalize_layout(pending)
         state.pending_layout = nil
         return
     end
+    local floating_width = new_floating_width or state.floating.width
+    local floating_height = new_floating_height or state.floating.height
+    local floating_visible = new_floating_visible
+    if floating_visible == nil then
+        floating_visible = state.floating.visible
+    end
 
     -- Verify we used all PTYs
     if queue_idx ~= #pty_queue + 1 then
@@ -1579,9 +1595,9 @@ local function finalize_layout(pending)
     -- Swap in new state
     state.tabs = new_tabs
     state.next_tab_id = #new_tabs + 1
-    state.floating.width = new_floating_width
-    state.floating.height = new_floating_height
-    state.floating.visible = new_floating_visible
+    state.floating.width = floating_width
+    state.floating.height = floating_height
+    state.floating.visible = floating_visible
     state.zoomed_pane_id = nil
 
     -- Set active tab
@@ -1635,7 +1651,7 @@ local function expand_path(path)
         return expanded
     end
 
-    -- Check if it's a directory without using shell (avoids command injection)
+    -- Probe "path/." so we can recognize directories without shelling out.
     local dir_probe = io.open(expanded .. "/.", "r")
     if dir_probe then
         dir_probe:close()
@@ -3217,14 +3233,59 @@ function M.update(event)
         end
 
         if d.action == "press" and d.button == "left" then
+            -- Check if click is on session picker item
+            if
+                state.session_picker.visible
+                and not state.session_picker.renaming
+                and #state.session_picker.regions > 0
+            then
+                local click_x = math.floor(d.x)
+                local click_y = math.floor(d.y)
+                local modal_start_x, modal_end_x = modal_x_bounds()
+
+                if click_x >= modal_start_x and click_x < modal_end_x then
+                    for _, region in ipairs(state.session_picker.regions) do
+                        if click_y >= region.start_y and click_y < region.end_y then
+                            if state.session_picker.selected == region.index then
+                                execute_session_switch()
+                            else
+                                state.session_picker.selected = region.index
+                                prise.request_frame()
+                            end
+                            return
+                        end
+                    end
+                end
+            end
+
+            -- Check if click is on layout picker item
+            if state.layout_picker.visible and #state.layout_picker.regions > 0 then
+                local click_x = math.floor(d.x)
+                local click_y = math.floor(d.y)
+                local modal_start_x, modal_end_x = modal_x_bounds()
+
+                if click_x >= modal_start_x and click_x < modal_end_x then
+                    for _, region in ipairs(state.layout_picker.regions) do
+                        if click_y >= region.start_y and click_y < region.end_y then
+                            if state.layout_picker.selected == region.index then
+                                execute_selected_layout()
+                            else
+                                state.layout_picker.selected = region.index
+                                prise.request_frame()
+                            end
+                            return
+                        end
+                    end
+                end
+            end
+
             -- Check if click is on command palette item
             if state.palette.visible and #state.palette.regions > 0 then
                 -- Convert float coords to integer cell positions
                 local click_x = math.floor(d.x)
                 local click_y = math.floor(d.y)
 
-                local palette_start_x = math.floor((state.screen_cols - PALETTE_WIDTH) / 2)
-                local palette_end_x = palette_start_x + PALETTE_WIDTH
+                local palette_start_x, palette_end_x = modal_x_bounds()
 
                 if click_x >= palette_start_x and click_x < palette_end_x then
                     for _, region in ipairs(state.palette.regions) do

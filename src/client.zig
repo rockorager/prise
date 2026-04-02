@@ -1846,7 +1846,7 @@ pub const App = struct {
         try self.ui.clearState();
     }
 
-    fn cancelSessionSwitch(self: *App) void {
+    fn finishSessionSwitch(self: *App) void {
         self.session_switch_in_progress = false;
         self.state.suppress_unsolicited_pty_results = false;
         if (self.switch_target_session) |target| {
@@ -1855,13 +1855,12 @@ pub const App = struct {
         }
     }
 
+    fn cancelSessionSwitch(self: *App) void {
+        self.finishSessionSwitch();
+    }
+
     fn completeSessionSwitch(self: *App) void {
-        self.session_switch_in_progress = false;
-        self.state.suppress_unsolicited_pty_results = false;
-        if (self.switch_target_session) |target| {
-            self.allocator.free(target);
-            self.switch_target_session = null;
-        }
+        self.finishSessionSwitch();
     }
 
     fn beginSessionSwitchAttach(self: *App) !void {
