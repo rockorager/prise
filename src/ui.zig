@@ -1155,6 +1155,26 @@ pub const UI = struct {
         self.allocator.destroy(lookup_ctx);
     }
 
+    pub fn clearState(self: *UI) !void {
+        _ = self.lua.getField(ziglua.registry_index, "prise_ui");
+        defer self.lua.pop(1);
+
+        _ = self.lua.getField(-1, "set_state");
+        if (self.lua.typeOf(-1) != .function) {
+            return error.NoSetStateFunction;
+        }
+
+        self.lua.pushNil();
+        self.lua.pushNil();
+
+        self.lua.protectedCall(.{ .args = 2, .results = 0, .msg_handler = 0 }) catch |err| {
+            const msg = self.lua.toString(-1) catch "Unknown Lua error";
+            log.err("Lua clear_state error: {s}", .{msg});
+            self.lua.pop(1);
+            return err;
+        };
+    }
+
     fn ptyLookupWrapper(lua: *ziglua.Lua) i32 {
         const LookupCtx = struct {
             ctx: *anyopaque,
