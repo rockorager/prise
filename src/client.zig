@@ -179,11 +179,13 @@ pub const ClientState = struct {
     allocator: std.mem.Allocator,
     prefix_mode: bool = false,
     pty_validity: ?i64 = null,
+    suppress_unsolicited_pty_results: bool = false,
 
     pub const RequestInfo = union(enum) {
         spawn: struct { cwd: ?[]const u8 = null, old_pty_id: ?u32 = null },
         attach: struct { pty_id: i64, cwd: ?[]const u8 = null },
         detach,
+        switch_detach,
         get_server_info,
         copy_selection,
     };
@@ -215,6 +217,8 @@ pub const ServerAction = union(enum) {
     pty_exited: struct { pty_id: u32, status: u32 },
     cwd_changed: struct { pty_id: u32, cwd: []const u8 },
     detached,
+    switch_detached,
+    switch_detach_failed,
     color_query: ColorQueryTarget,
     server_info: struct { pty_validity: i64 },
     copy_to_clipboard: []const u8,
@@ -271,6 +275,9 @@ pub const ClientLogic = struct {
                     log.info("PTY {} not found, spawning new PTY with cwd", .{attach_info.pty_id});
                     return .{ .spawn_pty_with_cwd = .{ .cwd = attach_info.cwd } };
                 }
+            } else if (entry.value == .switch_detach) {
+                log.err("Session switch detach failed: {}", .{err_val});
+                return .switch_detach_failed;
             }
         }
         log.err("Error in response: {}", .{err_val});
@@ -294,6 +301,7 @@ pub const ClientLogic = struct {
                     return .{ .attached = .{ .new_pty_id = attach_info.pty_id } };
                 },
                 .detach => .detached,
+                .switch_detach => .switch_detached,
                 .get_server_info => handleServerInfoResult(state, result),
                 .copy_selection => handleCopySelectionResult(result),
             };
@@ -356,6 +364,9 @@ pub const ClientLogic = struct {
     fn handleUnsolicitedResult(state: *ClientState, result: msgpack.Value) ServerAction {
         return switch (result) {
             .integer => |i| {
+                if (state.suppress_unsolicited_pty_results) {
+                    return .none;
+                }
                 if (state.pty_id == null) {
                     state.pty_id = i;
                     return .{ .send_attach = i };
@@ -366,6 +377,9 @@ pub const ClientLogic = struct {
                 return .none;
             },
             .unsigned => |u| {
+                if (state.suppress_unsolicited_pty_results) {
+                    return .none;
+                }
                 if (state.pty_id == null) {
                     state.pty_id = @intCast(u);
                     state.attached = true;
@@ -663,6 +677,8 @@ pub const App = struct {
 
     // Current session name (owned by App)
     current_session_name: ?[]const u8 = null,
+    switch_target_session: ?[]const u8 = null,
+    session_switch_in_progress: bool = false,
     // Auto-save timer for debouncing
     autosave_timer: ?io.Task = null,
 
@@ -803,6 +819,9 @@ pub const App = struct {
         if (self.current_session_name) |name| {
             self.allocator.free(name);
         }
+        if (self.switch_target_session) |target| {
+            self.allocator.free(target);
+        }
         if (self.hit_regions.len > 0) self.allocator.free(self.hit_regions);
         if (self.split_handles.len > 0) self.allocator.free(self.split_handles);
         self.vx.deinit(self.allocator, self.tty.writer());
@@ -903,38 +922,9 @@ pub const App = struct {
             fn detachCb(ctx: *anyopaque, session_name: []const u8) anyerror!void {
                 const app_ptr: *App = @ptrCast(@alignCast(ctx));
                 try app_ptr.saveSession(session_name);
-
-                // Build array of PTY IDs to detach
-                var pty_ids = try app_ptr.allocator.alloc(msgpack.Value, app_ptr.surfaces.count());
-                defer app_ptr.allocator.free(pty_ids);
-                var i: usize = 0;
-                var key_iter = app_ptr.surfaces.keyIterator();
-                while (key_iter.next()) |pty_id| {
-                    pty_ids[i] = .{ .unsigned = pty_id.* };
-                    i += 1;
-                }
-
-                // Send single detach_session request with all PTY IDs
-                const msgid = app_ptr.state.next_msgid;
-                app_ptr.state.next_msgid +%= 1;
-
-                var arr = try app_ptr.allocator.alloc(msgpack.Value, 4);
-                arr[0] = .{ .unsigned = 0 }; // request
-                arr[1] = .{ .unsigned = msgid };
-                arr[2] = .{ .string = "detach_ptys" };
-                arr[3] = .{ .array = pty_ids };
-
-                const encoded = msgpack.encodeFromValue(app_ptr.allocator, msgpack.Value{ .array = arr }) catch {
-                    app_ptr.allocator.free(arr);
+                if (!try app_ptr.sendDetachPtysRequest(.detach)) {
                     return;
-                };
-                defer app_ptr.allocator.free(encoded);
-                app_ptr.allocator.free(arr);
-
-                // Track that we're waiting for detach response
-                try app_ptr.state.pending_requests.put(msgid, .detach);
-
-                app_ptr.sendDirect(encoded) catch {};
+                }
             }
         }.detachCb);
 
@@ -1122,6 +1112,13 @@ pub const App = struct {
                 }
             }
             return;
+        }
+
+        if (self.session_switch_in_progress) {
+            switch (event) {
+                .key_press, .key_release, .mouse => return,
+                else => {},
+            }
         }
 
         // Handle mouse events specially - do hit testing and convert to MouseEvent
@@ -1716,16 +1713,162 @@ pub const App = struct {
         self.allocator.free(msg);
     }
 
+    fn setCurrentSessionName(self: *App, session_name: []const u8) !void {
+        if (self.current_session_name) |current| {
+            self.allocator.free(current);
+        }
+        self.current_session_name = try self.allocator.dupe(u8, session_name);
+    }
+
+    fn clearCwdMap(self: *App) void {
+        var cwd_it = self.state.cwd_map.valueIterator();
+        while (cwd_it.next()) |cwd| {
+            self.allocator.free(cwd.*);
+        }
+        self.state.cwd_map.clearRetainingCapacity();
+    }
+
+    fn clearPendingAttachState(self: *App) void {
+        if (self.pending_attach_ids) |ids| {
+            self.allocator.free(ids);
+            self.pending_attach_ids = null;
+        }
+        if (self.session_json) |json| {
+            self.allocator.free(json);
+            self.session_json = null;
+        }
+        var cwd_it = self.pending_attach_cwd.valueIterator();
+        while (cwd_it.next()) |cwd| {
+            self.allocator.free(cwd.*);
+        }
+        self.pending_attach_cwd.clearRetainingCapacity();
+        self.pending_attach_count = 0;
+        self.pty_id_remap.clearRetainingCapacity();
+    }
+
+    fn sendDetachPtysRequest(self: *App, request_info: ClientState.RequestInfo) !bool {
+        if (self.surfaces.count() == 0) {
+            return false;
+        }
+
+        var pty_ids = try self.allocator.alloc(msgpack.Value, self.surfaces.count());
+        defer self.allocator.free(pty_ids);
+
+        var i: usize = 0;
+        var key_iter = self.surfaces.keyIterator();
+        while (key_iter.next()) |pty_id| {
+            pty_ids[i] = .{ .unsigned = pty_id.* };
+            i += 1;
+        }
+
+        const msgid = self.state.next_msgid;
+        self.state.next_msgid +%= 1;
+        try self.state.pending_requests.put(msgid, request_info);
+        errdefer _ = self.state.pending_requests.remove(msgid);
+
+        var arr = try self.allocator.alloc(msgpack.Value, 4);
+        defer self.allocator.free(arr);
+        arr[0] = .{ .unsigned = 0 };
+        arr[1] = .{ .unsigned = msgid };
+        arr[2] = .{ .string = "detach_ptys" };
+        arr[3] = .{ .array = pty_ids };
+
+        const encoded = try msgpack.encodeFromValue(self.allocator, msgpack.Value{ .array = arr });
+        defer self.allocator.free(encoded);
+
+        try self.sendDirect(encoded);
+        return true;
+    }
+
+    fn resetActiveSessionState(self: *App) !void {
+        if (self.render_timer) |*task| {
+            if (self.io_loop) |loop| {
+                task.cancel(loop) catch {};
+            }
+            self.render_timer = null;
+        }
+        if (self.autosave_timer) |*task| {
+            if (self.io_loop) |loop| {
+                task.cancel(loop) catch {};
+            }
+            self.autosave_timer = null;
+        }
+        if (self.paste_buffer) |*buf| {
+            buf.deinit(self.allocator);
+            self.paste_buffer = null;
+        }
+
+        var surface_it = self.surfaces.valueIterator();
+        while (surface_it.next()) |surface| {
+            surface.*.deinit();
+            self.allocator.destroy(surface.*);
+        }
+        self.surfaces.clearRetainingCapacity();
+
+        self.drag_state = null;
+        self.selection_drag_pty = null;
+        self.state.pty_id = null;
+        self.state.response_received = false;
+        self.state.attached = false;
+        self.state.connection_refused = false;
+        self.state.prefix_mode = false;
+        self.state.suppress_unsolicited_pty_results = true;
+        self.state.pending_requests.clearRetainingCapacity();
+        self.clearCwdMap();
+        self.clearPendingAttachState();
+        self.pending_color_queries.clearRetainingCapacity();
+
+        if (self.hit_regions.len > 0) {
+            self.allocator.free(self.hit_regions);
+            self.hit_regions = &.{};
+        }
+        if (self.split_handles.len > 0) {
+            self.allocator.free(self.split_handles);
+            self.split_handles = &.{};
+        }
+
+        try self.ui.clearState();
+    }
+
+    fn cancelSessionSwitch(self: *App) void {
+        self.session_switch_in_progress = false;
+        self.state.suppress_unsolicited_pty_results = false;
+        if (self.switch_target_session) |target| {
+            self.allocator.free(target);
+            self.switch_target_session = null;
+        }
+    }
+
+    fn completeSessionSwitch(self: *App) void {
+        self.session_switch_in_progress = false;
+        self.state.suppress_unsolicited_pty_results = false;
+        if (self.switch_target_session) |target| {
+            self.allocator.free(target);
+            self.switch_target_session = null;
+        }
+    }
+
+    fn beginSessionSwitchAttach(self: *App) !void {
+        const target_session = self.switch_target_session orelse return error.NoSessionSwitchTarget;
+        errdefer self.cancelSessionSwitch();
+
+        try self.resetActiveSessionState();
+        try self.startSessionAttach(target_session);
+        try self.setCurrentSessionName(target_session);
+    }
+
     fn onServerInfoReceived(self: *App) !void {
         // After receiving server info, proceed with spawn or session attach
         if (self.attach_session) |session_name| {
             // Use the attached session name
             log.info("Setting current_session_name to: {s}", .{session_name});
-            self.current_session_name = try self.allocator.dupe(u8, session_name);
+            try self.setCurrentSessionName(session_name);
+            crash_context.setSessionName(self.current_session_name);
+            crash_context.record("attach session {s}", .{session_name});
             try self.startSessionAttach(session_name);
         } else if (self.new_session_name) |name| {
             // User specified a name for new session
-            self.current_session_name = try self.allocator.dupe(u8, name);
+            try self.setCurrentSessionName(name);
             log.info("Starting new session with user-specified name: {s}", .{name});
             try self.spawnInitialPty();
         } else {
@@ -1778,6 +1921,8 @@ pub const App = struct {
     }
 
     fn startSessionAttach(self: *App, session_name: []const u8) !void {
+        crash_context.record("session restore start {s}", .{session_name});
+        self.clearPendingAttachState();
         const home = std.posix.getenv("HOME") orelse return error.NoHomeDirectory;
 
         const filename = try std.fmt.allocPrint(self.allocator, "{s}.json", .{session_name});
@@ -2215,6 +2360,11 @@ pub const App = struct {
                                                 app.allocator.free(ids);
                                                 app.pending_attach_ids = null;
                                             }
+                                            crash_context.record("session restore complete", .{});
+                                            app.state.suppress_unsolicited_pty_results = false;
+                                            if (app.session_switch_in_progress) {
+                                                app.completeSessionSwitch();
+                                            }
                                             try app.scheduleRender();
                                         }
                                     }
@@ -2265,16 +2415,17 @@ pub const App = struct {
                                 log.info("PTY {} exited with status {}", .{ info.pty_id, info.status });
                                 // Clean up the surface for this PTY BEFORE updating UI
                                 // so that surfaces.count() is correct when quit callback runs
-                                if (app.surfaces.fetchRemove(info.pty_id)) |entry| {
+                                const removed_surface = if (app.surfaces.fetchRemove(info.pty_id)) |entry| blk: {
                                     log.info("Cleaning up surface for exited PTY {}", .{info.pty_id});
                                     entry.value.deinit();
                                     app.allocator.destroy(entry.value);
-                                }
+                                    break :blk true;
+                                } else false;
                                 app.ui.update(.{ .pty_exited = .{ .id = info.pty_id, .status = info.status } }) catch |err| {
                                     log.err("Failed to update UI with pty_exited: {}", .{err});
                                 };
                                 // Delete session file when last PTY exits (if quit wasn't already called)
-                                if (app.surfaces.count() == 0 and !app.state.should_quit) {
+                                if (removed_surface and app.surfaces.count() == 0 and !app.state.should_quit) {
                                     // Cancel autosave timer to prevent it from recreating the file
                                     if (app.autosave_timer) |*task| {
                                         if (app.io_loop) |loop| task.cancel(loop) catch {};
@@ -2335,6 +2486,12 @@ pub const App = struct {
                                 app.vx.deviceStatusReport(app.tty.writer()) catch {};
                                 log.info("Returning from detach handler", .{});
                                 return;
+                            },
+                            .switch_detached => {
+                                try app.beginSessionSwitchAttach();
+                            },
+                            .switch_detach_failed => {
+                                app.cancelSessionSwitch();
                             },
                             .color_query => |query| {
                                 try app.handleColorQuery(query);
@@ -2616,6 +2773,9 @@ pub const App = struct {
                 return;
             }
         }
+        if (self.session_switch_in_progress) {
+            return error.SessionSwitchInProgress;
+        }
 
         // Save current session first
         if (self.current_session_name) |name| {
@@ -2623,32 +2783,20 @@ pub const App = struct {
             try self.saveSession(name);
         }
 
-        // Build arguments for exec
-        // Build arguments for exec
-        const target_z = try self.allocator.dupeZ(u8, target_session);
-        errdefer self.allocator.free(target_z);
-        const args = [_]?[*:0]const u8{
-            "prise",
-            "session",
-            "attach",
-            target_z,
-            null,
-        };
+        self.switch_target_session = try self.allocator.dupe(u8, target_session);
+        errdefer {
+            if (self.switch_target_session) |target| {
+                self.allocator.free(target);
+                self.switch_target_session = null;
+            }
+        }
 
-        log.info("Exec'ing prise session attach '{s}'", .{target_session});
+        self.session_switch_in_progress = true;
+        errdefer self.session_switch_in_progress = false;
 
-        // Restore terminal state right before exec to minimize window of failure
-        const writer = self.tty.writer();
-        self.vx.deinit(self.allocator, writer);
-
-        // Use execvpeZ with current environment
-        const err = posix.execvpeZ("prise", @ptrCast(&args), @ptrCast(std.c.environ));
-
-        // If we get here, exec failed - reinitialize terminal
-        log.err("Failed to exec prise: {}", .{err});
-        self.vx = vaxis.Vaxis.init(self.allocator, .{}) catch return err;
-        self.vx.enterAltScreen(writer) catch {};
-        return err;
+        if (!try self.sendDetachPtysRequest(.switch_detach)) {
+            try self.beginSessionSwitchAttach();
+        }
     }
 
     pub fn deleteCurrentSession(self: *App) void {
@@ -3143,6 +3291,24 @@ test "ClientLogic - processServerMessage" {
         try testing.expectEqual(123, action.attached.new_pty_id);
     }
 
+    // Test switch detach response
+    {
+        var state = ClientState.init(testing.allocator);
+        defer state.deinit();
+        try state.pending_requests.put(3, .switch_detach);
+
+        const msg = rpc.Message{
+            .response = .{
+                .msgid = 3,
+                .err = null,
+                .result = .nil,
+            },
+        };
+
+        const action = try ClientLogic.processServerMessage(&state, msg);
+        try testing.expectEqual(std.meta.Tag(ServerAction).switch_detached, std.meta.activeTag(action));
+    }
+
     // Test Redraw Notification
     {
         var state = ClientState.init(testing.allocator);
@@ -3158,6 +3324,25 @@ test "ClientLogic - processServerMessage" {
 
         const action = try ClientLogic.processServerMessage(&state, msg);
         try testing.expectEqual(std.meta.Tag(ServerAction).redraw, std.meta.activeTag(action));
+    }
+
+    // Test unsolicited PTY results can be suppressed during session switch
+    {
+        var state = ClientState.init(testing.allocator);
+        defer state.deinit();
+        state.suppress_unsolicited_pty_results = true;
+
+        const msg = rpc.Message{
+            .response = .{
+                .msgid = 99,
+                .err = null,
+                .result = .{ .integer = 456 },
+            },
+        };
+
+        const action = try ClientLogic.processServerMessage(&state, msg);
+        try testing.expectEqual(std.meta.Tag(ServerAction).none, std.meta.activeTag(action));
+        try testing.expectEqual(null, state.pty_id);
     }
 }
 

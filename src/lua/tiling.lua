@@ -455,6 +455,63 @@ local state = {
     pending_layout = nil,
 }
 
+local function reset_session_state()
+    if state.timer then
+        state.timer:cancel()
+        state.timer = nil
+    end
+
+    state.tabs = {}
+    state.active_tab = 1
+    state.next_tab_id = 1
+    state.focused_id = nil
+    state.zoomed_pane_id = nil
+    state.pending_command = false
+    state.pending_split = nil
+    state.pending_new_tab = false
+    state.next_split_id = 1
+
+    state.palette.visible = false
+    state.palette.selected = 1
+    state.palette.scroll_offset = 0
+    state.palette.regions = {}
+    if state.palette.input then
+        state.palette.input:clear()
+    end
+
+    state.rename.visible = false
+    if state.rename.input then
+        state.rename.input:clear()
+    end
+
+    state.rename_tab.visible = false
+    if state.rename_tab.input then
+        state.rename_tab.input:clear()
+    end
+
+    state.swap_with_index = nil
+
+    state.session_picker.visible = false
+    state.session_picker.selected = 1
+    state.session_picker.scroll_offset = 0
+    state.session_picker.sessions = {}
+    state.session_picker.regions = {}
+    state.session_picker.renaming = false
+    state.session_picker.rename_target = nil
+    if state.session_picker.input then
+        state.session_picker.input:clear()
+    end
+
+    state.tab_regions = {}
+    state.tab_close_regions = {}
+    state.hovered_tab = nil
+    state.hovered_close_tab = nil
+    state.cached_git_branch = nil
+    state.detaching = false
+    state.floating.pending = false
+    state.floating.resize_mode = false
+end
+
 local M = {}
 
 ---Forward declaration for action_handlers (defined after helper functions)
@@ -4329,6 +4386,8 @@ end
 ---@param saved? table
 ---@param pty_lookup fun(id: number): Pty?
 function M.set_state(saved, pty_lookup)
+    reset_session_state()
+
     if not saved then
         return
     end
@@ -4397,6 +4456,7 @@ function M.set_state(saved, pty_lookup)
         end
     end
 
+    update_cached_git_branch()
     prise.request_frame()
 end
 
