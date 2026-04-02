@@ -900,14 +900,12 @@ local function set_active_tab_index(new_index)
         return
     end
 
-    -- Clear zoom when switching tabs
-    state.zoomed_pane_id = nil
-
     local old_tab = state.tabs[state.active_tab]
     local old_focused = state.focused_id
 
-    -- Remember focus in old tab
+    -- Save zoom and focus state to old tab
     if old_tab then
+        old_tab.zoomed_pane_id = state.zoomed_pane_id
         old_tab.last_focused_id = state.focused_id
     end
 
@@ -916,6 +914,9 @@ local function set_active_tab_index(new_index)
     if not new_tab then
         return
     end
+
+    -- Restore zoom state from new tab
+    state.zoomed_pane_id = new_tab.zoomed_pane_id or nil
 
     -- Pick new focused pane in this tab
     local new_focus_id = new_tab.last_focused_id
@@ -1040,6 +1041,12 @@ local function remove_pane_by_id(id)
     -- Clear zoom if the zoomed pane is being removed
     if state.zoomed_pane_id == id then
         state.zoomed_pane_id = nil
+    end
+    -- Also clear per-tab saved zoom if it references this pane
+    for _, t in ipairs(state.tabs) do
+        if t.zoomed_pane_id == id then
+            t.zoomed_pane_id = nil
+        end
     end
 
     local new_root, next_focus = remove_pane_recursive(tab.root, id)
@@ -3951,6 +3958,8 @@ local function build_tab_bar_custom()
             is_active = (i == state.active_tab),
             is_hovered = (i == state.hovered_tab),
             is_close_hovered = (i == state.hovered_close_tab),
+            is_zoomed = (i == state.active_tab and state.zoomed_pane_id ~= nil)
+                or (i ~= state.active_tab and tab.zoomed_pane_id ~= nil),
         })
     end
 
