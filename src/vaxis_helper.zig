@@ -37,6 +37,7 @@ fn isNamedKey(codepoint: u21) bool {
         Key.tab,
         Key.backspace,
         Key.escape,
+        Key.space,
         Key.delete,
         Key.insert,
         Key.home,
