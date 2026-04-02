@@ -33,6 +33,11 @@ const Matcher = keybind_matcher.Matcher;
 const Key = key_string.Key;
 const Action = action_mod.Action;
 
+// File-scope buffer for extractKey to uppercase a shifted letter key.
+// Safe: Lua event handling is single-threaded, and the returned Key is
+// consumed by handleKey (via keyToId) before the next call to extractKey.
+var extract_key_upper: [1:0]u8 = .{0};
+
 const MatcherHandle = struct {
     trie: *Trie,
     matcher: Matcher,
@@ -330,12 +335,20 @@ fn extractKey(lua: *ziglua.Lua, index: i32) !Key {
     // Don't include shift modifier when matching on generated text.
     // Shift is consumed by character generation (e.g., Shift+Comma produces '<').
     // Only strip shift for single printable characters - keep it for special keys like <S-Enter>.
+    // When the key is a lowercase letter but shift is held (e.g., Alt suppressed text
+    // generation so vaxis reports the unshifted codepoint), uppercase it to reflect
+    // what shift would have produced.
+    var effective_key = key_str;
     if (shift and key_str.len == 1 and key_str[0] >= 0x20 and key_str[0] < 0x7F) {
+        if (key_str[0] >= 'a' and key_str[0] <= 'z') {
+            extract_key_upper[0] = key_str[0] - 0x20;
+            effective_key = extract_key_upper[0..1];
+        }
         shift = false;
     }
 
     return Key{
-        .key = key_str,
+        .key = effective_key,
         .ctrl = ctrl,
         .alt = alt,
         .shift = shift,
