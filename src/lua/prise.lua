@@ -64,6 +64,8 @@
 ---@field get_state? fun(cwd_lookup: fun(id: number): string?): table Serialize UI state for persistence
 ---@field set_state? fun(saved: table?, pty_lookup: fun(id: number): Pty?) Restore UI state
 ---@field setup? fun(opts: table?) Configure the UI (optional)
+---@field get_macos_option_as_alt? fun(): boolean Return whether macOS Option should act as Alt
+---@field execute_action? fun(name: string) Execute a built-in action by name
 
 local M = {}
 

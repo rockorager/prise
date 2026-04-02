@@ -4400,6 +4400,18 @@ function M.set_state(saved, pty_lookup)
     prise.request_frame()
 end
 
+---Execute a built-in action by name.
+---This allows user config code to programmatically trigger actions
+---(e.g. from dialog callbacks) without direct access to action_handlers.
+---@param name string Action name (e.g. "close_pane", "close_tab")
+function M.execute_action(name)
+    local handler = action_handlers[name]
+    if handler then
+        handler()
+        prise.request_frame()
+    end
+end
+
 -- Export internal functions for testing
 M._test = {
     is_pane = is_pane,

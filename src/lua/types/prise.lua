@@ -19,6 +19,15 @@
 ---@field keybind KeybindModule Keybind compilation and matching
 local prise = {}
 
+---@class PriseUI
+---@field update fun(event: table) Handle an input event
+---@field view fun(): table Return the widget tree to render
+---@field get_state? fun(cwd_lookup: fun(id: number): string?): table Serialize UI state for persistence
+---@field set_state? fun(saved: table?, pty_lookup: fun(id: number): Pty?) Restore UI state
+---@field setup? fun(opts: table?) Configure the UI (optional)
+---@field get_macos_option_as_alt? fun(): boolean Return whether macOS Option should act as Alt
+---@field execute_action fun(name: string) Execute a built-in action by name
+
 ---Load the tiling UI module
 ---@return PriseUI
 function prise.tiling() end
