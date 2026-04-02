@@ -18,6 +18,11 @@ const log = std.log.scoped(.client);
 
 const MAX_PASTE_SIZE = 10 * 1024 * 1024; // 10 MiB
 
+fn nonEmptyCwd(cwd: ?[]const u8) ?[]const u8 {
+    const value = cwd orelse return null;
+    return if (value.len > 0) value else null;
+}
+
 pub const MsgId = enum(u16) {
     spawn_pty = 1,
     attach_pty = 2,
@@ -292,7 +297,9 @@ pub const ClientLogic = struct {
                 .attach => |attach_info| {
                     state.pty_id = attach_info.pty_id;
                     state.attached = true;
-                    if (attach_info.cwd) |c| {
+                    crash_context.setCurrentPty(@intCast(attach_info.pty_id));
+                    crash_context.record("attached existing pty_id={d}", .{attach_info.pty_id});
+                    if (nonEmptyCwd(attach_info.cwd)) |c| {
                         const owned_cwd = state.allocator.dupe(u8, c) catch return .{ .attached = .{ .new_pty_id = attach_info.pty_id } };
                         state.cwd_map.put(attach_info.pty_id, owned_cwd) catch {
                             state.allocator.free(owned_cwd);
@@ -350,7 +357,9 @@ pub const ClientLogic = struct {
         if (id >= 0) {
             state.pty_id = id;
             state.attached = true;
-            if (cwd) |c| {
+            crash_context.setCurrentPty(@intCast(id));
+            crash_context.record("attached pty_id={d} old_pty_id={?}", .{ id, old_pty_id });
+            if (nonEmptyCwd(cwd)) |c| {
                 const owned_cwd = state.allocator.dupe(u8, c) catch return .{ .attached = .{ .new_pty_id = id, .old_pty_id = old_pty_id } };
                 state.cwd_map.put(id, owned_cwd) catch {
                     state.allocator.free(owned_cwd);
@@ -506,6 +515,13 @@ pub const ClientLogic = struct {
 
         const cwd = if (cwd_val) |v| (if (v == .string) v.string else null) else return .none;
         const cwd_str = cwd orelse return .none;
+
+        if (cwd_str.len == 0) {
+            if (state.cwd_map.fetchRemove(pty_id)) |entry| {
+                state.allocator.free(entry.value);
+            }
+            return .{ .cwd_changed = .{ .pty_id = @intCast(pty_id), .cwd = cwd_str } };
+        }
 
         if (state.cwd_map.getPtr(pty_id)) |entry| {
             state.allocator.free(entry.*);
@@ -1881,10 +1897,11 @@ pub const App = struct {
 
     fn spawnInitialPty(self: *App) !void {
         const ws = try vaxis.Tty.getWinsize(self.tty.fd);
+        const initial_cwd = nonEmptyCwd(self.initial_cwd);
 
         const msgid = self.state.next_msgid;
         self.state.next_msgid += 1;
-        try self.state.pending_requests.put(msgid, .{ .spawn = .{ .cwd = self.initial_cwd } });
+        try self.state.pending_requests.put(msgid, .{ .spawn = .{ .cwd = initial_cwd } });
 
         var arena = std.heap.ArenaAllocator.init(self.allocator);
         defer arena.deinit();
@@ -1902,16 +1919,16 @@ pub const App = struct {
         }
 
         const macos_option_as_alt = self.ui.getMacosOptionAsAlt();
-        const param_count: usize = if (self.initial_cwd != null) 6 else 5;
+        const param_count: usize = if (initial_cwd != null) 6 else 5;
         var params_kv = try self.allocator.alloc(msgpack.Value.KeyValue, param_count);
         defer self.allocator.free(params_kv);
-        log.info("Sending spawn_pty: rows={} cols={} cwd={?s} env_count={}", .{ ws.rows, ws.cols, self.initial_cwd, env_array.items.len });
+        log.info("Sending spawn_pty: rows={} cols={} cwd={?s} env_count={}", .{ ws.rows, ws.cols, initial_cwd, env_array.items.len });
         params_kv[0] = .{ .key = .{ .string = "rows" }, .value = .{ .unsigned = ws.rows } };
         params_kv[1] = .{ .key = .{ .string = "cols" }, .value = .{ .unsigned = ws.cols } };
         params_kv[2] = .{ .key = .{ .string = "attach" }, .value = .{ .boolean = true } };
         params_kv[3] = .{ .key = .{ .string = "env" }, .value = .{ .array = env_array.items } };
         params_kv[4] = .{ .key = .{ .string = "macos_option_as_alt" }, .value = .{ .string = macos_option_as_alt } };
-        if (self.initial_cwd) |cwd| {
+        if (initial_cwd) |cwd| {
             params_kv[5] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = cwd } };
         }
         const params_val = msgpack.Value{ .map = params_kv };
@@ -1969,7 +1986,7 @@ pub const App = struct {
         self.pending_attach_count = pty_ids.len;
 
         for (pty_ids) |pty_id| {
-            const cwd = self.pending_attach_cwd.get(pty_id);
+            const cwd = nonEmptyCwd(self.pending_attach_cwd.get(pty_id));
 
             // If validity doesn't match, spawn fresh instead of attaching
             if (!validity_matches) {
@@ -2018,6 +2035,7 @@ pub const App = struct {
 
     fn spawnPtyWithCwd(self: *App, msgid: u32, cwd: ?[]const u8) !void {
         const ws = try vaxis.Tty.getWinsize(self.tty.fd);
+        const resolved_cwd = nonEmptyCwd(cwd);
 
         var env_map = try std.process.getEnvMap(self.allocator);
         defer env_map.deinit();
@@ -2031,7 +2049,7 @@ pub const App = struct {
         }
 
         const macos_option_as_alt = self.ui.getMacosOptionAsAlt();
-        const param_count: usize = if (cwd != null) 6 else 5;
+        const param_count: usize = if (resolved_cwd != null) 6 else 5;
         var params_kv = try self.allocator.alloc(msgpack.Value.KeyValue, param_count);
         defer self.allocator.free(params_kv);
         params_kv[0] = .{ .key = .{ .string = "rows" }, .value = .{ .unsigned = ws.rows } };
@@ -2039,7 +2057,7 @@ pub const App = struct {
         params_kv[2] = .{ .key = .{ .string = "attach" }, .value = .{ .boolean = true } };
         params_kv[3] = .{ .key = .{ .string = "env" }, .value = .{ .array = env_array.items } };
         params_kv[4] = .{ .key = .{ .string = "macos_option_as_alt" }, .value = .{ .string = macos_option_as_alt } };
-        if (cwd) |c| {
+        if (resolved_cwd) |c| {
             params_kv[5] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = c } };
         }
         const params_val = msgpack.Value{ .map = params_kv };
@@ -2371,10 +2389,11 @@ pub const App = struct {
                                 }
                             },
                             .spawn_pty_with_cwd => |info| {
-                                log.info("Spawning new PTY with cwd: {s}", .{if (info.cwd) |c| c else "default"});
+                                const cwd = nonEmptyCwd(info.cwd);
+                                log.info("Spawning new PTY with cwd: {s}", .{if (cwd) |c| c else "default"});
                                 const msgid = app.state.next_msgid;
                                 app.state.next_msgid += 1;
-                                try app.state.pending_requests.put(msgid, .{ .spawn = .{ .cwd = info.cwd } });
+                                try app.state.pending_requests.put(msgid, .{ .spawn = .{ .cwd = cwd } });
 
                                 // Build env array from current process environment
                                 var env_map = try std.process.getEnvMap(app.allocator);
@@ -2389,14 +2408,12 @@ pub const App = struct {
                                 }
 
                                 // Build spawn_pty params with env and optional cwd
-                                const param_count: usize = if (info.cwd != null) 2 else 1;
+                                const param_count: usize = if (cwd != null) 2 else 1;
                                 var kv = try app.allocator.alloc(msgpack.Value.KeyValue, param_count);
                                 defer app.allocator.free(kv);
                                 kv[0] = .{ .key = .{ .string = "env" }, .value = .{ .array = env_array.items } };
-                                if (info.cwd) |cwd| {
-                                    if (cwd.len > 0) {
-                                        kv[1] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = cwd } };
-                                    }
+                                if (cwd) |resolved_cwd| {
+                                    kv[1] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = resolved_cwd } };
                                 }
 
                                 var arr = try app.allocator.alloc(msgpack.Value, 4);
@@ -2562,9 +2579,10 @@ pub const App = struct {
     pub fn spawnPty(self: *App, opts: UI.SpawnOptions) !void {
         const msgid = self.state.next_msgid;
         self.state.next_msgid += 1;
+        const cwd = nonEmptyCwd(opts.cwd);
 
         log.info("spawnPty: sending request msgid={}", .{msgid});
-        try self.state.pending_requests.put(msgid, .{ .spawn = .{ .cwd = opts.cwd } });
+        try self.state.pending_requests.put(msgid, .{ .spawn = .{ .cwd = cwd } });
 
         // Build env array from current process environment
         var env_map = try std.process.getEnvMap(self.allocator);
@@ -2578,7 +2596,7 @@ pub const App = struct {
             try env_array.append(self.allocator, .{ .string = env_str });
         }
 
-        const num_params: usize = if (opts.cwd != null) 5 else 4;
+        const num_params: usize = if (cwd != null) 5 else 4;
         var map_items = try self.allocator.alloc(msgpack.Value.KeyValue, num_params);
         defer self.allocator.free(map_items);
 
@@ -2586,8 +2604,8 @@ pub const App = struct {
         map_items[1] = .{ .key = .{ .string = "cols" }, .value = .{ .unsigned = opts.cols } };
         map_items[2] = .{ .key = .{ .string = "attach" }, .value = .{ .boolean = opts.attach } };
         map_items[3] = .{ .key = .{ .string = "env" }, .value = .{ .array = env_array.items } };
-        if (opts.cwd) |cwd| {
-            map_items[4] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = cwd } };
+        if (cwd) |resolved_cwd| {
+            map_items[4] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = resolved_cwd } };
         }
 
         const params = msgpack.Value{ .map = map_items };
@@ -2992,13 +3010,11 @@ pub const App = struct {
                         if (obj.get("pty_id")) |pty_id_val| {
                             if (pty_id_val == .integer) {
                                 const pty_id: u32 = @intCast(pty_id_val.integer);
-                                var cwd: ?[]const u8 = null;
                                 if (obj.get("cwd")) |cwd_val| {
-                                    if (cwd_val == .string) {
-                                        cwd = try allocator.dupe(u8, cwd_val.string);
+                                    if (cwd_val == .string and cwd_val.string.len > 0) {
+                                        try pairs.put(pty_id, try allocator.dupe(u8, cwd_val.string));
                                     }
                                 }
-                                try pairs.put(pty_id, cwd orelse try allocator.dupe(u8, ""));
                             }
                         }
                     }
@@ -3461,6 +3477,36 @@ test "ClientLogic - shouldFlush" {
 
         try testing.expect(!ClientLogic.shouldFlush(params));
     }
+}
+
+test "extractPtyIdCwdPairs skips missing and empty cwd" {
+    const testing = std.testing;
+
+    const json =
+        \\{
+        \\  "root": {
+        \\    "type": "split",
+        \\    "children": [
+        \\      { "type": "pane", "id": 1, "pty_id": 1, "cwd": "/tmp/project" },
+        \\      { "type": "pane", "id": 2, "pty_id": 2, "cwd": "" },
+        \\      { "type": "pane", "id": 3, "pty_id": 3 }
+        \\    ]
+        \\  }
+        \\}
+    ;
+
+    var pairs = try App.extractPtyIdCwdPairs(testing.allocator, json);
+    defer {
+        var it = pairs.valueIterator();
+        while (it.next()) |cwd| {
+            testing.allocator.free(cwd.*);
+        }
+        pairs.deinit();
+    }
+
+    try testing.expectEqualStrings("/tmp/project", pairs.get(1).?);
+    try testing.expect(!pairs.contains(2));
+    try testing.expect(!pairs.contains(3));
 }
 
 test "UnixSocketClient - successful connection" {
