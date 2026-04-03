@@ -17,6 +17,7 @@ const posix = std.posix;
 const log = std.log.scoped(.client);
 
 const MAX_PASTE_SIZE = 10 * 1024 * 1024; // 10 MiB
+const MAX_SESSION_JSON_SIZE = 1024 * 1024; // 1 MiB
 
 fn nonEmptyCwd(cwd: ?[]const u8) ?[]const u8 {
     const value = cwd orelse return null;
@@ -216,7 +217,7 @@ pub const ClientState = struct {
 pub const ServerAction = union(enum) {
     none,
     send_attach: i64,
-    spawn_pty_with_cwd: struct { cwd: ?[]const u8 },
+    spawn_pty_with_cwd: struct { cwd: ?[]const u8, old_pty_id: ?u32 = null },
     redraw: msgpack.Value,
     attached: struct { new_pty_id: i64, old_pty_id: ?u32 = null },
     pty_exited: struct { pty_id: u32, status: u32 },
@@ -278,7 +279,11 @@ pub const ClientLogic = struct {
                 const attach_info = entry.value.attach;
                 if (err_val == .string and std.mem.eql(u8, err_val.string, "PTY not found")) {
                     log.info("PTY {} not found, spawning new PTY with cwd", .{attach_info.pty_id});
-                    return .{ .spawn_pty_with_cwd = .{ .cwd = attach_info.cwd } };
+                    crash_context.record("attach fallback spawn old_pty_id={d}", .{attach_info.pty_id});
+                    return .{ .spawn_pty_with_cwd = .{
+                        .cwd = attach_info.cwd,
+                        .old_pty_id = @intCast(attach_info.pty_id),
+                    } };
                 }
             } else if (entry.value == .switch_detach) {
                 log.err("Session switch detach failed: {}", .{err_val});
@@ -628,6 +633,31 @@ pub const DragState = struct {
     start_y: f64,
 };
 
+const SessionRestorePlan = struct {
+    const Self = @This();
+
+    session_name: []const u8,
+    session_json: []const u8,
+    pty_ids: []u32,
+    pty_id_cwd: std.AutoHashMap(u32, []const u8),
+    validity_matches: bool,
+    attach_count: usize,
+    spawn_fallback_count: usize,
+    remaining_attach_count: usize,
+
+    fn deinit(self: *Self, allocator: std.mem.Allocator) void {
+        allocator.free(self.session_name);
+        allocator.free(self.session_json);
+        allocator.free(self.pty_ids);
+
+        var cwd_it = self.pty_id_cwd.valueIterator();
+        while (cwd_it.next()) |cwd| {
+            allocator.free(cwd.*);
+        }
+        self.pty_id_cwd.deinit();
+    }
+};
+
 pub const App = struct {
     connected: bool = false,
     fd: posix.fd_t = undefined,
@@ -679,10 +709,7 @@ pub const App = struct {
     pipe_recv_buffer: [4096]u8 = undefined,
     colors: Surface.TerminalColors = .{},
 
-    pending_attach_ids: ?[]u32 = null,
-    pending_attach_count: usize = 0,
-    session_json: ?[]const u8 = null,
-    pending_attach_cwd: std.AutoHashMap(u32, []const u8) = undefined,
+    prepared_restore_plan: ?SessionRestorePlan = null,
     // Maps old PTY IDs to new PTY IDs when spawning fresh PTYs due to validity mismatch
     pty_id_remap: std.AutoHashMap(u32, u32) = undefined,
 
@@ -693,7 +720,6 @@ pub const App = struct {
 
     // Current session name (owned by App)
     current_session_name: ?[]const u8 = null,
-    switch_target_session: ?[]const u8 = null,
     session_switch_in_progress: bool = false,
     // Auto-save timer for debouncing
     autosave_timer: ?io.Task = null,
@@ -731,7 +757,6 @@ pub const App = struct {
             .pipe_buf = .empty,
             .surfaces = std.AutoHashMap(u32, *Surface).init(allocator),
             .state = ClientState.init(allocator),
-            .pending_attach_cwd = std.AutoHashMap(u32, []const u8).init(allocator),
             .pty_id_remap = std.AutoHashMap(u32, u32).init(allocator),
             .pending_color_queries = .empty,
         };
@@ -825,18 +850,11 @@ pub const App = struct {
         self.msg_buffer.deinit(self.allocator);
         self.msg_arena.deinit();
         self.state.deinit();
-        var cwd_it = self.pending_attach_cwd.valueIterator();
-        while (cwd_it.next()) |cwd| {
-            self.allocator.free(cwd.*);
-        }
-        self.pending_attach_cwd.deinit();
+        self.clearPreparedRestorePlan();
         self.pty_id_remap.deinit();
         self.pending_color_queries.deinit(self.allocator);
         if (self.current_session_name) |name| {
             self.allocator.free(name);
-        }
-        if (self.switch_target_session) |target| {
-            self.allocator.free(target);
         }
         if (self.hit_regions.len > 0) self.allocator.free(self.hit_regions);
         if (self.split_handles.len > 0) self.allocator.free(self.split_handles);
@@ -938,7 +956,7 @@ pub const App = struct {
             fn detachCb(ctx: *anyopaque, session_name: []const u8) anyerror!void {
                 const app_ptr: *App = @ptrCast(@alignCast(ctx));
                 try app_ptr.saveSession(session_name);
-                if (!try app_ptr.sendDetachPtysRequest(.detach)) {
+                if ((try app_ptr.sendDetachPtysRequest(.detach)) == null) {
                     return;
                 }
             }
@@ -1678,7 +1696,7 @@ pub const App = struct {
         }
         try self.vx.render(self.tty.writer());
         log.debug("render: flushing tty", .{});
-        try self.tty.tty_writer.interface.flush();
+        try self.tty.writer().flush();
         log.debug("render: complete", .{});
 
         self.last_render_time = std.time.milliTimestamp();
@@ -1744,27 +1762,68 @@ pub const App = struct {
         self.state.cwd_map.clearRetainingCapacity();
     }
 
-    fn clearPendingAttachState(self: *App) void {
-        if (self.pending_attach_ids) |ids| {
-            self.allocator.free(ids);
-            self.pending_attach_ids = null;
+    fn clearPreparedRestorePlan(self: *App) void {
+        if (self.prepared_restore_plan) |*plan| {
+            plan.deinit(self.allocator);
+            self.prepared_restore_plan = null;
         }
-        if (self.session_json) |json| {
-            self.allocator.free(json);
-            self.session_json = null;
-        }
-        var cwd_it = self.pending_attach_cwd.valueIterator();
-        while (cwd_it.next()) |cwd| {
-            self.allocator.free(cwd.*);
-        }
-        self.pending_attach_cwd.clearRetainingCapacity();
-        self.pending_attach_count = 0;
+    }
+
+    const DetachRequest = struct {
+        msgid: u32,
+        pty_count: usize,
+    };
+
+    fn preparedRestoreSessionName(self: *const App) ?[]const u8 {
+        const plan = self.prepared_restore_plan orelse return null;
+        return plan.session_name;
+    }
+
+    fn sessionNameForLogs(session_name: ?[]const u8) []const u8 {
+        return session_name orelse "(none)";
+    }
+
+    fn updateSessionSwitchState(self: *App, active: bool) !void {
+        const target_session = if (self.preparedRestoreSessionName()) |name| name else "";
+        try self.ui.update(.{
+            .session_switch = .{
+                .active = active,
+                .target_session = target_session,
+            },
+        });
+    }
+
+    fn finishSessionSwitch(self: *App) void {
+        self.session_switch_in_progress = false;
+        self.state.suppress_unsolicited_pty_results = false;
+        self.updateSessionSwitchState(false) catch |err| {
+            log.err("Failed to clear session switch state: {}", .{err});
+        };
+        self.clearPreparedRestorePlan();
         self.pty_id_remap.clearRetainingCapacity();
     }
 
-    fn sendDetachPtysRequest(self: *App, request_info: ClientState.RequestInfo) !bool {
+    fn cancelSessionSwitch(self: *App, reason: []const u8) void {
+        const source_session = sessionNameForLogs(self.current_session_name);
+        const target_session = sessionNameForLogs(self.preparedRestoreSessionName());
+        crash_context.record(
+            "session switch cancelled from={s} to={s} reason={s}",
+            .{ source_session, target_session, reason },
+        );
+        self.finishSessionSwitch();
+    }
+
+    fn completeSessionSwitch(self: *App, source_session: ?[]const u8, target_session: []const u8) void {
+        crash_context.record(
+            "session switch restore complete from={s} to={s}",
+            .{ sessionNameForLogs(source_session), target_session },
+        );
+        self.finishSessionSwitch();
+    }
+
+    fn sendDetachPtysRequest(self: *App, request_info: ClientState.RequestInfo) !?DetachRequest {
         if (self.surfaces.count() == 0) {
-            return false;
+            return null;
         }
 
         var pty_ids = try self.allocator.alloc(msgpack.Value, self.surfaces.count());
@@ -1793,7 +1852,10 @@ pub const App = struct {
         defer self.allocator.free(encoded);
 
         try self.sendDirect(encoded);
-        return true;
+        return .{
+            .msgid = msgid,
+            .pty_count = pty_ids.len,
+        };
     }
 
     fn resetActiveSessionState(self: *App) !void {
@@ -1831,8 +1893,8 @@ pub const App = struct {
         self.state.suppress_unsolicited_pty_results = true;
         self.state.pending_requests.clearRetainingCapacity();
         self.clearCwdMap();
-        self.clearPendingAttachState();
         self.pending_color_queries.clearRetainingCapacity();
+        self.pty_id_remap.clearRetainingCapacity();
 
         if (self.hit_regions.len > 0) {
             self.allocator.free(self.hit_regions);
@@ -1846,30 +1908,24 @@ pub const App = struct {
         try self.ui.clearState();
     }
 
-    fn finishSessionSwitch(self: *App) void {
-        self.session_switch_in_progress = false;
-        self.state.suppress_unsolicited_pty_results = false;
-        if (self.switch_target_session) |target| {
-            self.allocator.free(target);
-            self.switch_target_session = null;
-        }
-    }
-
-    fn cancelSessionSwitch(self: *App) void {
-        self.finishSessionSwitch();
-    }
-
-    fn completeSessionSwitch(self: *App) void {
-        self.finishSessionSwitch();
-    }
-
     fn beginSessionSwitchAttach(self: *App) !void {
-        const target_session = self.switch_target_session orelse return error.NoSessionSwitchTarget;
-        errdefer self.cancelSessionSwitch();
-
+        const source_session = sessionNameForLogs(self.current_session_name);
+        const target_session = self.preparedRestoreSessionName() orelse return error.NoPreparedRestorePlan;
+        crash_context.record(
+            "session switch detach acknowledged from={s} to={s}",
+            .{ source_session, target_session },
+        );
+        crash_context.record(
+            "session switch reset start from={s} to={s}",
+            .{ source_session, target_session },
+        );
         try self.resetActiveSessionState();
-        try self.startSessionAttach(target_session);
-        try self.setCurrentSessionName(target_session);
+        crash_context.record(
+            "session switch reset finish from={s} to={s}",
+            .{ source_session, target_session },
+        );
+        try self.scheduleRender();
+        try self.applyPreparedSessionRestore();
     }
 
     fn onServerInfoReceived(self: *App) !void {
@@ -1880,7 +1936,13 @@ pub const App = struct {
             try self.setCurrentSessionName(session_name);
             crash_context.setSessionName(self.current_session_name);
             crash_context.record("attach session {s}", .{session_name});
-            try self.startSessionAttach(session_name);
+            var plan = try self.preflightSessionRestore(session_name);
+            var plan_stored = false;
+            errdefer if (!plan_stored) plan.deinit(self.allocator);
+            self.clearPreparedRestorePlan();
+            self.prepared_restore_plan = plan;
+            plan_stored = true;
+            try self.applyPreparedSessionRestore();
         } else if (self.new_session_name) |name| {
             // User specified a name for new session
             try self.setCurrentSessionName(name);
@@ -1936,63 +1998,124 @@ pub const App = struct {
         try self.sendDirect(msg);
     }
 
-    fn startSessionAttach(self: *App, session_name: []const u8) !void {
-        crash_context.record("session restore start {s}", .{session_name});
-        self.clearPendingAttachState();
+    fn sessionFilePath(self: *App, session_name: []const u8) ![]u8 {
         const home = std.posix.getenv("HOME") orelse return error.NoHomeDirectory;
-
         const filename = try std.fmt.allocPrint(self.allocator, "{s}.json", .{session_name});
         defer self.allocator.free(filename);
 
-        const path = try std.fs.path.join(self.allocator, &.{ home, ".local", "state", "prise", "sessions", filename });
-        defer self.allocator.free(path);
+        return std.fs.path.join(self.allocator, &.{ home, ".local", "state", "prise", "sessions", filename });
+    }
 
+    fn loadSessionRestorePlanFromPath(
+        allocator: std.mem.Allocator,
+        path: []const u8,
+        session_name: []const u8,
+        current_validity: ?i64,
+    ) !SessionRestorePlan {
         const file = std.fs.openFileAbsolute(path, .{}) catch |err| {
-            log.err("Failed to open session file {s}: {}", .{ path, err });
+            log.info("Failed to open session file {s}: {}", .{ path, err });
             return err;
         };
         defer file.close();
 
-        const json = try file.readToEndAlloc(self.allocator, 1024 * 1024);
-        self.session_json = json;
+        const json = try file.readToEndAlloc(allocator, MAX_SESSION_JSON_SIZE);
+        errdefer allocator.free(json);
+        return buildSessionRestorePlanFromOwnedJson(allocator, session_name, json, current_validity);
+    }
 
-        // Check if pty_validity matches - if not, skip attach and spawn fresh
-        const saved_validity = extractPtyValidityFromJson(self.allocator, json);
+    fn buildSessionRestorePlanFromOwnedJson(
+        allocator: std.mem.Allocator,
+        session_name: []const u8,
+        session_json: []const u8,
+        current_validity: ?i64,
+    ) !SessionRestorePlan {
+        const pty_ids = try extractPtyIdsFromJson(allocator, session_json);
+        errdefer allocator.free(pty_ids);
+        if (pty_ids.len == 0) {
+            return error.NoSessionsFound;
+        }
+
+        var pty_id_cwd = try extractPtyIdCwdPairs(allocator, session_json);
+        errdefer {
+            var cwd_it = pty_id_cwd.valueIterator();
+            while (cwd_it.next()) |cwd| {
+                allocator.free(cwd.*);
+            }
+            pty_id_cwd.deinit();
+        }
+
+        const saved_validity = extractPtyValidityFromJson(allocator, session_json);
         const validity_matches = if (saved_validity) |saved| blk: {
-            if (self.state.pty_validity) |current| {
+            if (current_validity) |current| {
                 break :blk saved == current;
             }
             break :blk false;
         } else false;
 
         if (!validity_matches) {
-            log.info("pty_validity mismatch (saved={?}, current={?}), spawning fresh PTYs", .{ saved_validity, self.state.pty_validity });
+            log.info("pty_validity mismatch (saved={?}, current={?}), spawning fresh PTYs", .{ saved_validity, current_validity });
+            crash_context.record(
+                "session restore spawn fallback saved_validity={?} current_validity={?}",
+                .{ saved_validity, current_validity },
+            );
         }
 
-        const pty_ids = try extractPtyIdsFromJson(self.allocator, json);
-        if (pty_ids.len == 0) {
-            log.err("No PTY IDs found in session", .{});
-            self.allocator.free(json);
-            self.session_json = null;
-            return error.NoSessionsFound;
-        }
+        return .{
+            .session_name = try allocator.dupe(u8, session_name),
+            .session_json = session_json,
+            .pty_ids = pty_ids,
+            .pty_id_cwd = pty_id_cwd,
+            .validity_matches = validity_matches,
+            .attach_count = if (validity_matches) pty_ids.len else 0,
+            .spawn_fallback_count = if (validity_matches) 0 else pty_ids.len,
+            .remaining_attach_count = 0,
+        };
+    }
 
-        // Extract PTY ID + cwd pairs for fallback spawning if attach fails
-        self.pending_attach_cwd = try extractPtyIdCwdPairs(self.allocator, json);
+    fn preflightSessionRestore(self: *App, session_name: []const u8) !SessionRestorePlan {
+        crash_context.record("session restore preflight start {s}", .{session_name});
+        const path = try self.sessionFilePath(session_name);
+        defer self.allocator.free(path);
 
-        log.info("Attaching to {} PTYs from session {s}", .{ pty_ids.len, session_name });
-        self.pending_attach_ids = pty_ids;
-        self.pending_attach_count = pty_ids.len;
+        const plan = loadSessionRestorePlanFromPath(
+            self.allocator,
+            path,
+            session_name,
+            self.state.pty_validity,
+        ) catch |err| {
+            crash_context.record(
+                "session restore preflight failed {s}: {s}",
+                .{ session_name, @errorName(err) },
+            );
+            return err;
+        };
 
-        for (pty_ids) |pty_id| {
-            const cwd = nonEmptyCwd(self.pending_attach_cwd.get(pty_id));
+        crash_context.record(
+            "session restore preflight success {s} attach_count={d} spawn_fallback_count={d}",
+            .{ session_name, plan.attach_count, plan.spawn_fallback_count },
+        );
+        return plan;
+    }
 
-            // If validity doesn't match, spawn fresh instead of attaching
-            if (!validity_matches) {
+    fn applyPreparedSessionRestore(self: *App) !void {
+        const plan = if (self.prepared_restore_plan) |*value| value else return error.NoPreparedRestorePlan;
+        std.debug.assert(plan.pty_ids.len > 0);
+
+        crash_context.record(
+            "session restore apply start {s} attach_count={d} spawn_fallback_count={d}",
+            .{ plan.session_name, plan.attach_count, plan.spawn_fallback_count },
+        );
+        plan.remaining_attach_count = plan.pty_ids.len;
+
+        log.info("Attaching to {} PTYs from session {s}", .{ plan.pty_ids.len, plan.session_name });
+        for (plan.pty_ids) |pty_id| {
+            const cwd = nonEmptyCwd(plan.pty_id_cwd.get(pty_id));
+
+            if (!plan.validity_matches) {
                 const msgid = self.state.next_msgid;
                 self.state.next_msgid += 1;
                 try self.state.pending_requests.put(msgid, .{ .spawn = .{ .cwd = cwd, .old_pty_id = pty_id } });
-                try self.spawnPtyWithCwd(msgid, cwd);
+                try self.spawnPtyWithCwd(msgid, cwd, plan.session_name);
                 continue;
             }
 
@@ -2000,7 +2123,6 @@ pub const App = struct {
             self.state.next_msgid += 1;
             try self.state.pending_requests.put(msgid, .{ .attach = .{ .pty_id = @intCast(pty_id), .cwd = cwd } });
 
-            // Server expects params as array: [pty_id, macos_option_as_alt]
             const macos_option_as_alt = self.ui.getMacosOptionAsAlt();
             var params = try self.allocator.alloc(msgpack.Value, 2);
             params[0] = .{ .unsigned = pty_id };
@@ -2022,6 +2144,28 @@ pub const App = struct {
         }
     }
 
+    fn completePreparedSessionRestore(self: *App) !void {
+        const target_session = self.preparedRestoreSessionName() orelse return error.NoPreparedRestorePlan;
+
+        log.info("All PTYs attached, restoring session state", .{});
+        if (self.prepared_restore_plan) |plan| {
+            try self.ui.setStateFromJson(plan.session_json, ptyLookup, self);
+        }
+
+        crash_context.record("session restore complete {s}", .{target_session});
+        self.state.suppress_unsolicited_pty_results = false;
+
+        if (self.session_switch_in_progress) {
+            const source_session = self.current_session_name;
+            try self.setCurrentSessionName(target_session);
+            crash_context.setSessionName(self.current_session_name);
+            self.completeSessionSwitch(source_session, target_session);
+        }
+
+        self.clearPreparedRestorePlan();
+        try self.scheduleRender();
+    }
+
     fn extractPtyValidityFromJson(allocator: std.mem.Allocator, json: []const u8) ?i64 {
         const parsed = std.json.parseFromSlice(std.json.Value, allocator, json, .{}) catch return null;
         defer parsed.deinit();
@@ -2032,7 +2176,7 @@ pub const App = struct {
         return validity_val.integer;
     }
 
-    fn spawnPtyWithCwd(self: *App, msgid: u32, cwd: ?[]const u8) !void {
+    fn spawnPtyWithCwd(self: *App, msgid: u32, cwd: ?[]const u8, session_name: []const u8) !void {
         const ws = try vaxis.Tty.getWinsize(self.tty.fd);
         const resolved_cwd = nonEmptyCwd(cwd);
 
@@ -2046,6 +2190,7 @@ pub const App = struct {
             const env_str = try std.fmt.allocPrint(self.allocator, "{s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* });
             try env_array.append(self.allocator, .{ .string = env_str });
         }
+        try self.appendSessionEnvNamed(&env_array, self.allocator, session_name);
 
         const macos_option_as_alt = self.ui.getMacosOptionAsAlt();
         const param_count: usize = if (resolved_cwd != null) 6 else 5;
@@ -2064,6 +2209,22 @@ pub const App = struct {
         try self.sendDirect(msg);
         self.allocator.free(msg);
     }
+
+    fn appendSessionEnvNamed(
+        self: *App,
+        env_array: *std.ArrayList(msgpack.Value),
+        string_allocator: std.mem.Allocator,
+        session_name: []const u8,
+    ) !void {
+        const session_env = try std.fmt.allocPrint(string_allocator, "PRISE_SESSION={s}", .{session_name});
+        try env_array.append(self.allocator, .{ .string = session_env });
+    }
+
+    fn appendSessionEnv(self: *App, env_array: *std.ArrayList(msgpack.Value), string_allocator: std.mem.Allocator) !void {
+        const session_name = self.current_session_name orelse return;
+        try self.appendSessionEnvNamed(env_array, string_allocator, session_name);
+    }
+
 
     fn onSendComplete(_: *io.Loop, completion: io.Completion) anyerror!void {
         const app = completion.userdataCast(@This());
@@ -2172,7 +2333,7 @@ pub const App = struct {
 
                                 if (app.surfaces.get(pty_id)) |surface| {
                                     // Skip pty_attach events during session restore - set_state will restore the UI tree
-                                    const is_session_restore = app.pending_attach_count > 0 or app.session_json != null;
+                                    const is_session_restore = app.prepared_restore_plan != null;
                                     if (!is_session_restore) {
                                         log.info("Updating UI with pty_attach for {}", .{pty_id});
                                         // Send pty_attach event to Lua UI
@@ -2361,28 +2522,11 @@ pub const App = struct {
                                     defer app.allocator.free(resize_msg);
                                     try app.sendDirect(resize_msg);
 
-                                    // Check if we're in session attach mode and all PTYs attached
-                                    if (app.pending_attach_count > 0) {
-                                        app.pending_attach_count -= 1;
-                                        if (app.pending_attach_count == 0) {
-                                            log.info("All PTYs attached, restoring session state", .{});
-                                            if (app.session_json) |json| {
-                                                app.ui.setStateFromJson(json, ptyLookup, app) catch |err| {
-                                                    log.err("Failed to restore session state: {}", .{err});
-                                                };
-                                                app.allocator.free(json);
-                                                app.session_json = null;
-                                            }
-                                            if (app.pending_attach_ids) |ids| {
-                                                app.allocator.free(ids);
-                                                app.pending_attach_ids = null;
-                                            }
-                                            crash_context.record("session restore complete", .{});
-                                            app.state.suppress_unsolicited_pty_results = false;
-                                            if (app.session_switch_in_progress) {
-                                                app.completeSessionSwitch();
-                                            }
-                                            try app.scheduleRender();
+                                    if (app.prepared_restore_plan) |*plan| {
+                                        std.debug.assert(plan.remaining_attach_count > 0);
+                                        plan.remaining_attach_count -= 1;
+                                        if (plan.remaining_attach_count == 0) {
+                                            try app.completePreparedSessionRestore();
                                         }
                                     }
                                 }
@@ -2392,40 +2536,14 @@ pub const App = struct {
                                 log.info("Spawning new PTY with cwd: {s}", .{if (cwd) |c| c else "default"});
                                 const msgid = app.state.next_msgid;
                                 app.state.next_msgid += 1;
-                                try app.state.pending_requests.put(msgid, .{ .spawn = .{ .cwd = cwd } });
-
-                                // Build env array from current process environment
-                                var env_map = try std.process.getEnvMap(app.allocator);
-                                defer env_map.deinit();
-
-                                var env_array = std.ArrayList(msgpack.Value).empty;
-                                defer env_array.deinit(app.allocator);
-                                var env_it = env_map.iterator();
-                                while (env_it.next()) |entry| {
-                                    const env_str = try std.fmt.allocPrint(app.allocator, "{s}={s}", .{ entry.key_ptr.*, entry.value_ptr.* });
-                                    try env_array.append(app.allocator, .{ .string = env_str });
-                                }
-
-                                // Build spawn_pty params with env and optional cwd
-                                const param_count: usize = if (cwd != null) 2 else 1;
-                                var kv = try app.allocator.alloc(msgpack.Value.KeyValue, param_count);
-                                defer app.allocator.free(kv);
-                                kv[0] = .{ .key = .{ .string = "env" }, .value = .{ .array = env_array.items } };
-                                if (cwd) |resolved_cwd| {
-                                    kv[1] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = resolved_cwd } };
-                                }
-
-                                var arr = try app.allocator.alloc(msgpack.Value, 4);
-                                defer app.allocator.free(arr);
-                                arr[0] = .{ .unsigned = 0 };
-                                arr[1] = .{ .unsigned = msgid };
-                                arr[2] = .{ .string = "spawn_pty" };
-                                arr[3] = .{ .map = kv };
-
-                                const encoded = try msgpack.encodeFromValue(app.allocator, msgpack.Value{ .array = arr });
-                                defer app.allocator.free(encoded);
-
-                                try app.sendDirect(encoded);
+                                const restore_session = if (app.prepared_restore_plan) |plan|
+                                    plan.session_name
+                                else
+                                    app.current_session_name orelse return error.NoCurrentSession;
+                                try app.state.pending_requests.put(msgid, .{
+                                    .spawn = .{ .cwd = cwd, .old_pty_id = info.old_pty_id },
+                                });
+                                try app.spawnPtyWithCwd(msgid, cwd, restore_session);
                             },
                             .pty_exited => |info| {
                                 log.info("PTY {} exited with status {}", .{ info.pty_id, info.status });
@@ -2504,10 +2622,20 @@ pub const App = struct {
                                 return;
                             },
                             .switch_detached => {
-                                try app.beginSessionSwitchAttach();
+                                app.beginSessionSwitchAttach() catch |err| {
+                                    crash_context.record(
+                                        "session switch apply fatal from={s} to={s} err={s}",
+                                        .{
+                                            sessionNameForLogs(app.current_session_name),
+                                            sessionNameForLogs(app.preparedRestoreSessionName()),
+                                            @errorName(err),
+                                        },
+                                    );
+                                    return err;
+                                };
                             },
                             .switch_detach_failed => {
-                                app.cancelSessionSwitch();
+                                app.cancelSessionSwitch("detach rejected");
                             },
                             .color_query => |query| {
                                 try app.handleColorQuery(query);
@@ -2794,26 +2922,69 @@ pub const App = struct {
             return error.SessionSwitchInProgress;
         }
 
-        // Save current session first
+        const source_session = sessionNameForLogs(self.current_session_name);
+        crash_context.record(
+            "session switch requested from={s} to={s}",
+            .{ source_session, target_session },
+        );
+        crash_context.record(
+            "session switch preflight start from={s} to={s}",
+            .{ source_session, target_session },
+        );
+
+        var plan = self.preflightSessionRestore(target_session) catch |err| {
+            crash_context.record(
+                "session switch preflight failed from={s} to={s} err={s}",
+                .{ source_session, target_session, @errorName(err) },
+            );
+            return err;
+        };
+        var plan_stored = false;
+        errdefer if (!plan_stored) plan.deinit(self.allocator);
+
+        crash_context.record(
+            "session switch preflight success from={s} to={s} attach_count={d} spawn_fallback_count={d}",
+            .{ source_session, target_session, plan.attach_count, plan.spawn_fallback_count },
+        );
+
         if (self.current_session_name) |name| {
             log.info("Saving current session '{s}' before switch", .{name});
             try self.saveSession(name);
         }
 
-        self.switch_target_session = try self.allocator.dupe(u8, target_session);
+        self.clearPreparedRestorePlan();
+        self.prepared_restore_plan = plan;
+        plan_stored = true;
+        self.session_switch_in_progress = true;
+        var pre_detach_phase = true;
         errdefer {
-            if (self.switch_target_session) |target| {
-                self.allocator.free(target);
-                self.switch_target_session = null;
+            if (pre_detach_phase and self.session_switch_in_progress) {
+                self.cancelSessionSwitch("pre-detach setup failed");
             }
         }
 
-        self.session_switch_in_progress = true;
-        errdefer self.session_switch_in_progress = false;
+        try self.updateSessionSwitchState(true);
 
-        if (!try self.sendDetachPtysRequest(.switch_detach)) {
-            try self.beginSessionSwitchAttach();
+        if (try self.sendDetachPtysRequest(.switch_detach)) |detach_request| {
+            crash_context.record(
+                "session switch detach request sent from={s} to={s} msgid={d} ptys={d}",
+                .{ source_session, target_session, detach_request.msgid, detach_request.pty_count },
+            );
+            return;
         }
+
+        pre_detach_phase = false;
+        crash_context.record(
+            "session switch skipping detach from={s} to={s} reason=no-live-ptys",
+            .{ source_session, target_session },
+        );
+        self.beginSessionSwitchAttach() catch |err| {
+            crash_context.record(
+                "session switch apply fatal from={s} to={s} err={s}",
+                .{ source_session, target_session, @errorName(err) },
+            );
+            return err;
+        };
     }
 
     pub fn deleteCurrentSession(self: *App) void {
@@ -3324,6 +3495,26 @@ test "ClientLogic - processServerMessage" {
         try testing.expectEqual(std.meta.Tag(ServerAction).switch_detached, std.meta.activeTag(action));
     }
 
+    // Test attach fallback preserves old PTY ID for restore remapping
+    {
+        var state = ClientState.init(testing.allocator);
+        defer state.deinit();
+        try state.pending_requests.put(4, .{ .attach = .{ .pty_id = 321, .cwd = "/tmp/demo" } });
+
+        const msg = rpc.Message{
+            .response = .{
+                .msgid = 4,
+                .err = .{ .string = "PTY not found" },
+                .result = .nil,
+            },
+        };
+
+        const action = try ClientLogic.processServerMessage(&state, msg);
+        try testing.expectEqual(std.meta.Tag(ServerAction).spawn_pty_with_cwd, std.meta.activeTag(action));
+        try testing.expectEqualStrings("/tmp/demo", action.spawn_pty_with_cwd.cwd.?);
+        try testing.expectEqual(@as(?u32, 321), action.spawn_pty_with_cwd.old_pty_id);
+    }
+
     // Test Redraw Notification
     {
         var state = ClientState.init(testing.allocator);
@@ -3506,6 +3697,145 @@ test "extractPtyIdCwdPairs skips missing and empty cwd" {
     try testing.expectEqualStrings("/tmp/project", pairs.get(1).?);
     try testing.expect(!pairs.contains(2));
     try testing.expect(!pairs.contains(3));
+}
+
+test "loadSessionRestorePlanFromPath fails for missing target session" {
+    const testing = std.testing;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const root = try tmp.dir.realpathAlloc(testing.allocator, ".");
+    defer testing.allocator.free(root);
+
+    const path = try std.fs.path.join(testing.allocator, &.{ root, "missing.json" });
+    defer testing.allocator.free(path);
+
+    try testing.expectError(
+        error.FileNotFound,
+        App.loadSessionRestorePlanFromPath(testing.allocator, path, "missing", 123),
+    );
+}
+
+test "loadSessionRestorePlanFromPath fails for corrupt session json" {
+    const testing = std.testing;
+
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.writeFile(.{
+        .sub_path = "corrupt.json",
+        .data = "{",
+    });
+
+    const path = try tmp.dir.realpathAlloc(testing.allocator, "corrupt.json");
+    defer testing.allocator.free(path);
+
+    var plan = App.loadSessionRestorePlanFromPath(testing.allocator, path, "corrupt", 123) catch {
+        return;
+    };
+    defer plan.deinit(testing.allocator);
+    return error.TestUnexpectedResult;
+}
+
+test "buildSessionRestorePlanFromOwnedJson fails for pty-less session json" {
+    const testing = std.testing;
+
+    const json = try testing.allocator.dupe(u8,
+        \\{
+        \\  "tabs": []
+        \\}
+    );
+    errdefer testing.allocator.free(json);
+
+    try testing.expectError(
+        error.NoSessionsFound,
+        App.buildSessionRestorePlanFromOwnedJson(testing.allocator, "empty", json, 123),
+    );
+    testing.allocator.free(json);
+}
+
+test "buildSessionRestorePlanFromOwnedJson ignores empty cwd values" {
+    const testing = std.testing;
+
+    const json = try testing.allocator.dupe(u8,
+        \\{
+        \\  "pty_validity": 42,
+        \\  "root": {
+        \\    "type": "split",
+        \\    "children": [
+        \\      { "type": "pane", "id": 1, "pty_id": 11, "cwd": "/tmp/project" },
+        \\      { "type": "pane", "id": 2, "pty_id": 12, "cwd": "" },
+        \\      { "type": "pane", "id": 3, "pty_id": 13 }
+        \\    ]
+        \\  }
+        \\}
+    );
+    var plan = try App.buildSessionRestorePlanFromOwnedJson(testing.allocator, "demo", json, 42);
+    defer plan.deinit(testing.allocator);
+
+    try testing.expectEqual(@as(usize, 3), plan.pty_ids.len);
+    try testing.expectEqualStrings("/tmp/project", plan.pty_id_cwd.get(11).?);
+    try testing.expect(!plan.pty_id_cwd.contains(12));
+    try testing.expect(!plan.pty_id_cwd.contains(13));
+}
+
+test "buildSessionRestorePlanFromOwnedJson computes attach and spawn fallback counts" {
+    const testing = std.testing;
+
+    const matching_json = try testing.allocator.dupe(u8,
+        \\{
+        \\  "pty_validity": 7,
+        \\  "root": {
+        \\    "type": "split",
+        \\    "children": [
+        \\      { "type": "pane", "id": 1, "pty_id": 21 },
+        \\      { "type": "pane", "id": 2, "pty_id": 22 }
+        \\    ]
+        \\  }
+        \\}
+    );
+    var matching_plan = try App.buildSessionRestorePlanFromOwnedJson(testing.allocator, "match", matching_json, 7);
+    defer matching_plan.deinit(testing.allocator);
+    try testing.expect(matching_plan.validity_matches);
+    try testing.expectEqual(@as(usize, 2), matching_plan.attach_count);
+    try testing.expectEqual(@as(usize, 0), matching_plan.spawn_fallback_count);
+
+    const mismatch_json = try testing.allocator.dupe(u8,
+        \\{
+        \\  "pty_validity": 9,
+        \\  "root": {
+        \\    "type": "split",
+        \\    "children": [
+        \\      { "type": "pane", "id": 1, "pty_id": 31 },
+        \\      { "type": "pane", "id": 2, "pty_id": 32 }
+        \\    ]
+        \\  }
+        \\}
+    );
+    var mismatch_plan = try App.buildSessionRestorePlanFromOwnedJson(testing.allocator, "mismatch", mismatch_json, 7);
+    defer mismatch_plan.deinit(testing.allocator);
+    try testing.expect(!mismatch_plan.validity_matches);
+    try testing.expectEqual(@as(usize, 0), mismatch_plan.attach_count);
+    try testing.expectEqual(@as(usize, 2), mismatch_plan.spawn_fallback_count);
+}
+
+test "switchToSession leaves state untouched when preflight fails" {
+    var backing_buffer: [8192]u8 = undefined;
+    var fba = std.heap.FixedBufferAllocator.init(&backing_buffer);
+    const allocator = fba.allocator();
+
+    var app: App = undefined;
+    app.allocator = allocator;
+    app.state = ClientState.init(allocator);
+    app.current_session_name = "source";
+    app.prepared_restore_plan = null;
+    app.session_switch_in_progress = false;
+
+    try std.testing.expectError(error.FileNotFound, app.switchToSession("missing"));
+    try std.testing.expectEqualStrings("source", app.current_session_name.?);
+    try std.testing.expect(!app.session_switch_in_progress);
+    try std.testing.expect(app.prepared_restore_plan == null);
 }
 
 test "UnixSocketClient - successful connection" {

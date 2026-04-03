@@ -103,6 +103,10 @@ local utils = require("utils")
 ---@field scroll_offset number
 ---@field regions PaletteRegion[]
 
+---@class SessionSwitchState
+---@field active boolean
+---@field target_session? string
+
 ---@class State
 ---@field tabs Tab[]
 ---@field active_tab integer
@@ -125,6 +129,7 @@ local utils = require("utils")
 ---@field keybind_matcher? KeybindMatcher
 ---@field floating FloatingPaneState
 ---@field layout_picker LayoutPickerState
+---@field session_switch SessionSwitchState
 ---@field pending_layout? table
 
 ---@class Command
@@ -177,7 +182,11 @@ local utils = require("utils")
 ---@field type "cwd_changed"
 ---@field data table
 
----@alias Event PtyAttachEvent|PtyExitedEvent|KeyPressEvent|KeyReleaseEvent|PasteEvent|MouseEvent|WinsizeEvent|FocusInEvent|FocusOutEvent|SplitResizeEvent|CwdChangedEvent
+---@class SessionSwitchEvent
+---@field type "session_switch"
+---@field data { active: boolean, target_session: string }
+
+---@alias Event PtyAttachEvent|PtyExitedEvent|KeyPressEvent|KeyReleaseEvent|PasteEvent|MouseEvent|WinsizeEvent|FocusInEvent|FocusOutEvent|SplitResizeEvent|CwdChangedEvent|SessionSwitchEvent
 
 -- Powerline symbols
 local POWERLINE_SYMBOLS = {
@@ -451,6 +460,10 @@ local state = {
         scroll_offset = 0,
         regions = {},
     },
+    session_switch = {
+        active = false,
+        target_session = nil,
+    },
     -- Pending layout to apply (layout node definitions waiting for PTY spawns)
     pending_layout = nil,
 }
@@ -502,12 +515,18 @@ local function reset_session_state()
         state.session_picker.input:clear()
     end
 
+    state.layout_picker.visible = false
+    state.layout_picker.selected = 1
+    state.layout_picker.scroll_offset = 0
+    state.layout_picker.regions = {}
+
     state.tab_regions = {}
     state.tab_close_regions = {}
     state.hovered_tab = nil
     state.hovered_close_tab = nil
     state.cached_git_branch = nil
     state.detaching = false
+    state.floating.visible = false
     state.floating.pending = false
     state.floating.resize_mode = false
 end
@@ -2702,7 +2721,16 @@ end
 
 ---@param event Event
 function M.update(event)
-    if event.type == "pty_attach" then
+    if event.type == "session_switch" then
+        state.session_switch.active = event.data.active
+        if event.data.active and event.data.target_session ~= "" then
+            state.session_switch.target_session = event.data.target_session
+        else
+            state.session_switch.target_session = nil
+        end
+        prise.request_frame()
+        return
+    elseif event.type == "pty_attach" then
         prise.log.info("Lua: pty_attach received")
         ---@type Pty
         local pty = event.data.pty
@@ -4313,9 +4341,42 @@ local function build_floating()
     })
 end
 
+---@return table?
+local function build_session_switch_overlay()
+    if not state.session_switch.active then
+        return nil
+    end
+
+    local target = state.session_switch.target_session or "session"
+    return prise.Positioned({
+        anchor = "center",
+        focus = true,
+        child = prise.Box({
+            border = config.borders.style,
+            style = { bg = THEME.bg1, fg = THEME.fg_bright },
+            child = prise.Padding({
+                top = 1,
+                bottom = 1,
+                left = 2,
+                right = 2,
+                child = prise.Column({
+                    cross_axis_align = "stretch",
+                    children = {
+                        prise.Text({
+                            text = "Switching to " .. target .. "...",
+                            style = { fg = THEME.fg_bright, bg = THEME.bg1 },
+                        }),
+                    },
+                }),
+            }),
+        }),
+    })
+end
+
 function M.view()
     local root = get_active_root()
-    if not root then
+    local switch_overlay = build_session_switch_overlay()
+    if not root and not switch_overlay then
         return prise.Column({
             cross_axis_align = "stretch",
             children = { prise.Text("Waiting for terminal...") },
@@ -4335,9 +4396,6 @@ function M.view()
     local layout_picker = build_layout_picker()
     local floating = build_floating()
     local tab_bar = build_tab_bar()
-    prise.log.debug("view: palette.visible=" .. tostring(state.palette.visible))
-
-    -- When zoomed, render only the zoomed pane
     local tab = get_active_tab()
     local floating_visible = tab and tab.floating and tab.floating.visible
     local overlay_visible = state.palette.visible
@@ -4347,8 +4405,16 @@ function M.view()
         or state.session_picker.visible
         or state.layout_picker.visible
         or floating_visible
+        or state.session_switch.active
+    prise.log.debug("view: palette.visible=" .. tostring(state.palette.visible))
+
     local content
-    if state.zoomed_pane_id then
+    if not root then
+        content = prise.Column({
+            cross_axis_align = "stretch",
+            children = {},
+        })
+    elseif state.zoomed_pane_id then
         local path = find_node_path(root, state.zoomed_pane_id)
         if path then
             local pane = path[#path]
@@ -4357,12 +4423,10 @@ function M.view()
                 focus = not overlay_visible,
             })
 
-            -- Apply borders to zoomed pane if enabled and show_single_pane is true
-            -- (zoomed pane is a temporary single-pane view)
             if config.borders.enabled and config.borders.show_single_pane then
                 content = prise.Box({
                     border = config.borders.style,
-                    style = { fg = config.borders.focused_color }, -- Zoomed pane is always focused
+                    style = { fg = config.borders.focused_color },
                     child = terminal,
                 })
             else
@@ -4397,6 +4461,9 @@ function M.view()
     if floating then
         table.insert(overlay_children, floating)
     end
+    if switch_overlay then
+        table.insert(overlay_children, switch_overlay)
+    end
 
     local modal = palette or rename or rename_tab or swap_with_index or session_picker or layout_picker
     if modal then
@@ -4406,8 +4473,7 @@ function M.view()
         })
     end
 
-    -- If we only have floating pane (no modal), use Stack if floating exists
-    if floating then
+    if floating or switch_overlay then
         return prise.Stack({
             children = overlay_children,
         })
