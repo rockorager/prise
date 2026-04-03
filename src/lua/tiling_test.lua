@@ -157,29 +157,6 @@ assert(panes[1].id == 1, "collect_panes: nested first")
 assert(panes[2].id == 2, "collect_panes: nested second")
 assert(panes[3].id == 3, "collect_panes: nested third")
 
--- === session switch overlay state ===
-
-tiling.update({ type = "session_switch", data = { active = true, target_session = "target" } })
-local switch_state = t.get_state()
-switch_state.layout_picker.visible = true
-switch_state.layout_picker.selected = 2
-
-tiling.set_state(nil, function()
-    return nil
-end)
-switch_state = t.get_state()
-assert(switch_state.layout_picker.visible == false, "set_state(nil): clears layout picker")
-assert(switch_state.session_switch.active == true, "set_state(nil): preserves session switch active state")
-assert(switch_state.session_switch.target_session == "target", "set_state(nil): preserves session switch target")
-
-local switch_view = tiling.view()
-assert(switch_view.type == "stack", "view: session switch with no root renders overlay stack")
-
-tiling.update({ type = "session_switch", data = { active = false, target_session = "" } })
-switch_state = t.get_state()
-assert(switch_state.session_switch.active == false, "session switch: clears active flag")
-assert(switch_state.session_switch.target_session == nil, "session switch: clears target")
-
 -- Test: collect_tab_panes includes floating pane
 local floating_pane = mock_pane(9)
 local tab_with_floating = mock_tab(split_node, floating_pane)

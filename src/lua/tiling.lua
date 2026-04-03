@@ -103,10 +103,6 @@ local utils = require("utils")
 ---@field scroll_offset number
 ---@field regions PaletteRegion[]
 
----@class SessionSwitchState
----@field active boolean
----@field target_session? string
-
 ---@class State
 ---@field tabs Tab[]
 ---@field active_tab integer
@@ -129,7 +125,6 @@ local utils = require("utils")
 ---@field keybind_matcher? KeybindMatcher
 ---@field floating FloatingPaneState
 ---@field layout_picker LayoutPickerState
----@field session_switch SessionSwitchState
 ---@field pending_layout? table
 
 ---@class Command
@@ -182,11 +177,7 @@ local utils = require("utils")
 ---@field type "cwd_changed"
 ---@field data table
 
----@class SessionSwitchEvent
----@field type "session_switch"
----@field data { active: boolean, target_session: string }
-
----@alias Event PtyAttachEvent|PtyExitedEvent|KeyPressEvent|KeyReleaseEvent|PasteEvent|MouseEvent|WinsizeEvent|FocusInEvent|FocusOutEvent|SplitResizeEvent|CwdChangedEvent|SessionSwitchEvent
+---@alias Event PtyAttachEvent|PtyExitedEvent|KeyPressEvent|KeyReleaseEvent|PasteEvent|MouseEvent|WinsizeEvent|FocusInEvent|FocusOutEvent|SplitResizeEvent|CwdChangedEvent
 
 -- Powerline symbols
 local POWERLINE_SYMBOLS = {
@@ -459,10 +450,6 @@ local state = {
         selected = 1,
         scroll_offset = 0,
         regions = {},
-    },
-    session_switch = {
-        active = false,
-        target_session = nil,
     },
     -- Pending layout to apply (layout node definitions waiting for PTY spawns)
     pending_layout = nil,
@@ -2721,16 +2708,7 @@ end
 
 ---@param event Event
 function M.update(event)
-    if event.type == "session_switch" then
-        state.session_switch.active = event.data.active
-        if event.data.active and event.data.target_session ~= "" then
-            state.session_switch.target_session = event.data.target_session
-        else
-            state.session_switch.target_session = nil
-        end
-        prise.request_frame()
-        return
-    elseif event.type == "pty_attach" then
+    if event.type == "pty_attach" then
         prise.log.info("Lua: pty_attach received")
         ---@type Pty
         local pty = event.data.pty
@@ -4341,16 +4319,9 @@ local function build_floating()
     })
 end
 
----@return table?
-local function build_session_switch_overlay()
-    -- No overlay — let the terminals swap in place.
-    return nil
-end
-
 function M.view()
     local root = get_active_root()
-    local switch_overlay = build_session_switch_overlay()
-    if not root and not switch_overlay then
+    if not root then
         return prise.Column({
             cross_axis_align = "stretch",
             children = { prise.Text("Waiting for terminal...") },
@@ -4434,10 +4405,6 @@ function M.view()
     if floating then
         table.insert(overlay_children, floating)
     end
-    if switch_overlay then
-        table.insert(overlay_children, switch_overlay)
-    end
-
     local modal = palette or rename or rename_tab or swap_with_index or session_picker or layout_picker
     if modal then
         table.insert(overlay_children, modal)
@@ -4446,7 +4413,7 @@ function M.view()
         })
     end
 
-    if floating or switch_overlay then
+    if floating then
         return prise.Stack({
             children = overlay_children,
         })

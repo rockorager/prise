@@ -1783,22 +1783,9 @@ pub const App = struct {
         return session_name orelse "(none)";
     }
 
-    fn updateSessionSwitchState(self: *App, active: bool) !void {
-        const target_session = if (self.preparedRestoreSessionName()) |name| name else "";
-        try self.ui.update(.{
-            .session_switch = .{
-                .active = active,
-                .target_session = target_session,
-            },
-        });
-    }
-
     fn finishSessionSwitch(self: *App) void {
         self.session_switch_in_progress = false;
         self.state.suppress_unsolicited_pty_results = false;
-        self.updateSessionSwitchState(false) catch |err| {
-            log.err("Failed to clear session switch state: {}", .{err});
-        };
         self.clearPreparedRestorePlan();
         self.pty_id_remap.clearRetainingCapacity();
     }
@@ -2962,8 +2949,6 @@ pub const App = struct {
                 self.cancelSessionSwitch("pre-detach setup failed");
             }
         }
-
-        try self.updateSessionSwitchState(true);
 
         if (try self.sendDetachPtysRequest(.switch_detach)) |detach_request| {
             crash_context.record(

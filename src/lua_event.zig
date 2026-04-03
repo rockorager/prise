@@ -46,12 +46,6 @@ pub const RenameTabInfo = struct {
     title: []const u8,
 };
 
-pub const SessionSwitchInfo = struct {
-    active: bool,
-    target_session: []const u8,
-};
-
-
 pub const Event = union(enum) {
     vaxis: vaxis.Event,
     mouse: MouseEvent,
@@ -61,7 +55,6 @@ pub const Event = union(enum) {
     pty_exited: PtyExitedInfo,
     cwd_changed: CwdChangedInfo,
     rename_tab: RenameTabInfo,
-    session_switch: SessionSwitchInfo,
     init: void,
 };
 
@@ -120,7 +113,6 @@ pub fn pushEvent(lua: *ziglua.Lua, event: Event) !void {
         .pty_exited => |info| pushPtyExitedEvent(lua, info),
         .cwd_changed => |info| pushCwdChangedEvent(lua, info),
         .rename_tab => |info| pushRenameTabEvent(lua, info),
-        .session_switch => |info| pushSessionSwitchEvent(lua, info),
         .paste => |data| pushPasteEvent(lua, data),
         .split_resize => |sr| pushSplitResizeEvent(lua, sr),
         .mouse => |m| pushMouseEvent(lua, m),
@@ -199,19 +191,6 @@ fn pushRenameTabEvent(lua: *ziglua.Lua, info: RenameTabInfo) void {
     lua.setField(-2, "title");
     lua.setField(-2, "data");
 }
-
-fn pushSessionSwitchEvent(lua: *ziglua.Lua, info: SessionSwitchInfo) void {
-    _ = lua.pushString("session_switch");
-    lua.setField(-2, "type");
-
-    lua.createTable(0, 2);
-    lua.pushBoolean(info.active);
-    lua.setField(-2, "active");
-    _ = lua.pushString(info.target_session);
-    lua.setField(-2, "target_session");
-    lua.setField(-2, "data");
-}
-
 
 fn pushPasteEvent(lua: *ziglua.Lua, data: []const u8) void {
     _ = lua.pushString("paste");
