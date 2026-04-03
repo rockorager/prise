@@ -21,6 +21,7 @@ local utils = require("utils")
 ---@field title? string
 ---@field root? Node
 ---@field last_focused_id? number
+---@field zoomed_pane_id? number Saved zoom state for inactive tabs
 ---@field floating? FloatingPane Floating pane for this tab (if any)
 
 ---@class FloatingPane
@@ -228,6 +229,7 @@ local POWERLINE_SYMBOLS = {
 ---@field is_active boolean True if this is the active tab
 ---@field is_hovered boolean True if mouse is hovering over this tab
 ---@field is_close_hovered boolean True if mouse is hovering over close button
+---@field is_zoomed boolean True if the tab currently has a zoomed pane
 
 ---Custom render function for tab bar
 ---Must return an array of segments compatible with prise.Text()
@@ -3936,17 +3938,13 @@ local function build_tab_bar_default()
     return segments
 end
 
----Build tab bar with custom renderer
----Calculates actual tab positions from rendered segments to ensure hover detection works correctly
----@return table
-local function build_tab_bar_custom()
-    -- Build tab info for the custom renderer
+---@return TabInfo[]
+local function build_custom_tab_infos()
     local tab_infos = {}
     for i, tab in ipairs(state.tabs) do
         local title = get_tab_title(tab, i == state.active_tab)
         local is_explicit = tab.title ~= nil
 
-        -- Apply title formatter only if NOT an explicit renamed title
         if config.tab_bar.format_title and not is_explicit then
             title = config.tab_bar.format_title(title, i)
         end
@@ -3962,6 +3960,15 @@ local function build_tab_bar_custom()
                 or (i ~= state.active_tab and tab.zoomed_pane_id ~= nil),
         })
     end
+
+    return tab_infos
+end
+
+---Build tab bar with custom renderer
+---Calculates actual tab positions from rendered segments to ensure hover detection works correctly
+---@return table
+local function build_tab_bar_custom()
+    local tab_infos = build_custom_tab_infos()
 
     -- Enhanced custom renderer wrapper that tracks tab boundaries
     local x_pos = 0
@@ -4429,6 +4436,23 @@ M._test = {
     get_first_leaf = get_first_leaf,
     get_last_leaf = get_last_leaf,
     format_palette_item = format_palette_item,
+    build_custom_tab_infos = build_custom_tab_infos,
+    remove_pane_by_id = remove_pane_by_id,
+    set_active_tab_index = set_active_tab_index,
+    set_state = function(test_state)
+        state.tabs = test_state.tabs or {}
+        state.active_tab = test_state.active_tab or 1
+        state.next_tab_id = test_state.next_tab_id or (#state.tabs + 1)
+        state.focused_id = test_state.focused_id
+        state.zoomed_pane_id = test_state.zoomed_pane_id
+        state.hovered_tab = nil
+        state.hovered_close_tab = nil
+        state.tab_regions = {}
+        state.tab_close_regions = {}
+    end,
+    get_state = function()
+        return state
+    end,
 }
 
 return M
