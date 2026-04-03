@@ -350,6 +350,8 @@ The following actions can be used as values in the **keybinds** table.
 **split_auto**
 :   Split automatically based on pane dimensions (horizontal if wide, vertical if tall)
 
+Splitting a zoomed pane exits zoom first so the new pane is visible immediately.
+
 **close_pane**
 :   Close the current pane
 
