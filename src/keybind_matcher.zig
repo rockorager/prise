@@ -217,3 +217,26 @@ test "key string preserved in result" {
     try std.testing.expect(result == .action);
     try std.testing.expectEqualStrings("<D-k>v", result.action.key_string.?);
 }
+
+test "uppercase alt bindings stay distinct from lowercase alt bindings" {
+    var compiler = keybind_compiler.Compiler.init(std.testing.allocator);
+    defer compiler.deinit();
+
+    const bindings = [_]keybind_compiler.Keybind{
+        .{ .key_string = "<A-h>", .action = .focus_left },
+        .{ .key_string = "<A-H>", .action = .focus_right },
+    };
+
+    var trie = try compiler.compile(&bindings);
+    defer trie.deinit();
+
+    var matcher = Matcher.init(&trie);
+
+    const lower = matcher.handleKey(.{ .key = "h", .alt = true });
+    try std.testing.expect(lower == .action);
+    try std.testing.expectEqual(Action.focus_left, lower.action.action);
+
+    const upper = matcher.handleKey(.{ .key = "H", .alt = true });
+    try std.testing.expect(upper == .action);
+    try std.testing.expectEqual(Action.focus_right, upper.action.action);
+}
