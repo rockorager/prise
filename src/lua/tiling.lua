@@ -643,6 +643,17 @@ local function collect_panes(node, acc)
     return acc
 end
 
+---Collect all panes belonging to a tab, including its floating pane.
+---@param tab? Tab
+---@return Pane[]
+local function collect_tab_panes(tab)
+    local panes = collect_panes(tab and tab.root or nil, {})
+    if tab and tab.floating and tab.floating.pane then
+        table.insert(panes, tab.floating.pane)
+    end
+    return panes
+end
+
 ---Returns a list of nodes from root to the target node [root, ..., target]
 ---@param current? Node
 ---@param target_id number
@@ -3957,7 +3968,7 @@ local function build_custom_tab_infos()
             is_active = (i == state.active_tab),
             is_hovered = (i == state.hovered_tab),
             is_close_hovered = (i == state.hovered_close_tab),
-            pane_count = #collect_panes(tab.root, {}),
+            pane_count = #collect_tab_panes(tab),
             is_zoomed = (i == state.active_tab and state.zoomed_pane_id ~= nil),
         })
 
