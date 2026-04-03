@@ -229,7 +229,8 @@ local POWERLINE_SYMBOLS = {
 ---@field is_active boolean True if this is the active tab
 ---@field is_hovered boolean True if mouse is hovering over this tab
 ---@field is_close_hovered boolean True if mouse is hovering over close button
----@field is_zoomed boolean True if the tab currently has a zoomed pane
+---@field pane_count number Number of panes in this tab
+---@field is_zoomed boolean True if this tab has a zoomed pane
 
 ---Custom render function for tab bar
 ---Must return an array of segments compatible with prise.Text()
@@ -3956,9 +3957,13 @@ local function build_custom_tab_infos()
             is_active = (i == state.active_tab),
             is_hovered = (i == state.hovered_tab),
             is_close_hovered = (i == state.hovered_close_tab),
-            is_zoomed = (i == state.active_tab and state.zoomed_pane_id ~= nil)
-                or (i ~= state.active_tab and tab.zoomed_pane_id ~= nil),
+            pane_count = #collect_panes(tab.root, {}),
+            is_zoomed = (i == state.active_tab and state.zoomed_pane_id ~= nil),
         })
+
+        if i ~= state.active_tab and tab.zoomed_pane_id ~= nil then
+            tab_infos[#tab_infos].is_zoomed = true
+        end
     end
 
     return tab_infos
