@@ -4343,34 +4343,8 @@ end
 
 ---@return table?
 local function build_session_switch_overlay()
-    if not state.session_switch.active then
-        return nil
-    end
-
-    local target = state.session_switch.target_session or "session"
-    return prise.Positioned({
-        anchor = "center",
-        focus = true,
-        child = prise.Box({
-            border = config.borders.style,
-            style = { bg = THEME.bg1, fg = THEME.fg_bright },
-            child = prise.Padding({
-                top = 1,
-                bottom = 1,
-                left = 2,
-                right = 2,
-                child = prise.Column({
-                    cross_axis_align = "stretch",
-                    children = {
-                        prise.Text({
-                            text = "Switching to " .. target .. "...",
-                            style = { fg = THEME.fg_bright, bg = THEME.bg1 },
-                        }),
-                    },
-                }),
-            }),
-        }),
-    })
+    -- No overlay — let the terminals swap in place.
+    return nil
 end
 
 function M.view()
@@ -4405,7 +4379,6 @@ function M.view()
         or state.session_picker.visible
         or state.layout_picker.visible
         or floating_visible
-        or state.session_switch.active
     prise.log.debug("view: palette.visible=" .. tostring(state.palette.visible))
 
     local content
