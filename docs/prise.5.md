@@ -356,6 +356,8 @@ The following actions can be used as values in the **keybinds** table.
 **toggle_zoom**
 :   Toggle zoom on the current pane (maximize/restore)
 
+Zoom state is remembered per tab and restored when you switch back to that tab.
+
 ## Focus Navigation
 
 **focus_left**
