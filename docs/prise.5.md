@@ -498,6 +498,24 @@ The tiling UI uses a leader key sequence. Press the leader key (default:
 
 The command palette (**Super+p**) provides fuzzy search for all commands.
 
+# TILING UI HELPERS
+
+The built-in tiling UI also exposes helper methods that user configuration code
+can call directly.
+
+**ui.execute_action(name)**
+:   Execute a built-in action by its string name. This is useful when custom
+    Lua code needs to trigger the same action handlers used by keybinds and the
+    command palette.
+
+Example:
+
+```lua
+local ui = require("prise").tiling()
+
+ui.execute_action("close_tab")
+```
+
 # SEE ALSO
 
 [prise(1)](prise.1.html), [prise(7)](prise.7.html)

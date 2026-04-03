@@ -143,6 +143,11 @@ A custom UI must return a table with:
 - **get_state(cwd_lookup)**: Serialize state for persistence (optional)
 - **set_state(saved, pty_lookup)**: Restore state (optional)
 
+Custom UIs may also expose optional helpers used by configuration code:
+
+- **execute_action(name)**: Run a built-in action handler by name
+- **setup(opts)**: Apply UI-specific configuration before the UI is returned
+
 # SEE ALSO
 
 [prise(1)](prise.1.html), [prise(5)](prise.5.html)
