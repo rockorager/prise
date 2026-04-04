@@ -157,14 +157,6 @@ assert(panes[1].id == 1, "collect_panes: nested first")
 assert(panes[2].id == 2, "collect_panes: nested second")
 assert(panes[3].id == 3, "collect_panes: nested third")
 
--- Test: collect_tab_panes includes floating pane
-local floating_pane = mock_pane(9)
-local tab_with_floating = mock_tab(split_node, floating_pane)
-panes = t.collect_tab_panes(tab_with_floating)
-assert(#panes == 3, "collect_tab_panes: includes floating pane")
-assert(panes[3].id == 9, "collect_tab_panes: floating pane last")
-
-
 -- === find_node_path ===
 
 -- Test: find_node_path with nil

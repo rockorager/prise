@@ -2162,7 +2162,6 @@ pub const App = struct {
         try self.appendSessionEnvNamed(env_array, string_allocator, session_name);
     }
 
-
     fn onSendComplete(_: *io.Loop, completion: io.Completion) anyerror!void {
         const app = completion.userdataCast(@This());
 
