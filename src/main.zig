@@ -297,7 +297,20 @@ fn handleSessionCommand(allocator: std.mem.Allocator, args: *std.process.ArgIter
         const session = if (args.next()) |s|
             try allocator.dupe(u8, s)
         else
-            try findMostRecentSession(allocator);
+            findMostRecentSession(allocator) catch |err| {
+                if (err == error.NoSessionsFound) {
+                    std.fs.File.stderr().writeAll("No sessions found\n") catch {};
+                    return null;
+                }
+                return err;
+            };
+        if (!sessionExists(allocator, session)) {
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(&buf, "Session '{s}' not found\n", .{session}) catch return null;
+            std.fs.File.stderr().writeAll(msg) catch {};
+            allocator.free(session);
+            return null;
+        }
         return .{ .attach_session = session };
     } else if (std.mem.eql(u8, subcmd, "list")) {
         try listSessions(allocator);
