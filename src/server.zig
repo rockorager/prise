@@ -1050,12 +1050,14 @@ fn buildRedrawMessageFromPty(
             pty_instance.render_state = .empty;
             return err;
         };
+
+        // Emit title while mutex is held (title.items is modified by read thread)
+        try emitTitle(&builder, pty_instance, mode);
+
         break :mouse_shape mapMouseShape(pty_instance.terminal.mouse_shape);
     };
 
     const rs = &pty_instance.render_state;
-
-    try emitTitle(&builder, pty_instance, mode);
 
     var effective_mode = mode;
     if (rs.dirty == .full) effective_mode = .full;
@@ -2563,17 +2565,27 @@ const Server = struct {
             const pty_instance = entry.value_ptr.*;
             const pty_entries = try self.allocator.alloc(msgpack.Value.KeyValue, 4);
 
+            // Lock mutex to safely dupe cwd and title (read thread may reallocate)
+            const cwd_str, const title_str = blk: {
+                pty_instance.terminal_mutex.lock();
+                defer pty_instance.terminal_mutex.unlock();
+                break :blk .{
+                    try self.allocator.dupe(u8, pty_instance.cwd.items),
+                    try self.allocator.dupe(u8, pty_instance.title.items),
+                };
+            };
+
             pty_entries[0] = .{
                 .key = .{ .string = try self.allocator.dupe(u8, "id") },
                 .value = .{ .unsigned = @intCast(pty_instance.id) },
             };
             pty_entries[1] = .{
                 .key = .{ .string = try self.allocator.dupe(u8, "cwd") },
-                .value = .{ .string = try self.allocator.dupe(u8, pty_instance.cwd.items) },
+                .value = .{ .string = cwd_str },
             };
             pty_entries[2] = .{
                 .key = .{ .string = try self.allocator.dupe(u8, "title") },
-                .value = .{ .string = try self.allocator.dupe(u8, pty_instance.title.items) },
+                .value = .{ .string = title_str },
             };
             pty_entries[3] = .{
                 .key = .{ .string = try self.allocator.dupe(u8, "attached_client_count") },
@@ -2715,12 +2727,14 @@ const Server = struct {
         // Cancel pending recv on this client's FD
         self.loop.cancelByFd(client.fd);
 
-        // If there's an in-flight send, let onSendComplete finish cleanup
-        if (client.send_buffer != null) {
-            return;
+        // cancelByFd silently drops pending sends — onSendComplete will never fire.
+        // Free the cancelled send buffer so finishClose always runs.
+        if (client.send_buffer) |buf| {
+            self.allocator.free(buf);
+            client.send_buffer = null;
+            client.send_offset = 0;
         }
 
-        // No in-flight send, clean up immediately
         client.finishClose(self.loop);
     }
 
@@ -2770,9 +2784,17 @@ const Server = struct {
         };
 
         // Send cwd_changed notification if cwd is dirty
-        if (pty_instance.cwd_dirty) {
+        // Lock mutex to read+clear cwd_dirty and dupe cwd (read thread may reallocate)
+        const cwd_update = blk: {
+            pty_instance.terminal_mutex.lock();
+            defer pty_instance.terminal_mutex.unlock();
+            if (!pty_instance.cwd_dirty) break :blk @as(?[]u8, null);
             pty_instance.cwd_dirty = false;
-            self.sendCwdChanged(pty_instance) catch |err| {
+            break :blk self.allocator.dupe(u8, pty_instance.cwd.items) catch null;
+        };
+        if (cwd_update) |cwd_copy| {
+            defer self.allocator.free(cwd_copy);
+            self.sendCwdChanged(pty_instance, cwd_copy) catch |err| {
                 std.log.err("Failed to send cwd_changed for pty {}: {}", .{ pty_instance.id, err });
             };
         }
@@ -2800,19 +2822,19 @@ const Server = struct {
         }
     }
 
-    fn sendCwdChanged(self: *Server, pty_instance: *Pty) !void {
-        if (pty_instance.cwd.items.len == 0) return;
+    fn sendCwdChanged(self: *Server, pty_instance: *Pty, cwd: []const u8) !void {
+        if (cwd.len == 0) return;
 
         var map_items = try self.allocator.alloc(msgpack.Value.KeyValue, 2);
         defer self.allocator.free(map_items);
         map_items[0] = .{ .key = .{ .string = "pty_id" }, .value = .{ .unsigned = pty_instance.id } };
-        map_items[1] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = pty_instance.cwd.items } };
+        map_items[1] = .{ .key = .{ .string = "cwd" }, .value = .{ .string = cwd } };
 
         const params = msgpack.Value{ .map = map_items };
         const msg_bytes = try msgpack.encode(self.allocator, .{ 2, "cwd_changed", params });
         defer self.allocator.free(msg_bytes);
 
-        log.info("Sending cwd_changed for pty {}: {s}", .{ pty_instance.id, pty_instance.cwd.items });
+        log.info("Sending cwd_changed for pty {}: {s}", .{ pty_instance.id, cwd });
 
         // Send to each client attached to this pty (same pattern as sendRedraw)
         for (self.clients.items) |client| {
