@@ -47,7 +47,13 @@ pub const Result = union(enum) {
     send: usize,
     close: void,
     timer: void,
+    waitpid: WaitPidResult,
     err: anyerror,
+};
+
+pub const WaitPidResult = struct {
+    pid: posix.pid_t,
+    status: u32,
 };
 
 pub const Task = struct {

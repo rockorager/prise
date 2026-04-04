@@ -115,6 +115,16 @@ pub const Handler = struct {
         self: *Handler,
         comptime action: Action.Tag,
         value: Action.Value(action),
+    ) void {
+        self.vtFallible(action, value) catch |err| {
+            log.warn("error handling VT action action={} err={}", .{ action, err });
+        };
+    }
+
+    fn vtFallible(
+        self: *Handler,
+        comptime action: Action.Tag,
+        value: Action.Value(action),
     ) !void {
         switch (action) {
             .print => try self.terminal.print(value.cp),
@@ -162,7 +172,7 @@ pub const Handler = struct {
             .insert_lines => self.terminal.insertLines(value),
             .insert_blanks => self.terminal.insertBlanks(value),
             .delete_lines => self.terminal.deleteLines(value),
-            .scroll_up => self.terminal.scrollUp(value),
+            .scroll_up => try self.terminal.scrollUp(value),
             .scroll_down => self.terminal.scrollDown(value),
 
             .horizontal_tab => try self.horizontalTab(value),
@@ -185,7 +195,7 @@ pub const Handler = struct {
             .left_and_right_margin_ambiguous => try self.handleLeftRightMarginAmbiguous(),
 
             .save_cursor => self.terminal.saveCursor(),
-            .restore_cursor => try self.terminal.restoreCursor(),
+            .restore_cursor => self.terminal.restoreCursor(),
 
             .invoke_charset => self.terminal.invokeCharset(value.bank, value.charset, value.locking),
             .configure_charset => self.terminal.configureCharset(value.slot, value.charset),
@@ -213,11 +223,7 @@ pub const Handler = struct {
             .start_hyperlink => try self.terminal.screens.active.startHyperlink(value.uri, value.id),
             .end_hyperlink => self.terminal.screens.active.endHyperlink(),
 
-            .prompt_start => try self.handlePromptStart(value),
-            .prompt_continuation => self.terminal.screens.active.cursor.page_row.semantic_prompt = .prompt_continuation,
-            .prompt_end => self.terminal.markSemanticPrompt(.input),
-            .end_of_input => self.terminal.markSemanticPrompt(.command),
-            .end_of_command => self.terminal.screens.active.cursor.page_row.semantic_prompt = .input,
+            .semantic_prompt => try self.terminal.semanticPrompt(value),
 
             .mouse_shape => self.terminal.mouse_shape = value,
 
@@ -296,12 +302,6 @@ pub const Handler = struct {
             .other_keys_numeric => self.terminal.flags.modify_other_keys_2 = true,
             else => {},
         }
-    }
-
-    /// Handle prompt start action with redraw flag.
-    fn handlePromptStart(self: *Handler, value: anytype) !void {
-        self.terminal.screens.active.cursor.page_row.semantic_prompt = .prompt;
-        self.terminal.flags.shell_redraws_prompt = value.redraw;
     }
 
     /// Handle device attributes query with appropriate response.
@@ -391,7 +391,7 @@ pub const Handler = struct {
     inline fn horizontalTab(self: *Handler, count: u16) !void {
         for (0..count) |_| {
             const x = self.terminal.screens.active.cursor.x;
-            try self.terminal.horizontalTab();
+            self.terminal.horizontalTab();
             if (x == self.terminal.screens.active.cursor.x) break;
         }
     }
@@ -399,7 +399,7 @@ pub const Handler = struct {
     inline fn horizontalTabBack(self: *Handler, count: u16) !void {
         for (0..count) |_| {
             const x = self.terminal.screens.active.cursor.x;
-            try self.terminal.horizontalTabBack();
+            self.terminal.horizontalTabBack();
             if (x == self.terminal.screens.active.cursor.x) break;
         }
     }
@@ -445,7 +445,7 @@ pub const Handler = struct {
         if (enabled) {
             self.terminal.saveCursor();
         } else {
-            try self.terminal.restoreCursor();
+            self.terminal.restoreCursor();
         }
     }
 

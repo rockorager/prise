@@ -522,9 +522,7 @@ const Pty = struct {
                 // Lock mutex and update terminal state
                 self.terminal_mutex.lock();
                 // Parse the data through ghostty-vt to update terminal state
-                stream.nextSlice(buffer[0..n]) catch |err| {
-                    log.err("Failed to parse VT sequences: {}", .{err});
-                };
+                stream.nextSlice(buffer[0..n]);
                 // Check synchronized_output while still holding the mutex
                 const should_signal = !self.terminal.modes.get(.synchronized_output);
                 self.terminal_mutex.unlock();
@@ -1411,9 +1409,7 @@ const Client = struct {
 
             const encoded = writer.buffered();
             if (encoded.len > 0 and !key.key.modifier()) {
-                pty_instance.terminal.scrollViewport(.bottom) catch |err| {
-                    log.err("Failed to scroll viewport: {}", .{err});
-                };
+                pty_instance.terminal.scrollViewport(.bottom);
                 pty_instance.terminal.screens.active.select(null) catch {};
             }
             pty_instance.terminal_mutex.unlock();
@@ -1506,9 +1502,7 @@ const Client = struct {
             };
             if (delta != 0) {
                 pty_instance.terminal_mutex.lock();
-                pty_instance.terminal.scrollViewport(.{ .delta = delta }) catch |err| {
-                    log.err("Failed to scroll viewport: {}", .{err});
-                };
+                pty_instance.terminal.scrollViewport(.{ .delta = delta });
                 pty_instance.terminal_mutex.unlock();
                 _ = posix.write(pty_instance.pipe_fds[1], "x") catch {};
             }
@@ -1556,7 +1550,7 @@ const Client = struct {
                 switch (pty_instance.left_click_count) {
                     1 => screen.select(null) catch {},
                     2 => {
-                        if (screen.selectWord(pin)) |sel| {
+                        if (screen.selectWord(pin, &[_]u21{})) |sel| {
                             screen.select(sel) catch {};
                         }
                     },
@@ -1581,13 +1575,9 @@ const Client = struct {
                     // Auto-scroll when dragging beyond viewport edges
                     const raw_y = mouse.y;
                     if (raw_y < 0) {
-                        pty_instance.terminal.scrollViewport(.{ .delta = -1 }) catch |err| {
-                            log.err("Failed to scroll viewport: {}", .{err});
-                        };
+                        pty_instance.terminal.scrollViewport(.{ .delta = -1 });
                     } else if (raw_y >= @as(f64, @floatFromInt(terminal_rows))) {
-                        pty_instance.terminal.scrollViewport(.{ .delta = 1 }) catch |err| {
-                            log.err("Failed to scroll viewport: {}", .{err});
-                        };
+                        pty_instance.terminal.scrollViewport(.{ .delta = 1 });
                     }
 
                     // Clamp to valid viewport range after scrolling
@@ -1610,8 +1600,8 @@ const Client = struct {
                             screen.select(sel) catch {};
                         },
                         2 => {
-                            const word_start = screen.selectWord(start_pin);
-                            const word_end = screen.selectWord(end_pin);
+                            const word_start = screen.selectWord(start_pin, &[_]u21{});
+                            const word_end = screen.selectWord(end_pin, &[_]u21{});
                             if (word_start != null and word_end != null) {
                                 const sel = if (end_pin.before(start_pin))
                                     ghostty_vt.Selection.init(word_end.?.start(), word_start.?.end(), false)
@@ -2508,11 +2498,22 @@ const Server = struct {
             return msgpack.Value.nil;
         };
 
-        const result = screen.selectionString(self.allocator, .{
+        const result_z = screen.selectionString(self.allocator, .{
             .sel = sel,
             .trim = true,
         }) catch |err| {
             std.log.err("Failed to get selection string: {}", .{err});
+            return msgpack.Value.nil;
+        };
+
+        // selectionString returns a sentinel-terminated slice ([:0]const u8).
+        // msgpack.Value stores plain []const u8 and later deinit() calls
+        // allocator.free on that plain slice. If we pass result_z directly,
+        // deinit will free len bytes instead of len+1, triggering allocator
+        // size-mismatch crashes when copying selections.
+        defer self.allocator.free(result_z);
+        const result = self.allocator.dupe(u8, result_z) catch |err| {
+            std.log.err("Failed to duplicate selection string: {}", .{err});
             return msgpack.Value.nil;
         };
 
@@ -3606,18 +3607,18 @@ test "style optimization" {
     defer stream.deinit();
 
     // Row 0: A (Default), B (Red), C (Default)
-    try stream.nextSlice(&[_]u8{'A'});
-    try stream.nextSlice("\x1b[31m");
-    try stream.nextSlice(&[_]u8{'B'});
-    try stream.nextSlice("\x1b[0m");
-    try stream.nextSlice(&[_]u8{'C'});
+    stream.nextSlice(&[_]u8{'A'});
+    stream.nextSlice("\x1b[31m");
+    stream.nextSlice(&[_]u8{'B'});
+    stream.nextSlice("\x1b[0m");
+    stream.nextSlice(&[_]u8{'C'});
 
     // Newline to start Row 1
-    try stream.nextSlice("\r\n");
+    stream.nextSlice("\r\n");
 
     // D (Red) - testing switching from Default (C) to Red (D) across rows/cells
-    try stream.nextSlice("\x1b[31m");
-    try stream.nextSlice(&[_]u8{'D'});
+    stream.nextSlice("\x1b[31m");
+    stream.nextSlice(&[_]u8{'D'});
 
     const msg = try buildRedrawMessageFromPty(allocator, &pty_inst, .full);
     defer allocator.free(msg);
