@@ -279,7 +279,6 @@ pub const ClientLogic = struct {
                 const attach_info = entry.value.attach;
                 if (err_val == .string and std.mem.eql(u8, err_val.string, "PTY not found")) {
                     log.info("PTY {} not found, spawning new PTY with cwd", .{attach_info.pty_id});
-                    crash_context.record("attach fallback spawn old_pty_id={d}", .{attach_info.pty_id});
                     return .{ .spawn_pty_with_cwd = .{
                         .cwd = attach_info.cwd,
                         .old_pty_id = @intCast(attach_info.pty_id),
@@ -302,8 +301,6 @@ pub const ClientLogic = struct {
                 .attach => |attach_info| {
                     state.pty_id = attach_info.pty_id;
                     state.attached = true;
-                    crash_context.setCurrentPty(@intCast(attach_info.pty_id));
-                    crash_context.record("attached existing pty_id={d}", .{attach_info.pty_id});
                     if (nonEmptyCwd(attach_info.cwd)) |c| {
                         const owned_cwd = state.allocator.dupe(u8, c) catch return .{ .attached = .{ .new_pty_id = attach_info.pty_id } };
                         state.cwd_map.put(attach_info.pty_id, owned_cwd) catch {
@@ -362,8 +359,6 @@ pub const ClientLogic = struct {
         if (id >= 0) {
             state.pty_id = id;
             state.attached = true;
-            crash_context.setCurrentPty(@intCast(id));
-            crash_context.record("attached pty_id={d} old_pty_id={?}", .{ id, old_pty_id });
             if (nonEmptyCwd(cwd)) |c| {
                 const owned_cwd = state.allocator.dupe(u8, c) catch return .{ .attached = .{ .new_pty_id = id, .old_pty_id = old_pty_id } };
                 state.cwd_map.put(id, owned_cwd) catch {
@@ -1779,10 +1774,6 @@ pub const App = struct {
         return plan.session_name;
     }
 
-    fn sessionNameForLogs(session_name: ?[]const u8) []const u8 {
-        return session_name orelse "(none)";
-    }
-
     fn finishSessionSwitch(self: *App) void {
         self.session_switch_in_progress = false;
         self.state.suppress_unsolicited_pty_results = false;
@@ -1791,20 +1782,13 @@ pub const App = struct {
     }
 
     fn cancelSessionSwitch(self: *App, reason: []const u8) void {
-        const source_session = sessionNameForLogs(self.current_session_name);
-        const target_session = sessionNameForLogs(self.preparedRestoreSessionName());
-        crash_context.record(
-            "session switch cancelled from={s} to={s} reason={s}",
-            .{ source_session, target_session, reason },
-        );
+        _ = reason;
         self.finishSessionSwitch();
     }
 
     fn completeSessionSwitch(self: *App, source_session: ?[]const u8, target_session: []const u8) void {
-        crash_context.record(
-            "session switch restore complete from={s} to={s}",
-            .{ sessionNameForLogs(source_session), target_session },
-        );
+        _ = source_session;
+        _ = target_session;
         self.finishSessionSwitch();
     }
 
@@ -1896,21 +1880,8 @@ pub const App = struct {
     }
 
     fn beginSessionSwitchAttach(self: *App) !void {
-        const source_session = sessionNameForLogs(self.current_session_name);
-        const target_session = self.preparedRestoreSessionName() orelse return error.NoPreparedRestorePlan;
-        crash_context.record(
-            "session switch detach acknowledged from={s} to={s}",
-            .{ source_session, target_session },
-        );
-        crash_context.record(
-            "session switch reset start from={s} to={s}",
-            .{ source_session, target_session },
-        );
+        _ = self.preparedRestoreSessionName() orelse return error.NoPreparedRestorePlan;
         try self.resetActiveSessionState();
-        crash_context.record(
-            "session switch reset finish from={s} to={s}",
-            .{ source_session, target_session },
-        );
         try self.scheduleRender();
         try self.applyPreparedSessionRestore();
     }
@@ -1921,8 +1892,6 @@ pub const App = struct {
             // Use the attached session name
             log.info("Setting current_session_name to: {s}", .{session_name});
             try self.setCurrentSessionName(session_name);
-            crash_context.setSessionName(self.current_session_name);
-            crash_context.record("attach session {s}", .{session_name});
             var plan = try self.preflightSessionRestore(session_name);
             var plan_stored = false;
             errdefer if (!plan_stored) plan.deinit(self.allocator);
@@ -2041,10 +2010,6 @@ pub const App = struct {
 
         if (!validity_matches) {
             log.info("pty_validity mismatch (saved={?}, current={?}), spawning fresh PTYs", .{ saved_validity, current_validity });
-            crash_context.record(
-                "session restore spawn fallback saved_validity={?} current_validity={?}",
-                .{ saved_validity, current_validity },
-            );
         }
 
         return .{
@@ -2060,7 +2025,6 @@ pub const App = struct {
     }
 
     fn preflightSessionRestore(self: *App, session_name: []const u8) !SessionRestorePlan {
-        crash_context.record("session restore preflight start {s}", .{session_name});
         const path = try self.sessionFilePath(session_name);
         defer self.allocator.free(path);
 
@@ -2070,17 +2034,9 @@ pub const App = struct {
             session_name,
             self.state.pty_validity,
         ) catch |err| {
-            crash_context.record(
-                "session restore preflight failed {s}: {s}",
-                .{ session_name, @errorName(err) },
-            );
             return err;
         };
 
-        crash_context.record(
-            "session restore preflight success {s} attach_count={d} spawn_fallback_count={d}",
-            .{ session_name, plan.attach_count, plan.spawn_fallback_count },
-        );
         return plan;
     }
 
@@ -2088,10 +2044,6 @@ pub const App = struct {
         const plan = if (self.prepared_restore_plan) |*value| value else return error.NoPreparedRestorePlan;
         std.debug.assert(plan.pty_ids.len > 0);
 
-        crash_context.record(
-            "session restore apply start {s} attach_count={d} spawn_fallback_count={d}",
-            .{ plan.session_name, plan.attach_count, plan.spawn_fallback_count },
-        );
         plan.remaining_attach_count = plan.pty_ids.len;
 
         log.info("Attaching to {} PTYs from session {s}", .{ plan.pty_ids.len, plan.session_name });
@@ -2139,13 +2091,11 @@ pub const App = struct {
             try self.ui.setStateFromJson(plan.session_json, ptyLookup, self);
         }
 
-        crash_context.record("session restore complete {s}", .{target_session});
         self.state.suppress_unsolicited_pty_results = false;
 
         if (self.session_switch_in_progress) {
             const source_session = self.current_session_name;
             try self.setCurrentSessionName(target_session);
-            crash_context.setSessionName(self.current_session_name);
             self.completeSessionSwitch(source_session, target_session);
         }
 
@@ -2609,17 +2559,7 @@ pub const App = struct {
                                 return;
                             },
                             .switch_detached => {
-                                app.beginSessionSwitchAttach() catch |err| {
-                                    crash_context.record(
-                                        "session switch apply fatal from={s} to={s} err={s}",
-                                        .{
-                                            sessionNameForLogs(app.current_session_name),
-                                            sessionNameForLogs(app.preparedRestoreSessionName()),
-                                            @errorName(err),
-                                        },
-                                    );
-                                    return err;
-                                };
+                                try app.beginSessionSwitchAttach();
                             },
                             .switch_detach_failed => {
                                 app.cancelSessionSwitch("detach rejected");
@@ -2909,30 +2849,9 @@ pub const App = struct {
             return error.SessionSwitchInProgress;
         }
 
-        const source_session = sessionNameForLogs(self.current_session_name);
-        crash_context.record(
-            "session switch requested from={s} to={s}",
-            .{ source_session, target_session },
-        );
-        crash_context.record(
-            "session switch preflight start from={s} to={s}",
-            .{ source_session, target_session },
-        );
-
-        var plan = self.preflightSessionRestore(target_session) catch |err| {
-            crash_context.record(
-                "session switch preflight failed from={s} to={s} err={s}",
-                .{ source_session, target_session, @errorName(err) },
-            );
-            return err;
-        };
+        var plan = try self.preflightSessionRestore(target_session);
         var plan_stored = false;
         errdefer if (!plan_stored) plan.deinit(self.allocator);
-
-        crash_context.record(
-            "session switch preflight success from={s} to={s} attach_count={d} spawn_fallback_count={d}",
-            .{ source_session, target_session, plan.attach_count, plan.spawn_fallback_count },
-        );
 
         if (self.current_session_name) |name| {
             log.info("Saving current session '{s}' before switch", .{name});
@@ -2950,26 +2869,12 @@ pub const App = struct {
             }
         }
 
-        if (try self.sendDetachPtysRequest(.switch_detach)) |detach_request| {
-            crash_context.record(
-                "session switch detach request sent from={s} to={s} msgid={d} ptys={d}",
-                .{ source_session, target_session, detach_request.msgid, detach_request.pty_count },
-            );
+        if (try self.sendDetachPtysRequest(.switch_detach)) |_| {
             return;
         }
 
         pre_detach_phase = false;
-        crash_context.record(
-            "session switch skipping detach from={s} to={s} reason=no-live-ptys",
-            .{ source_session, target_session },
-        );
-        self.beginSessionSwitchAttach() catch |err| {
-            crash_context.record(
-                "session switch apply fatal from={s} to={s} err={s}",
-                .{ source_session, target_session, @errorName(err) },
-            );
-            return err;
-        };
+        try self.beginSessionSwitchAttach();
     }
 
     pub fn deleteCurrentSession(self: *App) void {
