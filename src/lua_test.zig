@@ -43,3 +43,9 @@ test "lua tiling" {
     defer lua.deinit();
     try runLuaTest(lua, "src/lua/tiling_test.lua");
 }
+
+test "lua tiling zoom state" {
+    var lua = try setupLua(std.testing.allocator);
+    defer lua.deinit();
+    try runLuaTest(lua, "src/lua/tiling_test_zoom_state.lua");
+}
