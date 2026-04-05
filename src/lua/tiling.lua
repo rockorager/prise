@@ -3102,6 +3102,12 @@ function M.update(event)
         elseif state.rename.visible then
             state.rename.input:insert(text_sanitized)
             prise.request_frame()
+        elseif state.session_picker.visible then
+            state.session_picker.input:insert(text_sanitized)
+            prise.request_frame()
+        elseif state.swap_with_index and state.swap_with_index.visible then
+            state.swap_with_index.input:insert(text_sanitized)
+            prise.request_frame()
         else
             local pty = get_visible_floating_pty() or get_focused_pty()
             if pty then
