@@ -126,6 +126,10 @@ pub fn build(b: *std.Build) void {
 
     const tests = b.addTest(.{
         .root_module = exe_mod,
+        .filters = if (b.option([]const u8, "test-filter", "Run only tests matching this string")) |f|
+            &.{f}
+        else
+            &.{},
     });
 
     const test_cmd = b.addRunArtifact(tests);
