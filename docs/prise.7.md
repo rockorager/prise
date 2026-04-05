@@ -48,6 +48,9 @@ client connections. Sessions are stored in *~/.local/share/prise/sessions/*.
 **prise session rename** *old* *new*
 :   Rename a session
 
+Sessions are visible to Lua code (via **prise.list_sessions()**) immediately
+upon creation, before the autosave timer writes them to disk.
+
 # SERVICE CONFIGURATION
 
 The server should run continuously in the background. Prise provides service
