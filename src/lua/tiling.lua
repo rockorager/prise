@@ -1522,9 +1522,9 @@ local function finalize_layout(pending)
     -- Swap in new state
     state.tabs = new_tabs
     state.next_tab_id = #new_tabs + 1
-    state.floating.width = new_floating_width
-    state.floating.height = new_floating_height
-    state.floating.visible = new_floating_visible
+    state.floating.width = new_floating_width or state.floating.width
+    state.floating.height = new_floating_height or state.floating.height
+    state.floating.visible = new_floating_visible ~= nil and new_floating_visible or state.floating.visible
     state.zoomed_pane_id = nil
 
     -- Set active tab
