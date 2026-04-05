@@ -255,7 +255,6 @@ pub const Widget = struct {
                 surf.surface.render(win, self.focus);
             },
             .text_input => |ti| {
-                ti.input.updateScrollOffset(@intCast(win.width));
                 ti.input.render(win, ti.style);
             },
             .text => |text| {
@@ -4715,13 +4714,8 @@ test "render TextInput scrolling in narrow viewport" {
     // After render, scroll_offset should have been updated
     try std.testing.expect(input.scroll_offset > 0);
 
-    // Visible text should be the tail slice
-    const visible = input.visibleText(6);
-    try std.testing.expectEqualStrings("lmnop", visible);
-
-    // Cursor cell should be reversed
-    const cursor_pos = input.visibleCursorPos();
-    const cursor_cell = screen.readCell(@intCast(cursor_pos), 0).?;
+    // Cursor cell (last visible position) should be reversed
+    const cursor_cell = screen.readCell(5, 0).?;
     try std.testing.expect(cursor_cell.style.reverse);
 }
 

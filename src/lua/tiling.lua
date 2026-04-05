@@ -546,6 +546,42 @@ local function handle_text_input_key(input, key_data)
         input:move_to_end()
         prise.request_frame()
         return true
+    elseif k == "u" and ctrl then
+        input:delete_to_start()
+        prise.request_frame()
+        return true
+    elseif k == "d" and ctrl then
+        input:delete_forward()
+        prise.request_frame()
+        return true
+    elseif k == "h" and ctrl then
+        input:delete_backward()
+        prise.request_frame()
+        return true
+    elseif k == "b" and ctrl then
+        input:move_left()
+        prise.request_frame()
+        return true
+    elseif k == "f" and ctrl then
+        input:move_right()
+        prise.request_frame()
+        return true
+    elseif k == "b" and key_data.alt then
+        input:move_word_backward()
+        prise.request_frame()
+        return true
+    elseif k == "f" and key_data.alt then
+        input:move_word_forward()
+        prise.request_frame()
+        return true
+    elseif k == "d" and key_data.alt then
+        input:delete_word_after()
+        prise.request_frame()
+        return true
+    elseif k == "Backspace" and key_data.alt then
+        input:delete_word_backward()
+        prise.request_frame()
+        return true
     elseif #k == 1 and not ctrl and not key_data.alt and not key_data.super then
         input:insert(k)
         prise.request_frame()

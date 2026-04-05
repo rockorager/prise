@@ -1412,6 +1412,22 @@ fn textInputIndex(lua: *ziglua.Lua) i32 {
         lua.pushFunction(ziglua.wrap(textInputDestroy));
         return 1;
     }
+    if (std.mem.eql(u8, key, "delete_to_start")) {
+        lua.pushFunction(ziglua.wrap(textInputDeleteToStart));
+        return 1;
+    }
+    if (std.mem.eql(u8, key, "delete_word_after")) {
+        lua.pushFunction(ziglua.wrap(textInputDeleteWordAfter));
+        return 1;
+    }
+    if (std.mem.eql(u8, key, "move_word_backward")) {
+        lua.pushFunction(ziglua.wrap(textInputMoveWordBackward));
+        return 1;
+    }
+    if (std.mem.eql(u8, key, "move_word_forward")) {
+        lua.pushFunction(ziglua.wrap(textInputMoveWordForward));
+        return 1;
+    }
     return 0;
 }
 
@@ -1431,7 +1447,9 @@ fn textInputText(lua: *ziglua.Lua) i32 {
         lua.pushNil();
         return 1;
     };
-    _ = lua.pushString(input.text());
+    const t = input.text() catch return 0;
+    defer input.allocator.free(t);
+    _ = lua.pushString(t);
     return 1;
 }
 
@@ -1506,6 +1524,30 @@ fn textInputDestroy(lua: *ziglua.Lua) i32 {
         entry.value.deinit();
         ui.allocator.destroy(entry.value);
     }
+    return 0;
+}
+
+fn textInputDeleteToStart(lua: *ziglua.Lua) i32 {
+    const input = getTextInput(lua) orelse return 0;
+    input.deleteToStart();
+    return 0;
+}
+
+fn textInputDeleteWordAfter(lua: *ziglua.Lua) i32 {
+    const input = getTextInput(lua) orelse return 0;
+    input.deleteWordAfter();
+    return 0;
+}
+
+fn textInputMoveWordBackward(lua: *ziglua.Lua) i32 {
+    const input = getTextInput(lua) orelse return 0;
+    input.moveWordBackward();
+    return 0;
+}
+
+fn textInputMoveWordForward(lua: *ziglua.Lua) i32 {
+    const input = getTextInput(lua) orelse return 0;
+    input.moveWordForward();
     return 0;
 }
 

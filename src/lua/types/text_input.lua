@@ -43,5 +43,17 @@ function TextInput:move_to_end() end
 ---Clear all text and reset cursor
 function TextInput:clear() end
 
+---Delete from cursor to start of line
+function TextInput:delete_to_start() end
+
+---Delete word after cursor
+function TextInput:delete_word_after() end
+
+---Move cursor backward one word
+function TextInput:move_word_backward() end
+
+---Move cursor forward one word
+function TextInput:move_word_forward() end
+
 ---Destroy the TextInput and free resources
 function TextInput:destroy() end
