@@ -514,7 +514,7 @@ local function handle_text_input_key(input, key_data)
     local k = key_data.key
     local ctrl = key_data.ctrl
 
-    if k == "Backspace" then
+    if k == "Backspace" and not key_data.alt then
         input:delete_backward()
         prise.request_frame()
         return true
