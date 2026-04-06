@@ -1131,6 +1131,8 @@ pub const UI = struct {
     }
 
     pub const PtyLookupResult = struct {
+        /// Actual server-side PTY ID (may differ from saved ID after remap)
+        pty_id: u32,
         surface: *Surface,
         app: *anyopaque,
         send_key_fn: *const fn (app: *anyopaque, id: u32, key: lua_event.KeyData) anyerror!void,
@@ -1189,7 +1191,9 @@ pub const UI = struct {
         const result = lookup_ctx.lookup_fn(lookup_ctx.ctx, id);
 
         if (result) |r| {
-            lua_event.pushPtyUserdata(lua, id, r.surface, r.app, r.send_key_fn, r.send_mouse_fn, r.send_paste_fn, r.set_focus_fn, r.close_fn, r.cwd_fn, r.copy_selection_fn, r.cell_size_fn) catch {
+            // Use the actual server-side PTY ID (may differ from saved ID
+            // after remap when a PTY was respawned during session restore)
+            lua_event.pushPtyUserdata(lua, r.pty_id, r.surface, r.app, r.send_key_fn, r.send_mouse_fn, r.send_paste_fn, r.set_focus_fn, r.close_fn, r.cwd_fn, r.copy_selection_fn, r.cell_size_fn) catch {
                 lua.pushNil();
             };
         } else {

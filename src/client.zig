@@ -2877,6 +2877,7 @@ pub const App = struct {
         const surface = self.surfaces.get(lookup_id) orelse return null;
 
         return .{
+            .pty_id = lookup_id,
             .surface = surface,
             .app = self,
             .send_key_fn = struct {
