@@ -2273,7 +2273,7 @@ pub const App = struct {
                                 app.ui.update(.{ .pty_exited = .{ .id = info.pty_id, .status = info.status } }) catch |err| {
                                     log.err("Failed to update UI with pty_exited: {}", .{err});
                                 };
-                                // Delete session file when last PTY exits (if quit wasn't already called)
+                                // Handle last PTY exit (if quit wasn't already called)
                                 if (app.surfaces.count() == 0 and !app.state.should_quit) {
                                     // Cancel autosave timer to prevent it from recreating the file
                                     if (app.autosave_timer) |*task| {
@@ -2281,6 +2281,15 @@ pub const App = struct {
                                         app.autosave_timer = null;
                                     }
                                     app.deleteCurrentSession();
+                                    // Safety: force quit when no surfaces remain
+                                    // to prevent frozen client if Lua didn't trigger exit
+                                    log.info("No surfaces remaining — forcing quit", .{});
+                                    app.state.should_quit = true;
+                                    if (app.connected) {
+                                        posix.close(app.fd);
+                                        app.connected = false;
+                                    }
+                                    app.vx.deviceStatusReport(app.tty.writer()) catch {};
                                 }
                             },
                             .cwd_changed => |info| {

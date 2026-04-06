@@ -1260,7 +1260,7 @@ local function deserialize_node(saved, pty_lookup)
         end
         return {
             type = "pane",
-            id = saved.id,
+            id = pty:id(),
             pty = pty,
             cwd = saved.cwd, -- Store cwd for spawn fallback
             ratio = saved.ratio,
@@ -1333,7 +1333,7 @@ local function deserialize_floating(saved, pty_lookup)
     return {
         pane = {
             type = "pane",
-            id = saved.pane.id,
+            id = pty:id(),
             pty = pty,
         },
         visible = saved.visible or false,
@@ -4411,16 +4411,22 @@ function M.set_state(saved, pty_lookup)
         local restored_root = deserialize_node(saved.root, pty_lookup)
         if restored_root then
             local tab_id = 1
+            -- Validate focus ID against actual pane IDs (may have been remapped)
+            local valid_focus = saved.focused_id
+            if valid_focus and not find_node_path(restored_root, valid_focus) then
+                local first = get_first_leaf(restored_root)
+                valid_focus = first and first.id or nil
+            end
             state.tabs = {
                 {
                     id = tab_id,
                     root = restored_root,
-                    last_focused_id = saved.focused_id,
+                    last_focused_id = valid_focus,
                 },
             }
             state.active_tab = 1
             state.next_tab_id = tab_id + 1
-            state.focused_id = saved.focused_id
+            state.focused_id = valid_focus
             state.next_split_id = saved.next_split_id or 1
         end
     else
@@ -4429,11 +4435,17 @@ function M.set_state(saved, pty_lookup)
         for _, tab_data in ipairs(saved.tabs or {}) do
             local restored_root = deserialize_node(tab_data.root, pty_lookup)
             if restored_root then
+                -- Validate last_focused_id against actual pane IDs (may have been remapped)
+                local valid_focus = tab_data.last_focused_id
+                if valid_focus and not find_node_path(restored_root, valid_focus) then
+                    local first = get_first_leaf(restored_root)
+                    valid_focus = first and first.id or nil
+                end
                 table.insert(state.tabs, {
                     id = tab_data.id,
                     title = tab_data.title,
                     root = restored_root,
-                    last_focused_id = tab_data.last_focused_id,
+                    last_focused_id = valid_focus,
                     floating = deserialize_floating(tab_data.floating, pty_lookup),
                 })
             end
@@ -4458,10 +4470,10 @@ function M.set_state(saved, pty_lookup)
         end
     end
 
-    -- Ensure focus is valid
-    if #state.tabs > 0 and not state.focused_id then
+    -- Ensure focus is valid (focused_id may reference old IDs after PTY remapping)
+    if #state.tabs > 0 then
         local tab = state.tabs[state.active_tab]
-        if tab then
+        if tab and (not state.focused_id or not find_node_path(tab.root, state.focused_id)) then
             local first = get_first_leaf(tab.root)
             if first then
                 state.focused_id = first.id
