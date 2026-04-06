@@ -639,6 +639,29 @@ pub const UI = struct {
             };
         }
 
+        // Ensure the current session is included even if not yet saved to disk.
+        // New sessions aren't written until the autosave timer fires (1s delay),
+        // but get_session_name reads from memory and is always current.
+        if (ui.get_session_name_callback) |cb| {
+            if (cb(ui.get_session_name_ctx)) |current| {
+                var found = false;
+                for (names.items) |name| {
+                    if (std.mem.eql(u8, name, current)) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    const duped = ui.allocator.dupe(u8, current) catch null;
+                    if (duped) |d| {
+                        names.append(ui.allocator, d) catch {
+                            ui.allocator.free(d);
+                        };
+                    }
+                }
+            }
+        }
+
         lua.createTable(@intCast(names.items.len), 0);
         for (names.items, 1..) |name, idx| {
             _ = lua.pushString(name);
