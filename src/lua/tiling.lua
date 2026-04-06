@@ -930,7 +930,7 @@ local function set_active_tab_index(new_index)
     end
 
     -- Restore zoom state from new tab
-    state.zoomed_pane_id = new_tab.zoomed_pane_id or nil
+    state.zoomed_pane_id = new_tab.zoomed_pane_id
 
     -- Pick new focused pane in this tab
     local new_focus_id = new_tab.last_focused_id
@@ -1543,9 +1543,15 @@ local function finalize_layout(pending)
     -- Swap in new state
     state.tabs = new_tabs
     state.next_tab_id = #new_tabs + 1
-    state.floating.width = new_floating_width or state.floating.width
-    state.floating.height = new_floating_height or state.floating.height
-    state.floating.visible = new_floating_visible ~= nil and new_floating_visible or state.floating.visible
+    if new_floating_width ~= nil then
+        state.floating.width = new_floating_width
+    end
+    if new_floating_height ~= nil then
+        state.floating.height = new_floating_height
+    end
+    if new_floating_visible ~= nil then
+        state.floating.visible = new_floating_visible
+    end
     state.zoomed_pane_id = nil
 
     -- Set active tab
@@ -3970,12 +3976,9 @@ local function build_custom_tab_infos()
             is_hovered = (i == state.hovered_tab),
             is_close_hovered = (i == state.hovered_close_tab),
             pane_count = #collect_tab_panes(tab),
-            is_zoomed = (i == state.active_tab and state.zoomed_pane_id ~= nil),
+            is_zoomed = (i == state.active_tab and state.zoomed_pane_id ~= nil)
+                or (i ~= state.active_tab and tab.zoomed_pane_id ~= nil),
         })
-
-        if i ~= state.active_tab and tab.zoomed_pane_id ~= nil then
-            tab_infos[#tab_infos].is_zoomed = true
-        end
     end
 
     return tab_infos
@@ -4462,11 +4465,13 @@ M._test = {
         state.next_tab_id = test_state.next_tab_id or (#state.tabs + 1)
         state.focused_id = test_state.focused_id
         state.zoomed_pane_id = test_state.zoomed_pane_id
+        state.floating = { width = 0.8, height = 0.8, visible = false, pending = false, resize_mode = false }
         state.hovered_tab = nil
         state.hovered_close_tab = nil
         state.tab_regions = {}
         state.tab_close_regions = {}
     end,
+    -- Returns a direct reference to internal state, not a copy
     get_state = function()
         return state
     end,
