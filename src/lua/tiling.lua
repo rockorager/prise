@@ -929,8 +929,9 @@ local function set_active_tab_index(new_index)
         return
     end
 
-    -- Restore zoom state from new tab
+    -- Restore zoom state from new tab (clear saved value; active tab uses state.zoomed_pane_id)
     state.zoomed_pane_id = new_tab.zoomed_pane_id
+    new_tab.zoomed_pane_id = nil
 
     -- Pick new focused pane in this tab
     local new_focus_id = new_tab.last_focused_id
