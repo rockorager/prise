@@ -961,7 +961,7 @@ local function close_tab(idx)
 
     -- If this is the last tab, quit the app
     if #state.tabs == 1 then
-        local panes = collect_panes(tab.root, {})
+        local panes = collect_tab_panes(tab)
         for _, pane in ipairs(panes) do
             if pane.pty and pane.pty.close then
                 pane.pty:close()
@@ -977,7 +977,7 @@ local function close_tab(idx)
     end
 
     -- Close all PTYs in this tab
-    local panes = collect_panes(tab.root, {})
+    local panes = collect_tab_panes(tab)
     for _, pane in ipairs(panes) do
         if pane.pty and pane.pty.close then
             pane.pty:close()
