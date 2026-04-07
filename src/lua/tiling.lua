@@ -4467,7 +4467,7 @@ M._test = {
     set_state = function(test_state)
         state.tabs = test_state.tabs or {}
         state.active_tab = test_state.active_tab or 1
-        state.next_tab_id = test_state.next_tab_id or (#state.tabs + 1)
+        state.next_tab_id = test_state.next_tab_id or (#state.tabs + 1) -- state.tabs already updated above
         state.focused_id = test_state.focused_id
         state.zoomed_pane_id = test_state.zoomed_pane_id
         state.floating = { width = 0.8, height = 0.8, visible = false, pending = false, resize_mode = false }
