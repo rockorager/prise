@@ -984,6 +984,12 @@ local function close_tab(idx)
         end
     end
 
+    -- Save zoom to the closing tab so we can detect active-tab changes
+    local closing_active = (idx == state.active_tab)
+    if closing_active then
+        tab.zoomed_pane_id = state.zoomed_pane_id
+    end
+
     local old_focused = state.focused_id
     table.remove(state.tabs, idx)
 
@@ -995,9 +1001,11 @@ local function close_tab(idx)
 
     local new_tab = state.tabs[state.active_tab]
     if new_tab then
-        -- Restore zoom state from new tab
-        state.zoomed_pane_id = new_tab.zoomed_pane_id
-        new_tab.zoomed_pane_id = nil
+        -- Only restore zoom when we landed on a different tab
+        if closing_active then
+            state.zoomed_pane_id = new_tab.zoomed_pane_id
+            new_tab.zoomed_pane_id = nil
+        end
 
         -- Choose focused pane in new tab
         local new_focus_id = new_tab.last_focused_id
@@ -4462,6 +4470,7 @@ M._test = {
     get_last_leaf = get_last_leaf,
     format_palette_item = format_palette_item,
     build_custom_tab_infos = build_custom_tab_infos,
+    close_tab = close_tab,
     remove_pane_by_id = remove_pane_by_id,
     set_active_tab_index = set_active_tab_index,
     set_state = function(test_state)
