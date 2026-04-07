@@ -26,9 +26,7 @@ pub fn deinit(self: *TextInput) void {
     self.vaxis_input.deinit();
 }
 
-// -----------------------------------------------------------------------
 // Editing — delegate to vaxis
-// -----------------------------------------------------------------------
 
 pub fn insertSlice(self: *TextInput, str: []const u8) !void {
     try self.vaxis_input.insertSliceAtCursor(str);
@@ -71,9 +69,7 @@ pub fn clear(self: *TextInput) void {
     self.scroll_offset = 0;
 }
 
-// -----------------------------------------------------------------------
 // New editing methods — expose additional vaxis capabilities
-// -----------------------------------------------------------------------
 
 pub fn deleteToStart(self: *TextInput) void {
     self.vaxis_input.deleteToStart();
@@ -91,9 +87,7 @@ pub fn moveWordForward(self: *TextInput) void {
     self.vaxis_input.moveForwardWordwise();
 }
 
-// -----------------------------------------------------------------------
 // Text access
-// -----------------------------------------------------------------------
 
 /// Return the full text as a contiguous slice. Caller must free with
 /// the same allocator that was passed to `init`.
@@ -106,9 +100,7 @@ pub fn text(self: *const TextInput) ![]const u8 {
     return buf;
 }
 
-// -----------------------------------------------------------------------
 // Rendering — prise's own style (reverse-video block cursor, bg fill)
-// -----------------------------------------------------------------------
 
 pub fn render(self: *TextInput, win: vaxis.Window, style: vaxis.Style) void {
     if (win.width == 0) return;
@@ -204,9 +196,7 @@ pub fn render(self: *TextInput, win: vaxis.Window, style: vaxis.Style) void {
     }
 }
 
-// ===========================================================================
 // Tests
-// ===========================================================================
 
 const tui_test = @import("tui_test.zig");
 
@@ -294,9 +284,7 @@ test "scroll offset via render" {
     try std.testing.expect(input.scroll_offset > 0);
 }
 
-// -----------------------------------------------------------------------
 // New editing method tests
-// -----------------------------------------------------------------------
 
 test "killLine deletes from cursor to end" {
     const allocator = std.testing.allocator;
@@ -433,9 +421,7 @@ test "grapheme-aware cursor movement" {
     }
 }
 
-// ===========================================================================
 // Rendering Tests
-// ===========================================================================
 
 test "render - basic text with cursor at end" {
     const allocator = std.testing.allocator;
