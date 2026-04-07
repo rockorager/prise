@@ -1157,6 +1157,17 @@ local function count_panes(node)
     return 0
 end
 
+---Count all panes belonging to a tab, including its floating pane.
+---@param tab? Tab
+---@return number
+local function count_tab_panes(tab)
+    local n = count_panes(tab and tab.root or nil)
+    if tab and tab.floating and tab.floating.pane then
+        n = n + 1
+    end
+    return n
+end
+
 ---Determine if borders should be shown for the active tab
 ---@return boolean
 local function should_show_borders()
@@ -3982,7 +3993,7 @@ local function build_custom_tab_infos()
             is_active = (i == state.active_tab),
             is_hovered = (i == state.hovered_tab),
             is_close_hovered = (i == state.hovered_close_tab),
-            pane_count = #collect_tab_panes(tab),
+            pane_count = count_tab_panes(tab),
             is_zoomed = (i == state.active_tab and state.zoomed_pane_id ~= nil)
                 or (i ~= state.active_tab and tab.zoomed_pane_id ~= nil),
         })
