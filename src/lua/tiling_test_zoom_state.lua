@@ -46,6 +46,23 @@ zoom_state = t.get_state()
 assert(zoom_state.zoomed_pane_id == nil, "pty_exited: clears active zoom state")
 assert(zoom_state.tabs[1].root.id == 1, "pty_exited: removes exited pane from layout")
 
+-- === closing background tab preserves active zoom ===
+
+t.set_state({
+    tabs = {
+        { id = 1, root = mock_pane(1), last_focused_id = 1 },
+        { id = 2, root = mock_pane(2), last_focused_id = 2 },
+    },
+    active_tab = 1,
+    focused_id = 1,
+    zoomed_pane_id = 1,
+})
+t.close_tab(2)
+zoom_state = t.get_state()
+assert(zoom_state.zoomed_pane_id == 1, "close background tab: preserves active zoom")
+assert(#zoom_state.tabs == 1, "close background tab: tab removed")
+assert(zoom_state.focused_id == 1, "close background tab: focus unchanged")
+
 -- === inactive tab tab-bar zoom state ===
 
 t.set_state({
