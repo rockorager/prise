@@ -513,6 +513,70 @@ test "render - with scrolling" {
     try std.testing.expect(cursor_cell.style.reverse);
 }
 
+test "render - wide characters with scrolling" {
+    const allocator = std.testing.allocator;
+
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+
+    // 4 CJK chars (8 display cols) + 4 ASCII (4 display cols) = 12 total
+    try input.insertSlice("你好世界abcd");
+
+    // Use width 7 so the scroll boundary (offset 6) aligns with a
+    // wide-char edge, giving a clean layout for assertions.
+    var screen = try tui_test.createScreen(allocator, 7, 1);
+    defer screen.deinit(allocator);
+
+    const win = tui_test.windowFromScreen(&screen);
+    input.render(win, .{});
+
+    // Cursor at display col 12 in a 7-wide window — scroll must kick in
+    try std.testing.expect(input.scroll_offset > 0);
+
+    // Cursor (reversed space at end-of-input) at last visible column
+    const cursor_cell = screen.readCell(6, 0).?;
+    try std.testing.expect(cursor_cell.style.reverse);
+
+    // Verify no wide character is split: CJK cells must have width 2
+    for (0..7) |col| {
+        const cell = screen.readCell(@intCast(col), 0).?;
+        if (cell.char.grapheme.len >= 3) {
+            try std.testing.expectEqual(@as(u8, 2), cell.char.width);
+        }
+    }
+
+    // Move cursor left into the CJK region and re-render.
+    // 5 left moves: d, c, b, a, 界 — cursor lands on 界
+    for (0..5) |_| input.moveLeft();
+
+    var screen2 = try tui_test.createScreen(allocator, 7, 1);
+    defer screen2.deinit(allocator);
+
+    const win2 = tui_test.windowFromScreen(&screen2);
+    input.render(win2, .{});
+
+    // Find the cursor cell and verify it covers a wide character
+    var found_cursor = false;
+    for (0..7) |col| {
+        const cell = screen2.readCell(@intCast(col), 0).?;
+        if (cell.style.reverse) {
+            found_cursor = true;
+            // Cursor is on 界 — must be full-width
+            try std.testing.expectEqual(@as(u8, 2), cell.char.width);
+            break;
+        }
+    }
+    try std.testing.expect(found_cursor);
+
+    // Verify no wide char is split in the re-rendered screen
+    for (0..7) |col| {
+        const cell = screen2.readCell(@intCast(col), 0).?;
+        if (cell.char.grapheme.len >= 3) {
+            try std.testing.expectEqual(@as(u8, 2), cell.char.width);
+        }
+    }
+}
+
 test "render - empty input shows cursor" {
     const allocator = std.testing.allocator;
 
