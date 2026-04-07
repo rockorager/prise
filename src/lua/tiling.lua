@@ -1092,6 +1092,7 @@ local function remove_pane_by_id(id)
             return true
         else
             local old_focused = state.focused_id
+            local was_active = (tab_idx == state.active_tab)
             table.remove(state.tabs, tab_idx)
 
             -- Adjust active_tab if needed
@@ -1105,6 +1106,12 @@ local function remove_pane_by_id(id)
             -- Update focus to new active tab
             local new_tab = state.tabs[state.active_tab]
             if new_tab then
+                -- Restore zoom from new tab when the collapsed tab was active
+                if was_active then
+                    state.zoomed_pane_id = new_tab.zoomed_pane_id
+                    new_tab.zoomed_pane_id = nil
+                end
+
                 local new_focus_id = new_tab.last_focused_id
                 if not new_focus_id or not find_node_path(new_tab.root, new_focus_id) then
                     local first_pane = get_first_leaf(new_tab.root)

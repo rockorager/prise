@@ -108,6 +108,23 @@ assert(zoom_state.zoomed_pane_id == 2, "close active tab: restored zoom from new
 assert(zoom_state.active_tab == 1, "close active tab: active tab index adjusted")
 assert(zoom_state.focused_id == 2, "close active tab: focus moved to new tab")
 
+-- === last pane exits on active tab restores zoom from new tab ===
+
+t.set_state({
+    tabs = {
+        { id = 1, root = mock_pane(1), last_focused_id = 1 },
+        { id = 2, root = mock_pane(2), last_focused_id = 2, zoomed_pane_id = 2 },
+    },
+    active_tab = 1,
+    focused_id = 1,
+    zoomed_pane_id = nil,
+})
+t.remove_pane_by_id(1)
+zoom_state = t.get_state()
+assert(zoom_state.zoomed_pane_id == 2, "pane collapse: restored zoom from new tab")
+assert(#zoom_state.tabs == 1, "pane collapse: empty tab removed")
+assert(zoom_state.focused_id == 2, "pane collapse: focus moved to remaining tab")
+
 -- === closing background tab preserves active zoom ===
 
 t.set_state({
