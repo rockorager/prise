@@ -298,6 +298,40 @@ test "scroll offset via render" {
 // New editing method tests
 // -----------------------------------------------------------------------
 
+test "killLine deletes from cursor to end" {
+    const allocator = std.testing.allocator;
+
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+
+    try input.insertSlice("hello world");
+    // Move cursor to after "hello" (back over " world" = 6 graphemes)
+    for (0..6) |_| input.moveLeft();
+
+    input.killLine();
+    {
+        const t = try input.text();
+        defer allocator.free(t);
+        try std.testing.expectEqualStrings("hello", t);
+    }
+}
+
+test "killLine at end of input is a no-op" {
+    const allocator = std.testing.allocator;
+
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+
+    try input.insertSlice("hello world");
+    // Cursor already at end — killLine should leave text unchanged
+    input.killLine();
+    {
+        const t = try input.text();
+        defer allocator.free(t);
+        try std.testing.expectEqualStrings("hello world", t);
+    }
+}
+
 test "delete to start" {
     const allocator = std.testing.allocator;
 
