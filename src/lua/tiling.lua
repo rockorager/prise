@@ -995,6 +995,10 @@ local function close_tab(idx)
 
     local new_tab = state.tabs[state.active_tab]
     if new_tab then
+        -- Restore zoom state from new tab
+        state.zoomed_pane_id = new_tab.zoomed_pane_id
+        new_tab.zoomed_pane_id = nil
+
         -- Choose focused pane in new tab
         local new_focus_id = new_tab.last_focused_id
         if not new_focus_id or not find_node_path(new_tab.root, new_focus_id) then
