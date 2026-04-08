@@ -943,7 +943,7 @@ local function close_tab(idx)
         return
     end
 
-    -- If this is the last tab, quit the app
+    -- If this is the last tab, close PTYs and let remove_pane_by_id handle cleanup
     if #state.tabs == 1 then
         local panes = collect_panes(tab.root, {})
         for _, pane in ipairs(panes) do
@@ -951,12 +951,6 @@ local function close_tab(idx)
                 pane.pty:close()
             end
         end
-        -- Cancel clock timer before exit
-        if state.clock_timer then
-            state.clock_timer:cancel()
-            state.clock_timer = nil
-        end
-        prise.exit()
         return
     end
 
@@ -2726,6 +2720,7 @@ function M.update(event)
             state.pending_split = nil
         end
         update_pty_focus(old_focused_id, state.focused_id)
+        update_cached_git_branch()
         prise.request_frame()
         prise.save() -- Auto-save on pane added
     elseif event.type == "key_press" then
@@ -4408,6 +4403,7 @@ function M.set_state(saved, pty_lookup)
         end
     end
 
+    update_cached_git_branch()
     prise.request_frame()
 end
 
