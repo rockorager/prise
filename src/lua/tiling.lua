@@ -530,6 +530,14 @@ local function handle_text_input_key(input, key_data)
         input:kill_line()
         prise.request_frame()
         return true
+    elseif k == "ArrowLeft" and key_data.alt then
+        input:move_word_backward()
+        prise.request_frame()
+        return true
+    elseif k == "ArrowRight" and key_data.alt then
+        input:move_word_forward()
+        prise.request_frame()
+        return true
     elseif k == "ArrowLeft" then
         input:move_left()
         prise.request_frame()
