@@ -102,19 +102,7 @@ package.loaded["prise"] = {
 
 local tiling = require("tiling")
 
--- Access internal state via debug.getupvalue (no get_state on main's _test)
-local function get_state()
-    for i = 1, 256 do
-        local name, val = debug.getupvalue(tiling.update, i)
-        if not name then
-            break
-        end
-        if name == "state" then
-            return val
-        end
-    end
-    error("could not find state upvalue on tiling.update")
-end
+local get_state = tiling._test.get_state
 
 -- === deserialize_node uses pty:id(), not saved.id ===
 
