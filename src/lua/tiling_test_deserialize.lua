@@ -139,6 +139,9 @@ assert(st.focused_id == 5, "remap: focused_id updated to actual PTY id")
 assert(st.tabs[1].last_focused_id == 5, "remap: last_focused_id updated to actual PTY id")
 
 -- === Split with multiple remapped panes ===
+-- Saved focus was on pty_id=20 which the server remaps to id=200.
+-- set_state must translate saved.focused_id (=20) through the old->new
+-- remap table and land on 200 — not fall back to the first leaf (100).
 
 local saved_split = {
     tabs = {
@@ -179,11 +182,8 @@ local root = st.tabs[1].root
 assert(root.type == "split", "split remap: root is split")
 assert(root.children[1].id == 100, "split remap: first pane id is 100")
 assert(root.children[2].id == 200, "split remap: second pane id is 200")
-assert(st.focused_id == 100 or st.focused_id == 200, "split remap: focused_id is a valid remapped id")
-assert(
-    st.tabs[1].last_focused_id == 100 or st.tabs[1].last_focused_id == 200,
-    "split remap: last_focused_id is a valid remapped id"
-)
+assert(st.focused_id == 200, "split remap: focused_id follows remapped pane to 200")
+assert(st.tabs[1].last_focused_id == 200, "split remap: last_focused_id follows remapped pane to 200")
 
 -- === Floating pane with remapped ID ===
 

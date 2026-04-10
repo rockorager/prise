@@ -1245,11 +1245,15 @@ local function serialize_node(node, cwd_lookup)
     return nil
 end
 
----Deserialize a node tree, looking up PTYs by id
+---Deserialize a node tree, looking up PTYs by id.
+---If `remap` is provided, records `saved.id -> new_id` for each pane so
+---callers can translate persisted focus references (focused_id,
+---last_focused_id) onto the remapped id space.
 ---@param saved? table
 ---@param pty_lookup fun(id: number): Pty?
+---@param remap? table<number, number>
 ---@return Node?
-local function deserialize_node(saved, pty_lookup)
+local function deserialize_node(saved, pty_lookup, remap)
     if not saved then
         return nil
     end
@@ -1258,9 +1262,13 @@ local function deserialize_node(saved, pty_lookup)
         if not pty then
             return nil
         end
+        local new_id = pty:id()
+        if remap and saved.id then
+            remap[saved.id] = new_id
+        end
         return {
             type = "pane",
-            id = pty:id(),
+            id = new_id,
             pty = pty,
             cwd = saved.cwd, -- Store cwd for spawn fallback
             ratio = saved.ratio,
@@ -1269,7 +1277,7 @@ local function deserialize_node(saved, pty_lookup)
         ---@type Node[]
         local children = {}
         for _, child in ipairs(saved.children) do
-            local restored = deserialize_node(child, pty_lookup)
+            local restored = deserialize_node(child, pty_lookup, remap)
             if restored then
                 table.insert(children, restored)
             end
@@ -1318,11 +1326,14 @@ local function serialize_floating(floating, cwd_lookup)
     }
 end
 
----Deserialize a floating pane, looking up PTY by id
+---Deserialize a floating pane, looking up PTY by id.
+---If `remap` is provided, records the floating pane's `saved.pane.id -> new_id`
+---mapping for focus translation.
 ---@param saved? table
 ---@param pty_lookup fun(id: number): Pty?
+---@param remap? table<number, number>
 ---@return FloatingPane?
-local function deserialize_floating(saved, pty_lookup)
+local function deserialize_floating(saved, pty_lookup, remap)
     if not saved or not saved.pane then
         return nil
     end
@@ -1330,10 +1341,14 @@ local function deserialize_floating(saved, pty_lookup)
     if not pty then
         return nil
     end
+    local new_id = pty:id()
+    if remap and saved.pane.id then
+        remap[saved.pane.id] = new_id
+    end
     return {
         pane = {
             type = "pane",
-            id = pty:id(),
+            id = new_id,
             pty = pty,
         },
         visible = saved.visible or false,
@@ -4405,15 +4420,23 @@ function M.set_state(saved, pty_lookup)
         return
     end
 
+    -- Build a per-restore table of old-id -> new-id mappings so persisted
+    -- focus references (focused_id, last_focused_id) can be translated onto
+    -- the remapped id space. Without this, focus would silently fall back to
+    -- the first leaf whenever the server reassigned a PTY id on restore.
+    local remap = {}
+
     -- Handle migration from old format (single root) to new format (tabs)
     if saved.tabs == nil and saved.root ~= nil then
         -- Old format: migrate to tabs
-        local restored_root = deserialize_node(saved.root, pty_lookup)
+        local restored_root = deserialize_node(saved.root, pty_lookup, remap)
         if restored_root then
             local tab_id = 1
-            -- Validate focus ID against actual pane IDs (may have been remapped)
-            local valid_focus = saved.focused_id
-            if valid_focus and not find_node_path(restored_root, valid_focus) then
+            -- Remap focused_id through the old->new table. If the saved focus
+            -- referenced a pane that couldn't be restored, fall back to the
+            -- first leaf.
+            local valid_focus = saved.focused_id and remap[saved.focused_id]
+            if not valid_focus then
                 local first = get_first_leaf(restored_root)
                 valid_focus = first and first.id or nil
             end
@@ -4433,11 +4456,12 @@ function M.set_state(saved, pty_lookup)
         -- New format: restore tabs
         state.tabs = {}
         for _, tab_data in ipairs(saved.tabs or {}) do
-            local restored_root = deserialize_node(tab_data.root, pty_lookup)
+            local restored_root = deserialize_node(tab_data.root, pty_lookup, remap)
             if restored_root then
-                -- Validate last_focused_id against actual pane IDs (may have been remapped)
-                local valid_focus = tab_data.last_focused_id
-                if valid_focus and not find_node_path(restored_root, valid_focus) then
+                -- Remap last_focused_id through the old->new table; fall back
+                -- to the first leaf of this tab if the saved focus pane is gone.
+                local valid_focus = tab_data.last_focused_id and remap[tab_data.last_focused_id]
+                if not valid_focus then
                     local first = get_first_leaf(restored_root)
                     valid_focus = first and first.id or nil
                 end
@@ -4446,16 +4470,16 @@ function M.set_state(saved, pty_lookup)
                     title = tab_data.title,
                     root = restored_root,
                     last_focused_id = valid_focus,
-                    floating = deserialize_floating(tab_data.floating, pty_lookup),
+                    floating = deserialize_floating(tab_data.floating, pty_lookup, remap),
                 })
             end
         end
         state.active_tab = saved.active_tab or 1
         state.next_tab_id = saved.next_tab_id or (#state.tabs + 1)
-        -- Left nil: the "Ensure focus is valid" block below picks a leaf
-        -- after all tabs restore. saved.focused_id may reference a PTY
-        -- that was remapped, so we can't use it verbatim here.
-        state.focused_id = nil
+        -- Remap top-level focused_id through the same table. Nil if the saved
+        -- pane is gone — the "Ensure focus is valid" block below picks a leaf
+        -- from the active tab as a safety net.
+        state.focused_id = saved.focused_id and remap[saved.focused_id] or nil
         state.next_split_id = saved.next_split_id or 1
 
         -- Restore floating pane settings
