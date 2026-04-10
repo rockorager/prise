@@ -2920,13 +2920,6 @@ function M.update(event)
                 end
                 prise.request_frame()
                 return
-            elseif k == "Backspace" then
-                state.session_picker.input:delete_backward()
-                local new_filtered = filter_sessions(state.session_picker.input:text())
-                state.session_picker.selected = math.min(state.session_picker.selected, math.max(1, #new_filtered))
-                state.session_picker.scroll_offset = 0
-                prise.request_frame()
-                return
             elseif k == "D" and event.data.shift then
                 -- Delete the selected session (Shift+D)
                 if #filtered > 0 then
@@ -2954,15 +2947,24 @@ function M.update(event)
                 -- Rename the selected session (Shift+R)
                 open_session_rename()
                 return
-            elseif #k == 1 and not event.data.ctrl and not event.data.alt and not event.data.super then
-                state.session_picker.input:insert(k)
-                local new_filtered = filter_sessions(state.session_picker.input:text())
-                state.session_picker.selected = math.min(state.session_picker.selected, math.max(1, #new_filtered))
-                state.session_picker.scroll_offset = 0
-                prise.request_frame()
+            else
+                -- Route remaining editing keys (char insert, backspace,
+                -- cursor movement, word motions, kill_line, etc.) through
+                -- the shared handler so the picker's search field behaves
+                -- like other dialog text inputs. List navigation and
+                -- action keys are already handled above.
+                local old_text = state.session_picker.input:text()
+                if handle_text_input_key(state.session_picker.input, event.data) then
+                    local new_text = state.session_picker.input:text()
+                    if new_text ~= old_text then
+                        local new_filtered = filter_sessions(new_text)
+                        state.session_picker.selected =
+                            math.min(state.session_picker.selected, math.max(1, #new_filtered))
+                        state.session_picker.scroll_offset = 0
+                    end
+                end
                 return
             end
-            return
         end
 
         -- Handle layout picker
