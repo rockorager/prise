@@ -4488,9 +4488,6 @@ M._test = {
     set_state = function(test_state)
         state.tabs = test_state.tabs or {}
         state.active_tab = test_state.active_tab or 1
-    set_state = function(test_state)
-        state.tabs = test_state.tabs or {}
-        state.active_tab = test_state.active_tab or 1
         state.next_tab_id = test_state.next_tab_id or (#state.tabs + 1) -- state.tabs already updated above
         state.focused_id = test_state.focused_id
         state.zoomed_pane_id = test_state.zoomed_pane_id
@@ -4501,14 +4498,6 @@ M._test = {
         state.tab_close_regions = {}
         state.pending_split = nil
         state.next_split_id = test_state.next_split_id or 1
-    end,
-        state.focused_id = test_state.focused_id
-        state.zoomed_pane_id = test_state.zoomed_pane_id
-        state.floating = { width = 0.8, height = 0.8, visible = false, pending = false, resize_mode = false }
-        state.hovered_tab = nil
-        state.hovered_close_tab = nil
-        state.tab_regions = {}
-        state.tab_close_regions = {}
     end,
     -- Returns a direct reference to internal state, not a copy
     get_state = function()
