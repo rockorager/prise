@@ -4452,7 +4452,10 @@ function M.set_state(saved, pty_lookup)
         end
         state.active_tab = saved.active_tab or 1
         state.next_tab_id = saved.next_tab_id or (#state.tabs + 1)
-        state.focused_id = saved.focused_id
+        -- Left nil: the "Ensure focus is valid" block below picks a leaf
+        -- after all tabs restore. saved.focused_id may reference a PTY
+        -- that was remapped, so we can't use it verbatim here.
+        state.focused_id = nil
         state.next_split_id = saved.next_split_id or 1
 
         -- Restore floating pane settings
