@@ -2285,6 +2285,25 @@ pub const App = struct {
                                     // to prevent frozen client if Lua didn't trigger exit
                                     log.info("No surfaces remaining — forcing quit", .{});
                                     app.state.should_quit = true;
+                                    // Cancel pending tasks before closing fd to prevent
+                                    // completions firing on a closed/recycled descriptor.
+                                    // Capture as `loop` to avoid shadowing onRecv's `l` parameter.
+                                    if (app.recv_task) |*task| {
+                                        if (app.io_loop) |loop| task.cancel(loop) catch {};
+                                        app.recv_task = null;
+                                    }
+                                    if (app.render_timer) |*task| {
+                                        if (app.io_loop) |loop| task.cancel(loop) catch {};
+                                        app.render_timer = null;
+                                    }
+                                    if (app.pipe_read_task) |*task| {
+                                        if (app.io_loop) |loop| task.cancel(loop) catch {};
+                                        app.pipe_read_task = null;
+                                    }
+                                    if (app.send_task) |*task| {
+                                        if (app.io_loop) |loop| task.cancel(loop) catch {};
+                                        app.send_task = null;
+                                    }
                                     if (app.connected) {
                                         posix.close(app.fd);
                                         app.connected = false;
