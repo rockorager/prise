@@ -124,6 +124,21 @@ pub fn render(self: *TextInput, win: vaxis.Window, style: vaxis.Style) void {
         self.scroll_offset = cursor_display_col - win.width + 1;
     }
 
+    // Snap scroll_offset down to a grapheme boundary in first_half so we
+    // never render a partial wide grapheme as the leftmost visible cell.
+    // Walk graphemes tracking their start display columns; the final `cum`
+    // is the largest boundary ≤ the desired scroll_offset.
+    if (self.scroll_offset > 0) {
+        var snap_iter = unicode.graphemeIterator(first_half);
+        var cum: u16 = 0;
+        while (snap_iter.next()) |grapheme| {
+            const w = win.gwidth(grapheme.bytes(first_half));
+            if (cum + w > self.scroll_offset) break;
+            cum += w;
+        }
+        self.scroll_offset = cum;
+    }
+
     var col: u16 = 0;
     var abs_col: u16 = 0;
 
@@ -162,6 +177,16 @@ pub fn render(self: *TextInput, win: vaxis.Window, style: vaxis.Style) void {
                     .style = cursor_style,
                 });
                 col += w;
+            } else if (col < win.width) {
+                // Cursor grapheme is wider than the remaining columns.
+                // Fall back to a 1-wide reverse-space marker so the
+                // cursor position is still visible instead of silently
+                // dropping the cursor cell entirely.
+                win.writeCell(col, 0, .{
+                    .char = .{ .grapheme = " ", .width = 1 },
+                    .style = cursor_style,
+                });
+                col += 1;
             }
 
             // Render rest of second half (normal style)
