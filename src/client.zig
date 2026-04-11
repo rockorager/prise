@@ -666,6 +666,11 @@ pub const App = struct {
     // Auto-save timer for debouncing
     autosave_timer: ?io.Task = null,
 
+    /// Set by pty_exited handler when the last surface is gone. Acted on
+    /// outside any task callback to avoid self-cancelling the recv_task
+    /// whose completion we would otherwise be running in.
+    pending_force_quit: bool = false,
+
     pub const PendingColorQuery = struct {
         pty_id: u32,
         target: ServerAction.ColorQueryTarget.Target,
@@ -810,6 +815,41 @@ pub const App = struct {
 
         posix.close(self.pipe_read_fd);
         posix.close(self.pipe_write_fd);
+    }
+
+    /// Runs the deferred force-quit work outside any task callback.
+    /// Called from the top of onPipeRead after the pty_exited handler set
+    /// pending_force_quit — we're no longer on the recv_task's completion
+    /// stack, so cancelling it is safe.
+    fn forceQuitIfPending(self: *App) void {
+        if (!self.pending_force_quit) return;
+        self.pending_force_quit = false;
+        if (self.state.should_quit) return;
+
+        log.info("forceQuitIfPending: no surfaces remaining — forcing quit", .{});
+        self.state.should_quit = true;
+
+        if (self.recv_task) |*task| {
+            if (self.io_loop) |loop| task.cancel(loop) catch {};
+            self.recv_task = null;
+        }
+        if (self.render_timer) |*task| {
+            if (self.io_loop) |loop| task.cancel(loop) catch {};
+            self.render_timer = null;
+        }
+        if (self.pipe_read_task) |*task| {
+            if (self.io_loop) |loop| task.cancel(loop) catch {};
+            self.pipe_read_task = null;
+        }
+        if (self.send_task) |*task| {
+            if (self.io_loop) |loop| task.cancel(loop) catch {};
+            self.send_task = null;
+        }
+        if (self.connected) {
+            posix.close(self.fd);
+            self.connected = false;
+        }
+        self.vx.deviceStatusReport(self.tty.writer()) catch {};
     }
 
     pub fn setup(self: *App, loop: *io.Loop) !void {
@@ -1019,6 +1059,11 @@ pub const App = struct {
 
     fn onPipeRead(l: *io.Loop, completion: io.Completion) anyerror!void {
         const app = completion.userdataCast(@This());
+
+        // Act on any deferred force-quit request from the pty_exited handler.
+        // Safe here because we're on onPipeRead's stack, not recv_task's.
+        app.forceQuitIfPending();
+        if (app.state.should_quit) return;
 
         switch (completion.result) {
             .read => |bytes_read| {
@@ -2273,42 +2318,19 @@ pub const App = struct {
                                 app.ui.update(.{ .pty_exited = .{ .id = info.pty_id, .status = info.status } }) catch |err| {
                                     log.err("Failed to update UI with pty_exited: {}", .{err});
                                 };
-                                // Handle last PTY exit (if quit wasn't already called)
+                                // Handle last PTY exit (if quit wasn't already called).
+                                // Defer the actual cleanup out of onRecv — we're currently
+                                // running on recv_task's completion stack, and cancelling it
+                                // from here corrupts the io.Loop's task state. forceQuitIfPending
+                                // runs from onPipeRead instead, which is a different task.
                                 if (app.surfaces.count() == 0 and !app.state.should_quit) {
-                                    // Cancel autosave timer to prevent it from recreating the file
                                     if (app.autosave_timer) |*task| {
                                         if (app.io_loop) |loop| task.cancel(loop) catch {};
                                         app.autosave_timer = null;
                                     }
                                     app.deleteCurrentSession();
-                                    // Safety: force quit when no surfaces remain
-                                    // to prevent frozen client if Lua didn't trigger exit
-                                    log.info("No surfaces remaining — forcing quit", .{});
-                                    app.state.should_quit = true;
-                                    // Cancel pending tasks before closing fd to prevent
-                                    // completions firing on a closed/recycled descriptor.
-                                    // Capture as `loop` to avoid shadowing onRecv's `l` parameter.
-                                    if (app.recv_task) |*task| {
-                                        if (app.io_loop) |loop| task.cancel(loop) catch {};
-                                        app.recv_task = null;
-                                    }
-                                    if (app.render_timer) |*task| {
-                                        if (app.io_loop) |loop| task.cancel(loop) catch {};
-                                        app.render_timer = null;
-                                    }
-                                    if (app.pipe_read_task) |*task| {
-                                        if (app.io_loop) |loop| task.cancel(loop) catch {};
-                                        app.pipe_read_task = null;
-                                    }
-                                    if (app.send_task) |*task| {
-                                        if (app.io_loop) |loop| task.cancel(loop) catch {};
-                                        app.send_task = null;
-                                    }
-                                    if (app.connected) {
-                                        posix.close(app.fd);
-                                        app.connected = false;
-                                    }
-                                    app.vx.deviceStatusReport(app.tty.writer()) catch {};
+                                    log.info("No surfaces remaining — deferring force quit", .{});
+                                    app.pending_force_quit = true;
                                 }
                             },
                             .cwd_changed => |info| {
