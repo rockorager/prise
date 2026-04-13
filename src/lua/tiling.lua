@@ -1491,9 +1491,9 @@ end
 ---@param layout PriseLayout
 ---@param pty_queue Pty[]
 ---@return Tab[]? new_tabs
----@return number? new_floating_width
----@return number? new_floating_height
----@return boolean? new_floating_visible
+---@return number new_floating_width
+---@return number new_floating_height
+---@return boolean new_floating_visible
 ---@return number queue_idx Final queue index (for verification)
 local function build_tabs_from_layout(layout, pty_queue)
     local new_tabs = {}
@@ -1507,7 +1507,7 @@ local function build_tabs_from_layout(layout, pty_queue)
         if not root then
             prise.log.error(string.format("Layout: failed to build tab %d: %s", tab_index, err or "unknown"))
             cleanup_new_ptys(pty_queue, queue_idx)
-            return nil, nil, nil, nil, queue_idx
+            return nil, new_floating_width, new_floating_height, new_floating_visible, queue_idx
         end
         queue_idx = new_idx
 
