@@ -514,7 +514,7 @@ local function handle_text_input_key(input, key_data)
     local k = key_data.key
     local ctrl = key_data.ctrl
 
-    if k == "Backspace" then
+    if k == "Backspace" and not key_data.alt then
         input:delete_backward()
         prise.request_frame()
         return true
@@ -528,6 +528,14 @@ local function handle_text_input_key(input, key_data)
         return true
     elseif k == "k" and ctrl then
         input:kill_line()
+        prise.request_frame()
+        return true
+    elseif k == "ArrowLeft" and key_data.alt then
+        input:move_word_backward()
+        prise.request_frame()
+        return true
+    elseif k == "ArrowRight" and key_data.alt then
+        input:move_word_forward()
         prise.request_frame()
         return true
     elseif k == "ArrowLeft" then
@@ -544,6 +552,42 @@ local function handle_text_input_key(input, key_data)
         return true
     elseif k == "End" or (k == "e" and ctrl) then
         input:move_to_end()
+        prise.request_frame()
+        return true
+    elseif k == "u" and ctrl then
+        input:delete_to_start()
+        prise.request_frame()
+        return true
+    elseif k == "d" and ctrl then
+        input:delete_forward()
+        prise.request_frame()
+        return true
+    elseif k == "h" and ctrl then
+        input:delete_backward()
+        prise.request_frame()
+        return true
+    elseif k == "b" and ctrl then
+        input:move_left()
+        prise.request_frame()
+        return true
+    elseif k == "f" and ctrl then
+        input:move_right()
+        prise.request_frame()
+        return true
+    elseif k == "b" and key_data.alt then
+        input:move_word_backward()
+        prise.request_frame()
+        return true
+    elseif k == "f" and key_data.alt then
+        input:move_word_forward()
+        prise.request_frame()
+        return true
+    elseif k == "d" and key_data.alt then
+        input:delete_word_after()
+        prise.request_frame()
+        return true
+    elseif k == "Backspace" and key_data.alt then
+        input:delete_word_backward()
         prise.request_frame()
         return true
     elseif #k == 1 and not ctrl and not key_data.alt and not key_data.super then
@@ -2876,13 +2920,6 @@ function M.update(event)
                 end
                 prise.request_frame()
                 return
-            elseif k == "Backspace" then
-                state.session_picker.input:delete_backward()
-                local new_filtered = filter_sessions(state.session_picker.input:text())
-                state.session_picker.selected = math.min(state.session_picker.selected, math.max(1, #new_filtered))
-                state.session_picker.scroll_offset = 0
-                prise.request_frame()
-                return
             elseif k == "D" and event.data.shift then
                 -- Delete the selected session (Shift+D)
                 if #filtered > 0 then
@@ -2910,15 +2947,24 @@ function M.update(event)
                 -- Rename the selected session (Shift+R)
                 open_session_rename()
                 return
-            elseif #k == 1 and not event.data.ctrl and not event.data.alt and not event.data.super then
-                state.session_picker.input:insert(k)
-                local new_filtered = filter_sessions(state.session_picker.input:text())
-                state.session_picker.selected = math.min(state.session_picker.selected, math.max(1, #new_filtered))
-                state.session_picker.scroll_offset = 0
-                prise.request_frame()
+            else
+                -- Route remaining editing keys (char insert, backspace,
+                -- cursor movement, word motions, kill_line, etc.) through
+                -- the shared handler so the picker's search field behaves
+                -- like other dialog text inputs. List navigation and
+                -- action keys are already handled above.
+                local old_text = state.session_picker.input:text()
+                if handle_text_input_key(state.session_picker.input, event.data) then
+                    local new_text = state.session_picker.input:text()
+                    if new_text ~= old_text then
+                        local new_filtered = filter_sessions(new_text)
+                        state.session_picker.selected =
+                            math.min(state.session_picker.selected, math.max(1, #new_filtered))
+                        state.session_picker.scroll_offset = 0
+                    end
+                end
                 return
             end
-            return
         end
 
         -- Handle layout picker

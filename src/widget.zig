@@ -255,7 +255,6 @@ pub const Widget = struct {
                 surf.surface.render(win, self.focus);
             },
             .text_input => |ti| {
-                ti.input.updateScrollOffset(@intCast(win.width));
                 ti.input.render(win, ti.style);
             },
             .text => |text| {
@@ -4525,9 +4524,272 @@ test "render Positioned - anchor bottom_right" {
     const ascii = try tui_test.screenToAscii(allocator, &screen, 5, 3);
     defer allocator.free(ascii);
 
+    try tui_test.expectAsciiEqual("     \n     \n    Z", ascii);
+}
+
+// ============================================================================
+// Dialog TextInput Composition Tests
+// ============================================================================
+
+test "render TextInput in Column with label" {
+    const allocator = std.testing.allocator;
+
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+    try input.insertSlice("hello");
+
+    var label_spans = [_]Text.Span{.{ .text = "Name:", .style = .{} }};
+
+    var children = [_]Widget{
+        .{ .kind = .{ .text = .{ .spans = &label_spans } } },
+        .{ .kind = .{ .text_input = .{ .input_id = 1, .input = &input } } },
+    };
+
+    var w: Widget = .{
+        .kind = .{ .column = .{ .children = &children, .cross_axis_align = .stretch } },
+    };
+
+    _ = w.layout(boundsConstraints(20, 2));
+
+    var screen = try tui_test.createScreen(allocator, 20, 2);
+    defer screen.deinit(allocator);
+    const win = tui_test.windowFromScreen(&screen);
+
+    try w.renderTo(win, allocator);
+
+    const ascii = try tui_test.screenToAscii(allocator, &screen, 20, 2);
+    defer allocator.free(ascii);
+
+    try tui_test.expectAsciiEqual("Name:               \nhello               ", ascii);
+
+    // Cursor at (5, 1) should be reversed
+    const cursor_cell = screen.readCell(5, 1).?;
+    try std.testing.expect(cursor_cell.style.reverse);
+
+    // Non-cursor cell should not be reversed
+    const normal_cell = screen.readCell(0, 1).?;
+    try std.testing.expect(!normal_cell.style.reverse);
+}
+
+test "render TextInput in Box+Padding dialog frame" {
+    const allocator = std.testing.allocator;
+
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+    try input.insertSlice("abc");
+
+    var label_spans = [_]Text.Span{.{ .text = "Label", .style = .{} }};
+
+    var col_children = [_]Widget{
+        .{ .kind = .{ .text = .{ .spans = &label_spans } } },
+        .{ .kind = .{ .text_input = .{ .input_id = 1, .input = &input } } },
+    };
+
+    const col_widget: Widget = .{
+        .kind = .{ .column = .{ .children = &col_children, .cross_axis_align = .stretch } },
+    };
+
+    const pad_child = try allocator.create(Widget);
+    pad_child.* = col_widget;
+    defer allocator.destroy(pad_child);
+
+    const pad_widget: Widget = .{
+        .kind = .{ .padding = .{
+            .child = pad_child,
+            .top = 1,
+            .bottom = 1,
+            .left = 2,
+            .right = 2,
+        } },
+    };
+
+    const box_child = try allocator.create(Widget);
+    box_child.* = pad_widget;
+    defer allocator.destroy(box_child);
+
+    var w: Widget = .{
+        .kind = .{ .box = .{
+            .child = box_child,
+            .border = .rounded,
+            .style = .{},
+            .max_width = null,
+            .max_height = null,
+        } },
+    };
+
+    // border(2) + padding top/bottom(2) + 2 content rows = 6
+    _ = w.layout(boundsConstraints(20, 6));
+
+    var screen = try tui_test.createScreen(allocator, 20, 6);
+    defer screen.deinit(allocator);
+    const win = tui_test.windowFromScreen(&screen);
+
+    try w.renderTo(win, allocator);
+
+    const ascii = try tui_test.screenToAscii(allocator, &screen, 20, 6);
+    defer allocator.free(ascii);
+
+    // Row 0: rounded top border
+    // Row 1: padding top (border left/right edges)
+    // Row 2: "Label" offset by border(1) + padding left(2) = col 3
+    // Row 3: "abc" with cursor, same offset
+    // Row 4: padding bottom
+    // Row 5: rounded bottom border
     try tui_test.expectAsciiEqual(
-        \\     
-        \\     
-        \\    Z
+        \\╭──────────────────╮
+        \\│                  │
+        \\│  Label           │
+        \\│  abc             │
+        \\│                  │
+        \\╰──────────────────╯
     , ascii);
+
+    // Cursor inside dialog: border(1) + padding(2) + cursor after "abc" = col 6, row 3
+    const cursor_cell = screen.readCell(6, 3).?;
+    try std.testing.expect(cursor_cell.style.reverse);
+}
+
+test "render TextInput cursor in middle" {
+    const allocator = std.testing.allocator;
+
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+    try input.insertSlice("hello");
+    input.moveLeft();
+    input.moveLeft();
+
+    var label_spans = [_]Text.Span{.{ .text = "Edit:", .style = .{} }};
+
+    var children = [_]Widget{
+        .{ .kind = .{ .text = .{ .spans = &label_spans } } },
+        .{ .kind = .{ .text_input = .{ .input_id = 1, .input = &input } } },
+    };
+
+    var w: Widget = .{
+        .kind = .{ .column = .{ .children = &children, .cross_axis_align = .stretch } },
+    };
+
+    _ = w.layout(boundsConstraints(20, 2));
+
+    var screen = try tui_test.createScreen(allocator, 20, 2);
+    defer screen.deinit(allocator);
+    const win = tui_test.windowFromScreen(&screen);
+
+    try w.renderTo(win, allocator);
+
+    // Cursor at position 3 in the input, which is col 3, row 1
+    const cursor_cell = screen.readCell(3, 1).?;
+    try std.testing.expect(cursor_cell.style.reverse);
+
+    // Adjacent cells should not be reversed
+    const before_cell = screen.readCell(2, 1).?;
+    try std.testing.expect(!before_cell.style.reverse);
+    const after_cell = screen.readCell(4, 1).?;
+    try std.testing.expect(!after_cell.style.reverse);
+}
+
+test "render TextInput scrolling in narrow viewport" {
+    const allocator = std.testing.allocator;
+
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+    try input.insertSlice("abcdefghijklmnop");
+
+    var children = [_]Widget{
+        .{ .kind = .{ .text_input = .{ .input_id = 1, .input = &input } } },
+    };
+
+    var w: Widget = .{
+        .kind = .{ .column = .{ .children = &children, .cross_axis_align = .stretch } },
+    };
+
+    _ = w.layout(boundsConstraints(6, 1));
+
+    var screen = try tui_test.createScreen(allocator, 6, 1);
+    defer screen.deinit(allocator);
+    const win = tui_test.windowFromScreen(&screen);
+
+    try w.renderTo(win, allocator);
+
+    // After render, scroll_offset should have been updated
+    try std.testing.expect(input.scroll_offset > 0);
+
+    // Cursor cell (last visible position) should be reversed
+    const cursor_cell = screen.readCell(5, 0).?;
+    try std.testing.expect(cursor_cell.style.reverse);
+}
+
+test "render empty TextInput" {
+    const allocator = std.testing.allocator;
+
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+
+    var label_spans = [_]Text.Span{.{ .text = "Input:", .style = .{} }};
+
+    var children = [_]Widget{
+        .{ .kind = .{ .text = .{ .spans = &label_spans } } },
+        .{ .kind = .{ .text_input = .{ .input_id = 1, .input = &input } } },
+    };
+
+    var w: Widget = .{
+        .kind = .{ .column = .{ .children = &children, .cross_axis_align = .stretch } },
+    };
+
+    _ = w.layout(boundsConstraints(10, 2));
+
+    var screen = try tui_test.createScreen(allocator, 10, 2);
+    defer screen.deinit(allocator);
+    const win = tui_test.windowFromScreen(&screen);
+
+    try w.renderTo(win, allocator);
+
+    const ascii = try tui_test.screenToAscii(allocator, &screen, 10, 2);
+    defer allocator.free(ascii);
+
+    try tui_test.expectAsciiEqual("Input:    \n          ", ascii);
+
+    // Cursor at (0, 1) should be reversed
+    const cursor_cell = screen.readCell(0, 1).?;
+    try std.testing.expect(cursor_cell.style.reverse);
+}
+
+test "render TextInput with explicit style" {
+    const allocator = std.testing.allocator;
+
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+    try input.insertSlice("hi");
+
+    var children = [_]Widget{
+        .{ .kind = .{ .text_input = .{
+            .input_id = 1,
+            .input = &input,
+            .style = .{ .fg = .{ .index = 2 }, .bg = .{ .index = 4 } },
+        } } },
+    };
+
+    var w: Widget = .{
+        .kind = .{ .column = .{ .children = &children, .cross_axis_align = .stretch } },
+    };
+
+    _ = w.layout(boundsConstraints(10, 1));
+
+    var screen = try tui_test.createScreen(allocator, 10, 1);
+    defer screen.deinit(allocator);
+    const win = tui_test.windowFromScreen(&screen);
+
+    try w.renderTo(win, allocator);
+
+    // Non-cursor cell should have fg=2, bg=4, not reversed
+    const normal_cell = screen.readCell(0, 0).?;
+    try std.testing.expectEqual(vaxis.Cell.Color{ .index = 2 }, normal_cell.style.fg);
+    try std.testing.expectEqual(vaxis.Cell.Color{ .index = 4 }, normal_cell.style.bg);
+    try std.testing.expect(!normal_cell.style.reverse);
+
+    // Cursor cell should have fg=2, bg=4, reversed
+    const cursor_cell = screen.readCell(2, 0).?;
+    try std.testing.expectEqual(vaxis.Cell.Color{ .index = 2 }, cursor_cell.style.fg);
+    try std.testing.expectEqual(vaxis.Cell.Color{ .index = 4 }, cursor_cell.style.bg);
+    try std.testing.expect(cursor_cell.style.reverse);
 }

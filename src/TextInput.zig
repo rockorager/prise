@@ -1,146 +1,229 @@
-//! Text input widget with cursor and editing support.
+//! Text input widget backed by vaxis gap-buffer TextInput.
+//!
+//! Delegates editing to `vaxis.widgets.TextInput` for grapheme-aware
+//! cursor movement and readline primitives. Keeps prise's own render
+//! logic (reverse-video block cursor, background fill, no ellipsis).
 
 const std = @import("std");
 
 const vaxis = @import("vaxis");
+const unicode = vaxis.unicode;
 
 const TextInput = @This();
 
 allocator: std.mem.Allocator,
-buffer: std.ArrayList(u8),
-cursor: usize = 0,
-scroll_offset: usize = 0,
+vaxis_input: vaxis.widgets.TextInput,
+scroll_offset: u16 = 0,
 
 pub fn init(allocator: std.mem.Allocator) TextInput {
     return .{
         .allocator = allocator,
-        .buffer = std.ArrayList(u8).empty,
+        .vaxis_input = vaxis.widgets.TextInput.init(allocator),
     };
 }
 
 pub fn deinit(self: *TextInput) void {
-    self.buffer.deinit(self.allocator);
+    self.vaxis_input.deinit();
 }
 
-pub fn insert(self: *TextInput, char: u8) !void {
-    try self.buffer.insert(self.allocator, self.cursor, char);
-    self.cursor += 1;
-}
+// Editing — delegate to vaxis
 
-pub fn insertSlice(self: *TextInput, slice: []const u8) !void {
-    try self.buffer.insertSlice(self.allocator, self.cursor, slice);
-    self.cursor += slice.len;
+pub fn insertSlice(self: *TextInput, str: []const u8) !void {
+    try self.vaxis_input.insertSliceAtCursor(str);
 }
 
 pub fn deleteBackward(self: *TextInput) void {
-    if (self.cursor > 0) {
-        _ = self.buffer.orderedRemove(self.cursor - 1);
-        self.cursor -= 1;
-    }
+    self.vaxis_input.deleteBeforeCursor();
 }
 
 pub fn deleteForward(self: *TextInput) void {
-    if (self.cursor < self.buffer.items.len) {
-        _ = self.buffer.orderedRemove(self.cursor);
-    }
+    self.vaxis_input.deleteAfterCursor();
 }
 
 pub fn deleteWordBackward(self: *TextInput) void {
-    if (self.cursor == 0) return;
-
-    var end = self.cursor;
-    while (end > 0 and self.buffer.items[end - 1] == ' ') {
-        end -= 1;
-    }
-    while (end > 0 and self.buffer.items[end - 1] != ' ') {
-        end -= 1;
-    }
-
-    const count = self.cursor - end;
-    for (0..count) |_| {
-        _ = self.buffer.orderedRemove(end);
-    }
-    self.cursor = end;
+    self.vaxis_input.deleteWordBefore();
 }
 
 pub fn killLine(self: *TextInput) void {
-    self.buffer.shrinkRetainingCapacity(self.cursor);
+    self.vaxis_input.deleteToEnd();
 }
 
 pub fn moveLeft(self: *TextInput) void {
-    if (self.cursor > 0) {
-        self.cursor -= 1;
-    }
+    self.vaxis_input.cursorLeft();
 }
 
 pub fn moveRight(self: *TextInput) void {
-    if (self.cursor < self.buffer.items.len) {
-        self.cursor += 1;
-    }
+    self.vaxis_input.cursorRight();
 }
 
 pub fn moveToStart(self: *TextInput) void {
-    self.cursor = 0;
+    self.vaxis_input.buf.moveGapLeft(self.vaxis_input.buf.firstHalf().len);
 }
 
 pub fn moveToEnd(self: *TextInput) void {
-    self.cursor = self.buffer.items.len;
+    self.vaxis_input.buf.moveGapRight(self.vaxis_input.buf.secondHalf().len);
 }
 
 pub fn clear(self: *TextInput) void {
-    self.buffer.clearRetainingCapacity();
-    self.cursor = 0;
+    self.vaxis_input.clearRetainingCapacity();
     self.scroll_offset = 0;
 }
 
-pub fn text(self: *const TextInput) []const u8 {
-    return self.buffer.items;
+// New editing methods — expose additional vaxis capabilities
+
+pub fn deleteToStart(self: *TextInput) void {
+    self.vaxis_input.deleteToStart();
 }
 
-pub fn updateScrollOffset(self: *TextInput, visible_width: u16) void {
-    if (visible_width == 0) return;
-
-    const width: usize = visible_width;
-
-    if (self.cursor < self.scroll_offset) {
-        self.scroll_offset = self.cursor;
-    } else if (self.cursor >= self.scroll_offset + width) {
-        self.scroll_offset = self.cursor - width + 1;
-    }
+pub fn deleteWordAfter(self: *TextInput) void {
+    self.vaxis_input.deleteWordAfter();
 }
 
-pub fn visibleText(self: *const TextInput, visible_width: u16) []const u8 {
-    const items = self.buffer.items;
-    if (items.len == 0) return "";
-
-    const start = @min(self.scroll_offset, items.len);
-    const end = @min(start + visible_width, items.len);
-    return items[start..end];
+pub fn moveWordBackward(self: *TextInput) void {
+    self.vaxis_input.moveBackwardWordwise();
 }
 
-pub fn visibleCursorPos(self: *const TextInput) usize {
-    return self.cursor - self.scroll_offset;
+pub fn moveWordForward(self: *TextInput) void {
+    self.vaxis_input.moveForwardWordwise();
 }
 
-pub fn render(self: *const TextInput, win: vaxis.Window, style: vaxis.Style) void {
-    const visible = self.visibleText(@intCast(win.width));
-    const cursor_x = self.visibleCursorPos();
+// Text access
 
-    // Fill the entire line with background first
-    for (0..win.width) |col| {
-        const is_cursor = col == cursor_x;
-        var cell_style = style;
-        if (is_cursor) {
-            cell_style.reverse = true;
+/// Return the full text as a contiguous slice. Caller must free with
+/// the same allocator that was passed to `init`.
+pub fn text(self: *const TextInput) ![]const u8 {
+    const first = self.vaxis_input.buf.firstHalf();
+    const second = self.vaxis_input.buf.secondHalf();
+    const buf = try self.allocator.alloc(u8, first.len + second.len);
+    @memcpy(buf[0..first.len], first);
+    @memcpy(buf[first.len..], second);
+    return buf;
+}
+
+// Rendering — prise's own style (reverse-video block cursor, bg fill)
+
+pub fn render(self: *TextInput, win: vaxis.Window, style: vaxis.Style) void {
+    if (win.width == 0) return;
+
+    const first_half = self.vaxis_input.buf.firstHalf();
+    const second_half = self.vaxis_input.buf.secondHalf();
+
+    // Calculate cursor display column for scroll adjustment
+    var cursor_display_col: u16 = 0;
+    {
+        var iter = unicode.graphemeIterator(first_half);
+        while (iter.next()) |grapheme| {
+            cursor_display_col += win.gwidth(grapheme.bytes(first_half));
         }
+    }
 
-        const grapheme: []const u8 = if (col < visible.len) visible[col .. col + 1] else " ";
-        win.writeCell(@intCast(col), 0, .{
-            .char = .{ .grapheme = grapheme, .width = 1 },
-            .style = cell_style,
+    // Adjust scroll offset to keep cursor visible
+    if (cursor_display_col < self.scroll_offset) {
+        self.scroll_offset = cursor_display_col;
+    } else if (cursor_display_col >= self.scroll_offset + win.width) {
+        self.scroll_offset = cursor_display_col - win.width + 1;
+    }
+
+    // Snap scroll_offset down to a grapheme boundary in first_half so we
+    // never render a partial wide grapheme as the leftmost visible cell.
+    // Walk graphemes tracking their start display columns; the final `cum`
+    // is the largest boundary ≤ the desired scroll_offset.
+    if (self.scroll_offset > 0) {
+        var snap_iter = unicode.graphemeIterator(first_half);
+        var cum: u16 = 0;
+        while (snap_iter.next()) |grapheme| {
+            const w = win.gwidth(grapheme.bytes(first_half));
+            if (cum + w > self.scroll_offset) break;
+            cum += w;
+        }
+        self.scroll_offset = cum;
+    }
+
+    var col: u16 = 0;
+    var abs_col: u16 = 0;
+
+    // Render first half (before cursor)
+    {
+        var iter = unicode.graphemeIterator(first_half);
+        while (iter.next()) |grapheme| {
+            const g = grapheme.bytes(first_half);
+            const w = win.gwidth(g);
+            if (abs_col + w <= self.scroll_offset) {
+                abs_col += w;
+                continue;
+            }
+            if (col + w > win.width) break;
+            win.writeCell(col, 0, .{
+                .char = .{ .grapheme = g, .width = @intCast(w) },
+                .style = style,
+            });
+            col += w;
+            abs_col += w;
+        }
+    }
+
+    // Render cursor cell: first grapheme of second half with reverse,
+    // or a reversed space if the cursor is at the end of input.
+    var cursor_style = style;
+    cursor_style.reverse = true;
+    {
+        var iter = unicode.graphemeIterator(second_half);
+        if (iter.next()) |grapheme| {
+            const g = grapheme.bytes(second_half);
+            const w = win.gwidth(g);
+            if (col + w <= win.width) {
+                win.writeCell(col, 0, .{
+                    .char = .{ .grapheme = g, .width = @intCast(w) },
+                    .style = cursor_style,
+                });
+                col += w;
+            } else if (col < win.width) {
+                // Cursor grapheme is wider than the remaining columns.
+                // Fall back to a 1-wide reverse-space marker so the
+                // cursor position is still visible instead of silently
+                // dropping the cursor cell entirely.
+                win.writeCell(col, 0, .{
+                    .char = .{ .grapheme = " ", .width = 1 },
+                    .style = cursor_style,
+                });
+                col += 1;
+            }
+
+            // Render rest of second half (normal style)
+            while (iter.next()) |g2| {
+                const g2_bytes = g2.bytes(second_half);
+                const w2 = win.gwidth(g2_bytes);
+                if (col + w2 > win.width) break;
+                win.writeCell(col, 0, .{
+                    .char = .{ .grapheme = g2_bytes, .width = @intCast(w2) },
+                    .style = style,
+                });
+                col += w2;
+            }
+        } else {
+            // Cursor at end of input — show reversed space
+            if (col < win.width) {
+                win.writeCell(col, 0, .{
+                    .char = .{ .grapheme = " ", .width = 1 },
+                    .style = cursor_style,
+                });
+                col += 1;
+            }
+        }
+    }
+
+    // Fill remaining width with background
+    while (col < win.width) : (col += 1) {
+        win.writeCell(col, 0, .{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = style,
         });
     }
 }
+
+// Tests
+
+const tui_test = @import("tui_test.zig");
 
 test "basic insert and cursor movement" {
     const allocator = std.testing.allocator;
@@ -148,18 +231,18 @@ test "basic insert and cursor movement" {
     var input = TextInput.init(allocator);
     defer input.deinit();
 
-    try input.insert('a');
-    try input.insert('b');
-    try input.insert('c');
+    try input.insertSlice("abc");
 
-    try std.testing.expectEqualStrings("abc", input.text());
-    try std.testing.expectEqual(@as(usize, 3), input.cursor);
+    const t1 = try input.text();
+    defer allocator.free(t1);
+    try std.testing.expectEqualStrings("abc", t1);
 
     input.moveLeft();
-    try std.testing.expectEqual(@as(usize, 2), input.cursor);
 
-    try input.insert('X');
-    try std.testing.expectEqualStrings("abXc", input.text());
+    try input.insertSlice("X");
+    const t2 = try input.text();
+    defer allocator.free(t2);
+    try std.testing.expectEqualStrings("abXc", t2);
 }
 
 test "delete backward and forward" {
@@ -169,48 +252,201 @@ test "delete backward and forward" {
     defer input.deinit();
 
     try input.insertSlice("hello");
-    try std.testing.expectEqualStrings("hello", input.text());
+
+    {
+        const t = try input.text();
+        defer allocator.free(t);
+        try std.testing.expectEqualStrings("hello", t);
+    }
 
     input.deleteBackward();
-    try std.testing.expectEqualStrings("hell", input.text());
+    {
+        const t = try input.text();
+        defer allocator.free(t);
+        try std.testing.expectEqualStrings("hell", t);
+    }
 
     input.moveToStart();
     input.deleteForward();
-    try std.testing.expectEqualStrings("ell", input.text());
+    {
+        const t = try input.text();
+        defer allocator.free(t);
+        try std.testing.expectEqualStrings("ell", t);
+    }
 }
 
-test "scroll offset" {
+test "delete word backward" {
     const allocator = std.testing.allocator;
 
     var input = TextInput.init(allocator);
     defer input.deinit();
 
-    try input.insertSlice("hello world this is a long string");
+    try input.insertSlice("hello world");
 
-    input.updateScrollOffset(10);
+    input.deleteWordBackward();
+    {
+        const t = try input.text();
+        defer allocator.free(t);
+        try std.testing.expectEqualStrings("hello ", t);
+    }
+}
+
+test "scroll offset via render" {
+    const allocator = std.testing.allocator;
+
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+
+    try input.insertSlice("abcdefghijklmnop");
+
+    // Rendering into a narrow window triggers scroll adjustment
+    var screen = try tui_test.createScreen(allocator, 5, 1);
+    defer screen.deinit(allocator);
+
+    const win = tui_test.windowFromScreen(&screen);
+    input.render(win, .{});
 
     try std.testing.expect(input.scroll_offset > 0);
-    try std.testing.expect(input.visibleText(10).len <= 10);
 }
 
-test "visible cursor position" {
+// New editing method tests
+
+test "killLine deletes from cursor to end" {
     const allocator = std.testing.allocator;
 
     var input = TextInput.init(allocator);
     defer input.deinit();
 
-    try input.insertSlice("abcdefghij");
-    input.cursor = 5;
-    input.scroll_offset = 3;
+    try input.insertSlice("hello world");
+    // Move cursor to after "hello" (back over " world" = 6 graphemes)
+    for (0..6) |_| input.moveLeft();
 
-    try std.testing.expectEqual(@as(usize, 2), input.visibleCursorPos());
+    input.killLine();
+    {
+        const t = try input.text();
+        defer allocator.free(t);
+        try std.testing.expectEqualStrings("hello", t);
+    }
 }
 
-// ============================================================================
-// Rendering Tests
-// ============================================================================
+test "killLine at end of input is a no-op" {
+    const allocator = std.testing.allocator;
 
-const tui_test = @import("tui_test.zig");
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+
+    try input.insertSlice("hello world");
+    // Cursor already at end — killLine should leave text unchanged
+    input.killLine();
+    {
+        const t = try input.text();
+        defer allocator.free(t);
+        try std.testing.expectEqualStrings("hello world", t);
+    }
+}
+
+test "delete to start" {
+    const allocator = std.testing.allocator;
+
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+
+    try input.insertSlice("hello world");
+    // Move cursor to middle (after "hello")
+    for (0..6) |_| input.moveLeft();
+
+    input.deleteToStart();
+    {
+        const t = try input.text();
+        defer allocator.free(t);
+        try std.testing.expectEqualStrings(" world", t);
+    }
+}
+
+test "delete word after" {
+    const allocator = std.testing.allocator;
+
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+
+    try input.insertSlice("hello world");
+    input.moveToStart();
+
+    input.deleteWordAfter();
+    {
+        const t = try input.text();
+        defer allocator.free(t);
+        try std.testing.expectEqualStrings(" world", t);
+    }
+}
+
+test "move word backward and forward" {
+    const allocator = std.testing.allocator;
+
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+
+    try input.insertSlice("one two three");
+    // Cursor at end
+
+    input.moveWordBackward();
+    // Cursor should be before "three"
+    try input.insertSlice("X");
+    {
+        const t = try input.text();
+        defer allocator.free(t);
+        try std.testing.expectEqualStrings("one two Xthree", t);
+    }
+
+    // Move back to undo the X insertion effect, then test forward
+    input.deleteBackward(); // remove X
+    input.moveToStart();
+    input.moveWordForward();
+    // Cursor should be after "one"
+    try input.insertSlice("Y");
+    {
+        const t = try input.text();
+        defer allocator.free(t);
+        try std.testing.expectEqualStrings("oneY two three", t);
+    }
+}
+
+test "grapheme-aware cursor movement" {
+    const allocator = std.testing.allocator;
+
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+
+    // Insert multi-byte characters: "café"
+    try input.insertSlice("caf\xc3\xa9");
+
+    {
+        const t = try input.text();
+        defer allocator.free(t);
+        try std.testing.expectEqualStrings("caf\xc3\xa9", t);
+    }
+
+    // moveLeft should move over the whole 'é' grapheme, not just one byte
+    input.moveLeft();
+    try input.insertSlice("X");
+    {
+        const t = try input.text();
+        defer allocator.free(t);
+        try std.testing.expectEqualStrings("cafX\xc3\xa9", t);
+    }
+
+    // deleteBackward should remove the whole 'X'
+    input.deleteBackward();
+    // deleteForward should remove the whole 'é'
+    input.deleteForward();
+    {
+        const t = try input.text();
+        defer allocator.free(t);
+        try std.testing.expectEqualStrings("caf", t);
+    }
+}
+
+// Rendering Tests
 
 test "render - basic text with cursor at end" {
     const allocator = std.testing.allocator;
@@ -273,7 +509,6 @@ test "render - with scrolling" {
     defer input.deinit();
 
     try input.insertSlice("abcdefghijklmnop");
-    input.updateScrollOffset(5);
 
     var screen = try tui_test.createScreen(allocator, 5, 1);
     defer screen.deinit(allocator);
@@ -281,12 +516,76 @@ test "render - with scrolling" {
     const win = tui_test.windowFromScreen(&screen);
     input.render(win, .{});
 
-    const ascii = try tui_test.screenToAscii(allocator, &screen, 5, 1);
-    defer allocator.free(ascii);
+    // With 16 chars and cursor at end in a 5-wide window, scroll kicks in
+    try std.testing.expect(input.scroll_offset > 0);
 
-    // With scroll, we should see the end portion
-    const visible = input.visibleText(5);
-    try std.testing.expect(visible.len <= 5);
+    // Cursor (reversed space at end) should be at the last visible position
+    const cursor_cell = screen.readCell(4, 0).?;
+    try std.testing.expect(cursor_cell.style.reverse);
+}
+
+test "render - wide characters with scrolling" {
+    const allocator = std.testing.allocator;
+
+    var input = TextInput.init(allocator);
+    defer input.deinit();
+
+    // 4 CJK chars (8 display cols) + 4 ASCII (4 display cols) = 12 total
+    try input.insertSlice("你好世界abcd");
+
+    // Use width 7 so the scroll boundary (offset 6) aligns with a
+    // wide-char edge, giving a clean layout for assertions.
+    var screen = try tui_test.createScreen(allocator, 7, 1);
+    defer screen.deinit(allocator);
+
+    const win = tui_test.windowFromScreen(&screen);
+    input.render(win, .{});
+
+    // Cursor at display col 12 in a 7-wide window — scroll must kick in
+    try std.testing.expect(input.scroll_offset > 0);
+
+    // Cursor (reversed space at end-of-input) at last visible column
+    const cursor_cell = screen.readCell(6, 0).?;
+    try std.testing.expect(cursor_cell.style.reverse);
+
+    // Verify no wide character is split: CJK cells must have width 2
+    for (0..7) |col| {
+        const cell = screen.readCell(@intCast(col), 0).?;
+        if (cell.char.grapheme.len >= 3) {
+            try std.testing.expectEqual(@as(u8, 2), cell.char.width);
+        }
+    }
+
+    // Move cursor left into the CJK region and re-render.
+    // 5 left moves: d, c, b, a, 界 — cursor lands on 界
+    for (0..5) |_| input.moveLeft();
+
+    var screen2 = try tui_test.createScreen(allocator, 7, 1);
+    defer screen2.deinit(allocator);
+
+    const win2 = tui_test.windowFromScreen(&screen2);
+    input.render(win2, .{});
+
+    // Find the cursor cell and verify it covers a wide character
+    var found_cursor = false;
+    for (0..7) |col| {
+        const cell = screen2.readCell(@intCast(col), 0).?;
+        if (cell.style.reverse) {
+            found_cursor = true;
+            // Cursor is on 界 — must be full-width
+            try std.testing.expectEqual(@as(u8, 2), cell.char.width);
+            break;
+        }
+    }
+    try std.testing.expect(found_cursor);
+
+    // Verify no wide char is split in the re-rendered screen
+    for (0..7) |col| {
+        const cell = screen2.readCell(@intCast(col), 0).?;
+        if (cell.char.grapheme.len >= 3) {
+            try std.testing.expectEqual(@as(u8, 2), cell.char.width);
+        }
+    }
 }
 
 test "render - empty input shows cursor" {
