@@ -220,6 +220,33 @@ fn sessionExists(allocator: std.mem.Allocator, name: []const u8) bool {
     return true;
 }
 
+const ResolveMode = enum { create_only, attach_only, attach_or_create };
+
+/// Validates `name`, checks whether a session with that name exists on disk,
+/// and populates `result.attach_session` or `result.new_session_name` based
+/// on `mode`. Returns `error.SessionAlreadyExists` when `.create_only` meets
+/// an existing session, `error.SessionNotFound` when `.attach_only` meets a
+/// missing one, or a validation error for malformed names.
+fn resolveSessionTarget(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    mode: ResolveMode,
+    result: *ParseResult,
+) !void {
+    try validateSessionName(name);
+    const exists = sessionExists(allocator, name);
+    switch (mode) {
+        .create_only => if (exists) return error.SessionAlreadyExists,
+        .attach_only => if (!exists) return error.SessionNotFound,
+        .attach_or_create => {},
+    }
+    if (exists) {
+        result.attach_session = try allocator.dupe(u8, name);
+    } else {
+        result.new_session_name = try allocator.dupe(u8, name);
+    }
+}
+
 fn printSessionNameError(msg: []const u8) void {
     std.fs.File.stderr().writeAll(msg) catch {};
 }
