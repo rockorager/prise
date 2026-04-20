@@ -327,24 +327,33 @@ fn handleSessionCommand(allocator: std.mem.Allocator, args: *std.process.ArgIter
         try printSessionHelp();
         return null;
     } else if (std.mem.eql(u8, subcmd, "attach")) {
-        const session = if (args.next()) |s|
-            try allocator.dupe(u8, s)
-        else
-            findMostRecentSession(allocator) catch |err| {
+        if (args.next()) |name| {
+            var result: ParseResult = .{};
+            resolveSessionTarget(allocator, name, .attach_only, &result) catch |err| {
+                switch (err) {
+                    error.SessionNotFound => {
+                        var buf: [256]u8 = undefined;
+                        const msg = std.fmt.bufPrint(&buf, "Session '{s}' not found\n", .{name}) catch return null;
+                        std.fs.File.stderr().writeAll(msg) catch {};
+                    },
+                    error.SessionNameEmpty, error.SessionNameTooLong, error.SessionNameInvalid => {
+                        printSessionNameValidationError(err);
+                    },
+                    else => return err,
+                }
+                return null;
+            };
+            return result;
+        } else {
+            const session = findMostRecentSession(allocator) catch |err| {
                 if (err == error.NoSessionsFound) {
                     std.fs.File.stderr().writeAll("No sessions found\n") catch {};
                     return null;
                 }
                 return err;
             };
-        if (!sessionExists(allocator, session)) {
-            var buf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "Session '{s}' not found\n", .{session}) catch return null;
-            std.fs.File.stderr().writeAll(msg) catch {};
-            allocator.free(session);
-            return null;
+            return .{ .attach_session = session };
         }
-        return .{ .attach_session = session };
     } else if (std.mem.eql(u8, subcmd, "list")) {
         try listSessions(allocator);
         return null;
