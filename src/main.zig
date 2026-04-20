@@ -169,17 +169,32 @@ fn parseArgs(allocator: std.mem.Allocator, socket_path: []const u8) !?ParseResul
                 }
                 return err;
             };
+        } else if (std.mem.eql(u8, arg, "-S") or std.mem.eql(u8, arg, "--session-or-attach")) {
+            const name = args.next() orelse {
+                printSessionNameError("error: -S/--session-or-attach requires a session name\n");
+                return error.MissingArgument;
+            };
+            resolveSessionTarget(allocator, name, .attach_or_create, &result) catch |err| {
+                switch (err) {
+                    error.SessionNameEmpty, error.SessionNameTooLong, error.SessionNameInvalid => {
+                        printSessionNameValidationError(err);
+                    },
+                    else => {},
+                }
+                return err;
+            };
         } else if (std.mem.eql(u8, arg, "serve")) {
             initLogFile("server.log");
             try server.startServer(allocator, socket_path);
             return null;
         } else if (std.mem.eql(u8, arg, "session")) {
-            if (result.new_session_name != null) {
-                printSessionNameError("error: -s/--session cannot be used with 'session attach'\n");
+            if (result.new_session_name != null or result.attach_session != null) {
+                printSessionNameError("error: -s/-S cannot be combined with 'session' subcommand\n");
                 return error.ConflictingOptions;
             }
             const session_result = try handleSessionCommand(allocator, &args) orelse return null;
             result.attach_session = session_result.attach_session;
+            result.new_session_name = session_result.new_session_name;
             return result;
         } else if (std.mem.eql(u8, arg, "pty")) {
             _ = try handlePtyCommand(allocator, &args, socket_path);
