@@ -298,9 +298,10 @@ fn printHelp() !void {
         \\  pty        Manage PTYs (list, kill)
         \\
         \\Options:
-        \\  -s, --session <name>  Create a new session with the specified name
-        \\  -h, --help            Show this help message
-        \\  -v, --version         Show version
+        \\  -s, --session <name>           Create a new session with the specified name
+        \\  -S, --session-or-attach <name> Attach to a session, creating it if missing
+        \\  -h, --help                     Show this help message
+        \\  -v, --version                  Show version
         \\
         \\Run 'prise <command> --help' for more information on a command.
         \\
@@ -321,7 +322,8 @@ fn printSessionHelpTo(file: std.fs.File) !void {
         \\Usage: prise session <command> [args]
         \\
         \\Commands:
-        \\  attach [name]            Attach to a session (most recent if no name given)
+        \\  attach [name] [--create] Attach to a session (most recent if no name given).
+        \\                           With --create/-c, creates the session if missing.
         \\  list                     List all sessions
         \\  rename <old> <new>       Rename a session
         \\  delete <name>            Delete a session
