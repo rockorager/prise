@@ -138,7 +138,10 @@ fn parseArgs(allocator: std.mem.Allocator, socket_path: []const u8) !?ParseResul
     _ = args.skip();
 
     var result: ParseResult = .{};
-    errdefer if (result.new_session_name) |s| allocator.free(s);
+    errdefer {
+        if (result.new_session_name) |s| allocator.free(s);
+        if (result.attach_session) |s| allocator.free(s);
+    }
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v")) {
@@ -152,28 +155,46 @@ fn parseArgs(allocator: std.mem.Allocator, socket_path: []const u8) !?ParseResul
                 printSessionNameError("error: -s/--session requires a session name\n");
                 return error.MissingArgument;
             };
-            validateSessionName(name) catch |err| {
-                printSessionNameValidationError(err);
+            resolveSessionTarget(allocator, name, .create_only, &result) catch |err| {
+                switch (err) {
+                    error.SessionAlreadyExists => {
+                        var err_buf: [128]u8 = undefined;
+                        const msg = std.fmt.bufPrint(&err_buf, "error: session '{s}' already exists\n", .{name}) catch return err;
+                        printSessionNameError(msg);
+                    },
+                    error.SessionNameEmpty, error.SessionNameTooLong, error.SessionNameInvalid => {
+                        printSessionNameValidationError(err);
+                    },
+                    else => {},
+                }
                 return err;
             };
-            if (sessionExists(allocator, name)) {
-                var err_buf: [128]u8 = undefined;
-                const msg = std.fmt.bufPrint(&err_buf, "error: session '{s}' already exists\n", .{name}) catch return error.SessionAlreadyExists;
-                printSessionNameError(msg);
-                return error.SessionAlreadyExists;
-            }
-            result.new_session_name = try allocator.dupe(u8, name);
+        } else if (std.mem.eql(u8, arg, "-S") or std.mem.eql(u8, arg, "--session-or-attach")) {
+            const name = args.next() orelse {
+                printSessionNameError("error: -S/--session-or-attach requires a session name\n");
+                return error.MissingArgument;
+            };
+            resolveSessionTarget(allocator, name, .attach_or_create, &result) catch |err| {
+                switch (err) {
+                    error.SessionNameEmpty, error.SessionNameTooLong, error.SessionNameInvalid => {
+                        printSessionNameValidationError(err);
+                    },
+                    else => {},
+                }
+                return err;
+            };
         } else if (std.mem.eql(u8, arg, "serve")) {
             initLogFile("server.log");
             try server.startServer(allocator, socket_path);
             return null;
         } else if (std.mem.eql(u8, arg, "session")) {
-            if (result.new_session_name != null) {
-                printSessionNameError("error: -s/--session cannot be used with 'session attach'\n");
+            if (result.new_session_name != null or result.attach_session != null) {
+                printSessionNameError("error: -s/-S cannot be combined with 'session' subcommand\n");
                 return error.ConflictingOptions;
             }
             const session_result = try handleSessionCommand(allocator, &args) orelse return null;
             result.attach_session = session_result.attach_session;
+            result.new_session_name = session_result.new_session_name;
             return result;
         } else if (std.mem.eql(u8, arg, "pty")) {
             _ = try handlePtyCommand(allocator, &args, socket_path);
@@ -207,17 +228,53 @@ fn validateSessionName(name: []const u8) !void {
     }
 }
 
+fn sessionExistsInDir(dir: std.fs.Dir, name: []const u8) bool {
+    var filename_buf: [256]u8 = undefined;
+    const filename = std.fmt.bufPrint(&filename_buf, "{s}.json", .{name}) catch return false;
+    dir.access(filename, .{}) catch return false;
+    return true;
+}
+
+/// Test-only override for the sessions directory. When non-null, sessionExists
+/// consults this directory instead of resolving the real one from $HOME.
+var sessions_dir_override: ?std.fs.Dir = null;
+
 fn sessionExists(allocator: std.mem.Allocator, name: []const u8) bool {
+    if (sessions_dir_override) |dir| {
+        return sessionExistsInDir(dir, name);
+    }
     const result = getSessionsDir(allocator) catch return false;
     defer allocator.free(result.path);
     var dir = result.dir;
     defer dir.close();
+    return sessionExistsInDir(dir, name);
+}
 
-    var filename_buf: [256]u8 = undefined;
-    const filename = std.fmt.bufPrint(&filename_buf, "{s}.json", .{name}) catch return false;
+const ResolveMode = enum { create_only, attach_only, attach_or_create };
 
-    dir.access(filename, .{}) catch return false;
-    return true;
+/// Validates `name`, checks whether a session with that name exists on disk,
+/// and populates `result.attach_session` or `result.new_session_name` based
+/// on `mode`. Returns `error.SessionAlreadyExists` when `.create_only` meets
+/// an existing session, `error.SessionNotFound` when `.attach_only` meets a
+/// missing one, or a validation error for malformed names.
+fn resolveSessionTarget(
+    allocator: std.mem.Allocator,
+    name: []const u8,
+    mode: ResolveMode,
+    result: *ParseResult,
+) !void {
+    try validateSessionName(name);
+    const exists = sessionExists(allocator, name);
+    switch (mode) {
+        .create_only => if (exists) return error.SessionAlreadyExists,
+        .attach_only => if (!exists) return error.SessionNotFound,
+        .attach_or_create => {},
+    }
+    if (exists) {
+        result.attach_session = try allocator.dupe(u8, name);
+    } else {
+        result.new_session_name = try allocator.dupe(u8, name);
+    }
 }
 
 fn printSessionNameError(msg: []const u8) void {
@@ -250,9 +307,10 @@ fn printHelp() !void {
         \\  pty        Manage PTYs (list, kill)
         \\
         \\Options:
-        \\  -s, --session <name>  Create a new session with the specified name
-        \\  -h, --help            Show this help message
-        \\  -v, --version         Show version
+        \\  -s, --session <name>           Create a new session with the specified name
+        \\  -S, --session-or-attach <name> Attach to a session, creating it if missing
+        \\  -h, --help                     Show this help message
+        \\  -v, --version                  Show version
         \\
         \\Run 'prise <command> --help' for more information on a command.
         \\
@@ -273,7 +331,8 @@ fn printSessionHelpTo(file: std.fs.File) !void {
         \\Usage: prise session <command> [args]
         \\
         \\Commands:
-        \\  attach [name]            Attach to a session (most recent if no name given)
+        \\  attach [name] [--create] Attach to a session (most recent if no name given).
+        \\                           With --create/-c, creates the session if missing.
         \\  list                     List all sessions
         \\  rename <old> <new>       Rename a session
         \\  delete <name>            Delete a session
@@ -294,24 +353,47 @@ fn handleSessionCommand(allocator: std.mem.Allocator, args: *std.process.ArgIter
         try printSessionHelp();
         return null;
     } else if (std.mem.eql(u8, subcmd, "attach")) {
-        const session = if (args.next()) |s|
-            try allocator.dupe(u8, s)
-        else
-            findMostRecentSession(allocator) catch |err| {
+        var create_flag = false;
+        var name: ?[]const u8 = null;
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--create") or std.mem.eql(u8, arg, "-c")) {
+                create_flag = true;
+            } else if (name == null) {
+                name = arg;
+            }
+        }
+
+        if (name) |n| {
+            var result: ParseResult = .{};
+            const mode: ResolveMode = if (create_flag) .attach_or_create else .attach_only;
+            resolveSessionTarget(allocator, n, mode, &result) catch |err| {
+                switch (err) {
+                    error.SessionNotFound => {
+                        var buf: [256]u8 = undefined;
+                        const msg = std.fmt.bufPrint(&buf, "Session '{s}' not found\n", .{n}) catch return null;
+                        std.fs.File.stderr().writeAll(msg) catch {};
+                    },
+                    error.SessionNameEmpty, error.SessionNameTooLong, error.SessionNameInvalid => {
+                        printSessionNameValidationError(err);
+                    },
+                    else => return err,
+                }
+                return null;
+            };
+            return result;
+        } else if (create_flag) {
+            std.fs.File.stderr().writeAll("error: --create/-c requires a session name\n") catch {};
+            return error.MissingArgument;
+        } else {
+            const session = findMostRecentSession(allocator) catch |err| {
                 if (err == error.NoSessionsFound) {
                     std.fs.File.stderr().writeAll("No sessions found\n") catch {};
                     return null;
                 }
                 return err;
             };
-        if (!sessionExists(allocator, session)) {
-            var buf: [256]u8 = undefined;
-            const msg = std.fmt.bufPrint(&buf, "Session '{s}' not found\n", .{session}) catch return null;
-            std.fs.File.stderr().writeAll(msg) catch {};
-            allocator.free(session);
-            return null;
+            return .{ .attach_session = session };
         }
-        return .{ .attach_session = session };
     } else if (std.mem.eql(u8, subcmd, "list")) {
         try listSessions(allocator);
         return null;
@@ -800,6 +882,150 @@ fn findMostRecentSession(allocator: std.mem.Allocator) ![]const u8 {
 
     log.err("No session files found", .{});
     return error.NoSessionsFound;
+}
+
+const testing = std.testing;
+
+/// Prepares a tmp sessions dir, sets the override, and touches `present_names`
+/// as `<name>.json` inside it. Caller must defer `tmp.cleanup()` and reset
+/// `sessions_dir_override = null` at end of test.
+fn setupSessionsTmpDir(tmp: *std.testing.TmpDir, present_names: []const []const u8) !void {
+    for (present_names) |n| {
+        var buf: [256]u8 = undefined;
+        const filename = try std.fmt.bufPrint(&buf, "{s}.json", .{n});
+        const file = try tmp.dir.createFile(filename, .{});
+        file.close();
+    }
+    sessions_dir_override = tmp.dir;
+}
+
+test "resolveSessionTarget: create_only + missing -> new_session_name" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try setupSessionsTmpDir(&tmp, &.{});
+    defer sessions_dir_override = null;
+
+    var result: ParseResult = .{};
+    defer if (result.new_session_name) |s| testing.allocator.free(s);
+    defer if (result.attach_session) |s| testing.allocator.free(s);
+
+    try resolveSessionTarget(testing.allocator, "alpha", .create_only, &result);
+    try testing.expect(result.attach_session == null);
+    try testing.expectEqualStrings("alpha", result.new_session_name.?);
+}
+
+test "resolveSessionTarget: create_only + existing -> SessionAlreadyExists" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try setupSessionsTmpDir(&tmp, &.{"beta"});
+    defer sessions_dir_override = null;
+
+    var result: ParseResult = .{};
+    defer if (result.new_session_name) |s| testing.allocator.free(s);
+    defer if (result.attach_session) |s| testing.allocator.free(s);
+
+    try testing.expectError(
+        error.SessionAlreadyExists,
+        resolveSessionTarget(testing.allocator, "beta", .create_only, &result),
+    );
+    try testing.expect(result.attach_session == null);
+    try testing.expect(result.new_session_name == null);
+}
+
+test "resolveSessionTarget: attach_only + existing -> attach_session" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try setupSessionsTmpDir(&tmp, &.{"gamma"});
+    defer sessions_dir_override = null;
+
+    var result: ParseResult = .{};
+    defer if (result.new_session_name) |s| testing.allocator.free(s);
+    defer if (result.attach_session) |s| testing.allocator.free(s);
+
+    try resolveSessionTarget(testing.allocator, "gamma", .attach_only, &result);
+    try testing.expectEqualStrings("gamma", result.attach_session.?);
+    try testing.expect(result.new_session_name == null);
+}
+
+test "resolveSessionTarget: attach_only + missing -> SessionNotFound" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try setupSessionsTmpDir(&tmp, &.{});
+    defer sessions_dir_override = null;
+
+    var result: ParseResult = .{};
+    defer if (result.new_session_name) |s| testing.allocator.free(s);
+    defer if (result.attach_session) |s| testing.allocator.free(s);
+
+    try testing.expectError(
+        error.SessionNotFound,
+        resolveSessionTarget(testing.allocator, "delta", .attach_only, &result),
+    );
+    try testing.expect(result.attach_session == null);
+    try testing.expect(result.new_session_name == null);
+}
+
+test "resolveSessionTarget: attach_or_create + existing -> attach_session" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try setupSessionsTmpDir(&tmp, &.{"epsilon"});
+    defer sessions_dir_override = null;
+
+    var result: ParseResult = .{};
+    defer if (result.new_session_name) |s| testing.allocator.free(s);
+    defer if (result.attach_session) |s| testing.allocator.free(s);
+
+    try resolveSessionTarget(testing.allocator, "epsilon", .attach_or_create, &result);
+    try testing.expectEqualStrings("epsilon", result.attach_session.?);
+    try testing.expect(result.new_session_name == null);
+}
+
+test "resolveSessionTarget: attach_or_create + missing -> new_session_name" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try setupSessionsTmpDir(&tmp, &.{});
+    defer sessions_dir_override = null;
+
+    var result: ParseResult = .{};
+    defer if (result.new_session_name) |s| testing.allocator.free(s);
+    defer if (result.attach_session) |s| testing.allocator.free(s);
+
+    try resolveSessionTarget(testing.allocator, "zeta", .attach_or_create, &result);
+    try testing.expectEqualStrings("zeta", result.new_session_name.?);
+    try testing.expect(result.attach_session == null);
+}
+
+test "resolveSessionTarget: invalid name returns validation error (any mode)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try setupSessionsTmpDir(&tmp, &.{});
+    defer sessions_dir_override = null;
+
+    var result: ParseResult = .{};
+    defer if (result.new_session_name) |s| testing.allocator.free(s);
+    defer if (result.attach_session) |s| testing.allocator.free(s);
+
+    try testing.expectError(
+        error.SessionNameEmpty,
+        resolveSessionTarget(testing.allocator, "", .create_only, &result),
+    );
+    try testing.expectError(
+        error.SessionNameInvalid,
+        resolveSessionTarget(testing.allocator, "bad name", .attach_only, &result),
+    );
+    try testing.expectError(
+        error.SessionNameInvalid,
+        resolveSessionTarget(testing.allocator, "has/slash", .attach_or_create, &result),
+    );
+
+    const too_long = "x" ** 65;
+    try testing.expectError(
+        error.SessionNameTooLong,
+        resolveSessionTarget(testing.allocator, too_long, .create_only, &result),
+    );
+
+    try testing.expect(result.attach_session == null);
+    try testing.expect(result.new_session_name == null);
 }
 
 test {
