@@ -228,17 +228,26 @@ fn validateSessionName(name: []const u8) !void {
     }
 }
 
+fn sessionExistsInDir(dir: std.fs.Dir, name: []const u8) bool {
+    var filename_buf: [256]u8 = undefined;
+    const filename = std.fmt.bufPrint(&filename_buf, "{s}.json", .{name}) catch return false;
+    dir.access(filename, .{}) catch return false;
+    return true;
+}
+
+/// Test-only override for the sessions directory. When non-null, sessionExists
+/// consults this directory instead of resolving the real one from $HOME.
+var sessions_dir_override: ?std.fs.Dir = null;
+
 fn sessionExists(allocator: std.mem.Allocator, name: []const u8) bool {
+    if (sessions_dir_override) |dir| {
+        return sessionExistsInDir(dir, name);
+    }
     const result = getSessionsDir(allocator) catch return false;
     defer allocator.free(result.path);
     var dir = result.dir;
     defer dir.close();
-
-    var filename_buf: [256]u8 = undefined;
-    const filename = std.fmt.bufPrint(&filename_buf, "{s}.json", .{name}) catch return false;
-
-    dir.access(filename, .{}) catch return false;
-    return true;
+    return sessionExistsInDir(dir, name);
 }
 
 const ResolveMode = enum { create_only, attach_only, attach_or_create };
@@ -873,6 +882,150 @@ fn findMostRecentSession(allocator: std.mem.Allocator) ![]const u8 {
 
     log.err("No session files found", .{});
     return error.NoSessionsFound;
+}
+
+const testing = std.testing;
+
+/// Prepares a tmp sessions dir, sets the override, and touches `present_names`
+/// as `<name>.json` inside it. Caller must defer `tmp.cleanup()` and reset
+/// `sessions_dir_override = null` at end of test.
+fn setupSessionsTmpDir(tmp: *std.testing.TmpDir, present_names: []const []const u8) !void {
+    for (present_names) |n| {
+        var buf: [256]u8 = undefined;
+        const filename = try std.fmt.bufPrint(&buf, "{s}.json", .{n});
+        const file = try tmp.dir.createFile(filename, .{});
+        file.close();
+    }
+    sessions_dir_override = tmp.dir;
+}
+
+test "resolveSessionTarget: create_only + missing -> new_session_name" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try setupSessionsTmpDir(&tmp, &.{});
+    defer sessions_dir_override = null;
+
+    var result: ParseResult = .{};
+    defer if (result.new_session_name) |s| testing.allocator.free(s);
+    defer if (result.attach_session) |s| testing.allocator.free(s);
+
+    try resolveSessionTarget(testing.allocator, "alpha", .create_only, &result);
+    try testing.expect(result.attach_session == null);
+    try testing.expectEqualStrings("alpha", result.new_session_name.?);
+}
+
+test "resolveSessionTarget: create_only + existing -> SessionAlreadyExists" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try setupSessionsTmpDir(&tmp, &.{"beta"});
+    defer sessions_dir_override = null;
+
+    var result: ParseResult = .{};
+    defer if (result.new_session_name) |s| testing.allocator.free(s);
+    defer if (result.attach_session) |s| testing.allocator.free(s);
+
+    try testing.expectError(
+        error.SessionAlreadyExists,
+        resolveSessionTarget(testing.allocator, "beta", .create_only, &result),
+    );
+    try testing.expect(result.attach_session == null);
+    try testing.expect(result.new_session_name == null);
+}
+
+test "resolveSessionTarget: attach_only + existing -> attach_session" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try setupSessionsTmpDir(&tmp, &.{"gamma"});
+    defer sessions_dir_override = null;
+
+    var result: ParseResult = .{};
+    defer if (result.new_session_name) |s| testing.allocator.free(s);
+    defer if (result.attach_session) |s| testing.allocator.free(s);
+
+    try resolveSessionTarget(testing.allocator, "gamma", .attach_only, &result);
+    try testing.expectEqualStrings("gamma", result.attach_session.?);
+    try testing.expect(result.new_session_name == null);
+}
+
+test "resolveSessionTarget: attach_only + missing -> SessionNotFound" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try setupSessionsTmpDir(&tmp, &.{});
+    defer sessions_dir_override = null;
+
+    var result: ParseResult = .{};
+    defer if (result.new_session_name) |s| testing.allocator.free(s);
+    defer if (result.attach_session) |s| testing.allocator.free(s);
+
+    try testing.expectError(
+        error.SessionNotFound,
+        resolveSessionTarget(testing.allocator, "delta", .attach_only, &result),
+    );
+    try testing.expect(result.attach_session == null);
+    try testing.expect(result.new_session_name == null);
+}
+
+test "resolveSessionTarget: attach_or_create + existing -> attach_session" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try setupSessionsTmpDir(&tmp, &.{"epsilon"});
+    defer sessions_dir_override = null;
+
+    var result: ParseResult = .{};
+    defer if (result.new_session_name) |s| testing.allocator.free(s);
+    defer if (result.attach_session) |s| testing.allocator.free(s);
+
+    try resolveSessionTarget(testing.allocator, "epsilon", .attach_or_create, &result);
+    try testing.expectEqualStrings("epsilon", result.attach_session.?);
+    try testing.expect(result.new_session_name == null);
+}
+
+test "resolveSessionTarget: attach_or_create + missing -> new_session_name" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try setupSessionsTmpDir(&tmp, &.{});
+    defer sessions_dir_override = null;
+
+    var result: ParseResult = .{};
+    defer if (result.new_session_name) |s| testing.allocator.free(s);
+    defer if (result.attach_session) |s| testing.allocator.free(s);
+
+    try resolveSessionTarget(testing.allocator, "zeta", .attach_or_create, &result);
+    try testing.expectEqualStrings("zeta", result.new_session_name.?);
+    try testing.expect(result.attach_session == null);
+}
+
+test "resolveSessionTarget: invalid name returns validation error (any mode)" {
+    var tmp = testing.tmpDir(.{});
+    defer tmp.cleanup();
+    try setupSessionsTmpDir(&tmp, &.{});
+    defer sessions_dir_override = null;
+
+    var result: ParseResult = .{};
+    defer if (result.new_session_name) |s| testing.allocator.free(s);
+    defer if (result.attach_session) |s| testing.allocator.free(s);
+
+    try testing.expectError(
+        error.SessionNameEmpty,
+        resolveSessionTarget(testing.allocator, "", .create_only, &result),
+    );
+    try testing.expectError(
+        error.SessionNameInvalid,
+        resolveSessionTarget(testing.allocator, "bad name", .attach_only, &result),
+    );
+    try testing.expectError(
+        error.SessionNameInvalid,
+        resolveSessionTarget(testing.allocator, "has/slash", .attach_or_create, &result),
+    );
+
+    const too_long = "x" ** 65;
+    try testing.expectError(
+        error.SessionNameTooLong,
+        resolveSessionTarget(testing.allocator, too_long, .create_only, &result),
+    );
+
+    try testing.expect(result.attach_session == null);
+    try testing.expect(result.new_session_name == null);
 }
 
 test {
