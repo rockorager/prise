@@ -342,13 +342,24 @@ fn handleSessionCommand(allocator: std.mem.Allocator, args: *std.process.ArgIter
         try printSessionHelp();
         return null;
     } else if (std.mem.eql(u8, subcmd, "attach")) {
-        if (args.next()) |name| {
+        var create_flag = false;
+        var name: ?[]const u8 = null;
+        while (args.next()) |arg| {
+            if (std.mem.eql(u8, arg, "--create") or std.mem.eql(u8, arg, "-c")) {
+                create_flag = true;
+            } else if (name == null) {
+                name = arg;
+            }
+        }
+
+        if (name) |n| {
             var result: ParseResult = .{};
-            resolveSessionTarget(allocator, name, .attach_only, &result) catch |err| {
+            const mode: ResolveMode = if (create_flag) .attach_or_create else .attach_only;
+            resolveSessionTarget(allocator, n, mode, &result) catch |err| {
                 switch (err) {
                     error.SessionNotFound => {
                         var buf: [256]u8 = undefined;
-                        const msg = std.fmt.bufPrint(&buf, "Session '{s}' not found\n", .{name}) catch return null;
+                        const msg = std.fmt.bufPrint(&buf, "Session '{s}' not found\n", .{n}) catch return null;
                         std.fs.File.stderr().writeAll(msg) catch {};
                     },
                     error.SessionNameEmpty, error.SessionNameTooLong, error.SessionNameInvalid => {
@@ -359,6 +370,9 @@ fn handleSessionCommand(allocator: std.mem.Allocator, args: *std.process.ArgIter
                 return null;
             };
             return result;
+        } else if (create_flag) {
+            std.fs.File.stderr().writeAll("error: --create/-c requires a session name\n") catch {};
+            return error.MissingArgument;
         } else {
             const session = findMostRecentSession(allocator) catch |err| {
                 if (err == error.NoSessionsFound) {
