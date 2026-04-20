@@ -138,7 +138,10 @@ fn parseArgs(allocator: std.mem.Allocator, socket_path: []const u8) !?ParseResul
     _ = args.skip();
 
     var result: ParseResult = .{};
-    errdefer if (result.new_session_name) |s| allocator.free(s);
+    errdefer {
+        if (result.new_session_name) |s| allocator.free(s);
+        if (result.attach_session) |s| allocator.free(s);
+    }
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-v")) {
@@ -152,17 +155,20 @@ fn parseArgs(allocator: std.mem.Allocator, socket_path: []const u8) !?ParseResul
                 printSessionNameError("error: -s/--session requires a session name\n");
                 return error.MissingArgument;
             };
-            validateSessionName(name) catch |err| {
-                printSessionNameValidationError(err);
+            resolveSessionTarget(allocator, name, .create_only, &result) catch |err| {
+                switch (err) {
+                    error.SessionAlreadyExists => {
+                        var err_buf: [128]u8 = undefined;
+                        const msg = std.fmt.bufPrint(&err_buf, "error: session '{s}' already exists\n", .{name}) catch return err;
+                        printSessionNameError(msg);
+                    },
+                    error.SessionNameEmpty, error.SessionNameTooLong, error.SessionNameInvalid => {
+                        printSessionNameValidationError(err);
+                    },
+                    else => {},
+                }
                 return err;
             };
-            if (sessionExists(allocator, name)) {
-                var err_buf: [128]u8 = undefined;
-                const msg = std.fmt.bufPrint(&err_buf, "error: session '{s}' already exists\n", .{name}) catch return error.SessionAlreadyExists;
-                printSessionNameError(msg);
-                return error.SessionAlreadyExists;
-            }
-            result.new_session_name = try allocator.dupe(u8, name);
         } else if (std.mem.eql(u8, arg, "serve")) {
             initLogFile("server.log");
             try server.startServer(allocator, socket_path);
