@@ -190,3 +190,51 @@ assert(#item == 20, "format_palette_item: correct width")
 item = t.format_palette_item("Very Long Command Name", "C-x", 10)
 -- Width is too small, should use minimum padding of 2
 assert(item == "Very Long Command Name  C-x", "format_palette_item: minimum padding")
+
+-- === last_tab / previous_tab_id tracking ===
+
+-- Setup: three tabs with stable ids distinct from indices
+t.set_state({
+    tabs = {
+        { id = 10, root = mock_pane(101), last_focused_id = 101 },
+        { id = 20, root = mock_pane(102), last_focused_id = 102 },
+        { id = 30, root = mock_pane(103), last_focused_id = 103 },
+    },
+    active_tab = 1,
+})
+
+local st = t.get_state()
+assert(st.previous_tab_id == nil, "last_tab: fresh state has nil previous_tab_id")
+
+-- No previous yet: last_tab_action is a no-op
+t.last_tab_action()
+assert(st.active_tab == 1, "last_tab: no-op when no previous tab")
+
+-- Switch 1 -> 2: previous_tab_id tracks id of former tab (10), not its index (1)
+t.set_active_tab_index(2)
+assert(st.previous_tab_id == 10, "last_tab: previous_tab_id stores tab id, not index")
+
+-- Switch 2 -> 3: updated
+t.set_active_tab_index(3)
+assert(st.previous_tab_id == 20, "last_tab: previous_tab_id updates on each real switch")
+
+-- last_tab toggles back to tab with id 20 (at index 2)
+t.last_tab_action()
+assert(st.active_tab == 2, "last_tab: toggles to most-recently-active tab")
+assert(st.previous_tab_id == 30, "last_tab: toggle records formerly active tab as new previous")
+
+-- Ping-pong: another last_tab returns to tab with id 30 (index 3)
+t.last_tab_action()
+assert(st.active_tab == 3, "last_tab: ping-pong between two tabs works")
+
+-- Stale id: simulate the previous tab being closed. last_tab should be a no-op.
+t.set_state({
+    tabs = {
+        { id = 10, root = mock_pane(101), last_focused_id = 101 },
+        { id = 30, root = mock_pane(103), last_focused_id = 103 },
+    },
+    active_tab = 1,
+    previous_tab_id = 999, -- points at a tab that doesn't exist
+})
+t.last_tab_action()
+assert(st.active_tab == 1, "last_tab: stale previous_tab_id is a no-op")

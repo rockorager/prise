@@ -32,6 +32,7 @@ pub const Action = union(enum) {
     rename_tab,
     next_tab,
     previous_tab,
+    last_tab,
     swap_tab_left,
     swap_tab_right,
 
@@ -119,6 +120,7 @@ pub const Action = union(enum) {
             .rename_tab => "Rename Tab",
             .next_tab => "Next Tab",
             .previous_tab => "Previous Tab",
+            .last_tab => "Last Tab",
             .swap_tab_left => "Swap Tab Left",
             .swap_tab_right => "Swap Tab Right",
             .tab_1 => "Tab 1",

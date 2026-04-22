@@ -405,6 +405,9 @@ Zoom state is remembered per tab and restored when you switch back to that tab.
 **previous_tab**
 :   Switch to the previous tab
 
+**last_tab**
+:   Switch to the most-recently-active tab (tmux-style toggle)
+
 **tab_1** through **tab_10**
 :   Switch to tab by number
 
