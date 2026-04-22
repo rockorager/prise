@@ -107,6 +107,7 @@ local utils = require("utils")
 ---@class State
 ---@field tabs Tab[]
 ---@field active_tab integer
+---@field previous_tab_id? integer
 ---@field next_tab_id integer
 ---@field focused_id? number
 ---@field zoomed_pane_id? number
@@ -380,6 +381,7 @@ local THEME = config.theme
 local state = {
     tabs = {},
     active_tab = 1,
+    previous_tab_id = nil,
     next_tab_id = 1,
     focused_id = nil,
     zoomed_pane_id = nil,
@@ -923,6 +925,9 @@ local function set_active_tab_index(new_index)
         old_tab.last_focused_id = state.focused_id
     end
 
+    -- Track previous active tab by id for last_tab toggle
+    state.previous_tab_id = old_tab and old_tab.id or nil
+
     state.active_tab = new_index
     local new_tab = state.tabs[new_index]
     if not new_tab then
@@ -944,6 +949,21 @@ local function set_active_tab_index(new_index)
     update_pty_focus(old_focused, new_focus_id)
     update_cached_git_branch()
     prise.request_frame()
+end
+
+---Switch to the most-recently-active tab (tmux-style toggle).
+---No-op if there is no recorded previous tab or the tab no longer exists.
+local function last_tab_action()
+    local prev_id = state.previous_tab_id
+    if not prev_id then
+        return
+    end
+    for idx, tab in ipairs(state.tabs) do
+        if tab.id == prev_id then
+            set_active_tab_index(idx)
+            return
+        end
+    end
 end
 
 ---Close the current tab
@@ -1578,6 +1598,7 @@ local function finalize_layout(pending)
     state.floating.height = new_floating_height
     state.floating.visible = new_floating_visible
     state.zoomed_pane_id = nil
+    state.previous_tab_id = nil
 
     -- Set active tab
     state.active_tab = layout.active_tab or 1
@@ -2112,6 +2133,13 @@ local commands = {
         end,
     },
     {
+        name = "Last Tab",
+        shortcut = key_prefix .. " " .. key_prefix,
+        action = function()
+            last_tab_action()
+        end,
+    },
+    {
         name = "Swap Tab Left",
         action = function()
             if state.active_tab > 1 then
@@ -2413,6 +2441,9 @@ action_handlers = {
             local prev_idx = (state.active_tab - 2 + #state.tabs) % #state.tabs + 1
             set_active_tab_index(prev_idx)
         end
+    end,
+    last_tab = function()
+        last_tab_action()
     end,
     swap_tab_left = function()
         if state.active_tab > 1 then
@@ -4422,6 +4453,7 @@ function M.set_state(saved, pty_lookup)
             state.next_tab_id = tab_id + 1
             state.focused_id = saved.focused_id
             state.next_split_id = saved.next_split_id or 1
+            state.previous_tab_id = nil
         end
     else
         -- New format: restore tabs
@@ -4442,6 +4474,7 @@ function M.set_state(saved, pty_lookup)
         state.next_tab_id = saved.next_tab_id or (#state.tabs + 1)
         state.focused_id = saved.focused_id
         state.next_split_id = saved.next_split_id or 1
+        state.previous_tab_id = nil
 
         -- Restore floating pane settings
         if saved.floating_settings then
@@ -4485,9 +4518,11 @@ M._test = {
     close_tab = close_tab,
     remove_pane_by_id = remove_pane_by_id,
     set_active_tab_index = set_active_tab_index,
+    last_tab_action = last_tab_action,
     set_state = function(test_state)
         state.tabs = test_state.tabs or {}
         state.active_tab = test_state.active_tab or 1
+        state.previous_tab_id = test_state.previous_tab_id
         state.next_tab_id = test_state.next_tab_id or (#state.tabs + 1) -- state.tabs already updated above
         state.focused_id = test_state.focused_id
         state.zoomed_pane_id = test_state.zoomed_pane_id
